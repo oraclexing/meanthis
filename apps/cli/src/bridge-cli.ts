@@ -13,12 +13,18 @@ import { loadOrCreateLocalBridgeAgentToken } from "./local-bridge-agent-token.js
 import { loadLocalBridgeOwnerIdentity } from "./local-bridge-owner.js";
 import { approveHttpLocalBridgeConnectionRequest } from "./local-bridge-mcp.js";
 import type { LocalBridgeConnectionApproval } from "./local-bridge.js";
+import {
+  createMeanThisMcpDescriptor,
+  createMeanThisMcpHostSetup,
+  MEANTHIS_MCP_REGISTRATION_NAME,
+  type MeanThisMcpHost,
+} from "./mcp-host-config.js";
 
-const REGISTRATION_NAME = "ui-attach";
+const REGISTRATION_NAME = MEANTHIS_MCP_REGISTRATION_NAME;
 const PROCESS_TIMEOUT_MS = 10_000;
 const MAX_PROCESS_OUTPUT_BYTES = 1_048_576;
 
-type BridgeCommand = "approve" | "doctor" | "install" | "uninstall";
+type BridgeCommand = "approve" | "config" | "doctor" | "install" | "uninstall";
 type RegistrationStatus = "current" | "drifted" | "missing" | "unavailable" | "error";
 export type LoopbackProbeStatus = "ready" | "not_running" | "unexpected";
 
@@ -55,6 +61,7 @@ export interface CodexConfigBackup {
 
 interface ParsedBridgeArguments {
   command: BridgeCommand;
+  host: MeanThisMcpHost | null;
   dryRun: boolean;
   requestId: string | null;
   approvalMode: LocalBridgeApprovalMode | null;
@@ -106,6 +113,9 @@ export async function runBridgeCli(
     return writeError(io, 2, "INVALID_ARGUMENTS", "Invalid bridge command arguments.");
   }
 
+  if (parsed.command === "config") {
+    return runConfig(io, dependencies, parsed.host!);
+  }
   if (parsed.command === "doctor") {
     return runDoctor(io, dependencies);
   }
@@ -119,23 +129,27 @@ export async function runBridgeCli(
     );
   }
   if (parsed.command === "install") {
+    if (parsed.host !== "codex") return writeHostInstallNotAutomated(io, parsed.host!);
     return runInstall(io, dependencies, parsed.dryRun);
   }
+  if (parsed.host !== "codex") return writeHostInstallNotAutomated(io, parsed.host!);
   return runUninstall(io, dependencies, parsed.dryRun);
 }
 
 export function renderBridgeHelp(): string {
   return [
-    "MeanThis local-agent bridge setup",
+    "MeanThis host-neutral MCP companion setup",
     "",
     "Usage:",
     "  meanthis bridge approve --request <uuid> --mode <ask|browser_session> --key <base64url> --json",
+    "  meanthis bridge config --host <codex|claude-code|vscode|cursor> --json",
     "  meanthis bridge doctor --json",
-    "  meanthis bridge install --codex [--dry-run] --json",
-    "  meanthis bridge uninstall --codex [--dry-run] --json",
+    "  meanthis bridge install --host codex [--dry-run] --json",
+    "  meanthis bridge uninstall --host codex [--dry-run] --json",
     "",
     "Commands:",
     "  approve    Approve one browser-created connection request through the authenticated owner.",
+    "  config     Generate a host command or JSON configuration from one shared stdio descriptor.",
     "  doctor     Check the built MCP entry, Codex registration, and loopback runtime.",
     "  install    Add the exact ui-attach stdio MCP registration through Codex CLI.",
     "  uninstall  Remove only the exact registration managed by this checkout.",
@@ -152,6 +166,7 @@ function parseBridgeArguments(args: string[]): ParsedBridgeArguments {
     allowPositionals: true,
     options: {
       codex: { type: "boolean" },
+      host: { type: "string" },
       request: { type: "string" },
       mode: { type: "string" },
       key: { type: "string" },
@@ -164,8 +179,19 @@ function parseBridgeArguments(args: string[]): ParsedBridgeArguments {
   }
   const command = parsed.positionals[0];
   const optionNames = Object.keys(parsed.values);
-  if (command === "doctor") {
-    if (optionNames.some((name) => name !== "json")) throw new Error("Invalid doctor option.");
+  let host: MeanThisMcpHost | null = null;
+  if (command === "config") {
+    if (!isMeanThisMcpHost(parsed.values.host)
+      || optionNames.some((name) => !["host", "json"].includes(name))) {
+      throw new Error("Invalid config option.");
+    }
+    host = parsed.values.host;
+  } else if (command === "doctor") {
+    if ((parsed.values.host !== undefined && parsed.values.host !== "codex")
+      || optionNames.some((name) => !["host", "json"].includes(name))) {
+      throw new Error("Invalid doctor option.");
+    }
+    host = "codex";
   } else if (command === "approve") {
     if (
       typeof parsed.values.request !== "string" ||
@@ -178,13 +204,22 @@ function parseBridgeArguments(args: string[]): ParsedBridgeArguments {
       throw new Error("Invalid approval option.");
     }
   } else {
-    if (parsed.values.codex !== true) throw new Error("Expected --codex.");
-    if (optionNames.some((name) => !["codex", "dry-run", "json"].includes(name))) {
+    const legacyCodex = parsed.values.codex === true;
+    if (legacyCodex && parsed.values.host !== undefined) throw new Error("Choose one host option.");
+    if (legacyCodex) {
+      host = "codex";
+    } else if (isMeanThisMcpHost(parsed.values.host)) {
+      host = parsed.values.host;
+    } else {
+      throw new Error("Expected --host.");
+    }
+    if (optionNames.some((name) => !["codex", "host", "dry-run", "json"].includes(name))) {
       throw new Error("Invalid setup option.");
     }
   }
   return {
     command,
+    host,
     dryRun: parsed.values["dry-run"] === true,
     requestId: typeof parsed.values.request === "string" ? parsed.values.request : null,
     approvalMode: parsed.values.mode === "ask" || parsed.values.mode === "browser_session"
@@ -195,7 +230,41 @@ function parseBridgeArguments(args: string[]): ParsedBridgeArguments {
 }
 
 function isBridgeCommand(value: string): value is BridgeCommand {
-  return value === "approve" || value === "doctor" || value === "install" || value === "uninstall";
+  return value === "approve"
+    || value === "config"
+    || value === "doctor"
+    || value === "install"
+    || value === "uninstall";
+}
+
+function isMeanThisMcpHost(value: unknown): value is MeanThisMcpHost {
+  return value === "codex" || value === "claude-code" || value === "vscode" || value === "cursor";
+}
+
+function runConfig(
+  io: BridgeCliIo,
+  dependencies: BridgeCliDependencies,
+  host: MeanThisMcpHost,
+): number {
+  const descriptor = createMeanThisMcpDescriptor(dependencies.nodePath, dependencies.entryPath);
+  return writeJson(io, {
+    schemaVersion: UI_ATTACH_LOCAL_BRIDGE_SCHEMA_VERSION,
+    kind: "ui-attach.bridge-config",
+    ok: true,
+    data: {
+      descriptor,
+      setup: createMeanThisMcpHostSetup(host, descriptor),
+    },
+  });
+}
+
+function writeHostInstallNotAutomated(io: BridgeCliIo, host: MeanThisMcpHost): number {
+  return writeError(
+    io,
+    2,
+    "HOST_INSTALL_NOT_AUTOMATED",
+    `MeanThis generates ${host} configuration but does not mutate that host; run bridge config instead.`,
+  );
 }
 
 async function runApprove(
@@ -461,10 +530,11 @@ function expectedCommand(dependencies: BridgeCliDependencies): {
   executable: string;
   args: string[];
 } {
-  return {
-    executable: resolve(dependencies.nodePath),
-    args: [resolve(dependencies.entryPath), "mcp"],
-  };
+  const transport = createMeanThisMcpDescriptor(
+    dependencies.nodePath,
+    dependencies.entryPath,
+  ).transport;
+  return { executable: transport.command, args: transport.args };
 }
 
 function samePath(left: string, right: string): boolean {

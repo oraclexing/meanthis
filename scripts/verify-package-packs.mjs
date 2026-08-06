@@ -74,6 +74,7 @@ const companionFiles = [
     "local-bridge-mcp",
     "local-bridge-owner",
     "local-bridge",
+    "mcp-host-config",
   ].flatMap((name) => [
     `dist/${name}.d.ts`,
     `dist/${name}.js`,

@@ -8,7 +8,16 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 describe("public repository contract", () => {
   test("keeps the projected repository product-first and public-safe", async () => {
-    const [english, chinese, privacy, privacyChinese, releasing, releasingChinese, config] = await Promise.all([
+    const [
+      english,
+      chinese,
+      privacy,
+      privacyChinese,
+      releasing,
+      releasingChinese,
+      config,
+      releaseWorkflow,
+    ] = await Promise.all([
       readFile(join(root, "README.md"), "utf8"),
       readFile(join(root, "README_zh.md"), "utf8"),
       readFile(join(root, "PRIVACY.md"), "utf8"),
@@ -16,6 +25,7 @@ describe("public repository contract", () => {
       readFile(join(root, "RELEASING.md"), "utf8"),
       readFile(join(root, "RELEASING_zh.md"), "utf8"),
       readFile(join(root, "_config.yml"), "utf8"),
+      readFile(join(root, ".github", "workflows", "release.yml"), "utf8"),
     ]);
     for (const heading of [
       "## Why MeanThis",
@@ -36,6 +46,25 @@ describe("public repository contract", () => {
     expect(releasing).toContain("normal incremental commits and pull requests");
     expect(releasingChinese).toContain("正常的增量 commit 与 pull request");
     expect(config).toContain('baseurl: "/meanthis"');
+    expect(releaseWorkflow).toContain('tags:\n      - "v*"');
+    expect(releaseWorkflow).toContain("^v([0-9]+\\.[0-9]+\\.[0-9]+)$");
+    expect(releaseWorkflow).toContain("npm run verify:version-alignment");
+    expect(releaseWorkflow).toContain("npm run pack:extension");
+    expect(releaseWorkflow).toContain("git merge-base --is-ancestor HEAD refs/remotes/origin/main");
+    expect(releaseWorkflow).toContain('refs/tags/${GITHUB_REF_NAME}^{commit}');
+    expect(releaseWorkflow).toContain("persist-credentials: false");
+    expect(releaseWorkflow).toContain("contents: write");
+    expect(releaseWorkflow).toContain("git diff --exit-code HEAD --");
+    expect(releaseWorkflow).toContain("--verify-tag");
+    expect(releaseWorkflow).toContain("--draft");
+    expect(releaseWorkflow).not.toContain("--draft=false");
+    expect(releaseWorkflow).not.toContain("--clobber");
+    expect(releaseWorkflow).toContain("$prefix.zip");
+    expect(releaseWorkflow).toContain("$prefix.manifest.json");
+    expect(releaseWorkflow).toContain("$prefix.sha256");
+    for (const line of releaseWorkflow.split("\n").filter((value) => value.includes("uses:"))) {
+      expect(line).toMatch(/uses: [^@\s]+@[0-9a-f]{40}(?:\s+#.*)?$/u);
+    }
     for (const excluded of ["apps", "packages", "scripts", "tools"]) {
       expect(config).toContain(`  - ${excluded}`);
     }

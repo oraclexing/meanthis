@@ -1,0 +1,109 @@
+name: Draft Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extension-release:
+    if: github.repository == 'oraclexing/meanthis'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pin npm
+        run: npm install --global npm@11.16.0
+
+      - name: Verify tag boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Release tag must be vX.Y.Z." >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          package_version="$(node -p "require('./package.json').version")"
+          test "$version" = "$package_version"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          echo "MEANTHIS_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify version alignment
+        run: npm run verify:version-alignment
+
+      - name: Test
+        run: npm test
+
+      - name: Build and verify packages
+        run: npm run build
+
+      - name: Package extension
+        run: npm run pack:extension
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=moderate
+
+      - name: Check tracked changes
+        run: |
+          git diff --exit-code HEAD --
+          git diff --check HEAD
+
+      - name: Stage exact release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/prepare-github-release.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --output "$RUNNER_TEMP/release-assets"
+
+      - name: Create and verify draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "A release already exists for this tag." >&2
+            exit 1
+          fi
+          asset_root="$RUNNER_TEMP/release-assets"
+          prefix="meanthis-extension-mv3-$MEANTHIS_RELEASE_VERSION"
+          gh release create "$GITHUB_REF_NAME" \
+            "$asset_root/$prefix.zip" \
+            "$asset_root/$prefix.manifest.json" \
+            "$asset_root/$prefix.sha256" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "MeanThis $GITHUB_REF_NAME"
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
+          actual_assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n' "$prefix.manifest.json" "$prefix.sha256" "$prefix.zip" | sort)"
+          test "$actual_assets" = "$expected_assets"

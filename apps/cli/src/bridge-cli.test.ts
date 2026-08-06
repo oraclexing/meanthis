@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import {
   runBridgeCli,
@@ -6,8 +7,8 @@ import {
   type CodexProcessResult,
 } from "./bridge-cli";
 
-const NODE_PATH = "C:\\Program Files\\nodejs\\node.exe";
-const ENTRY_PATH = "C:\\fixtures\\ui-attach\\apps\\cli\\dist\\index.js";
+const NODE_PATH = resolve("fixtures", "MeanThis path & (test)", "node executable");
+const ENTRY_PATH = resolve("fixtures", "MeanThis 路径 & (test)", "dist", "index.js");
 const APPROVAL_KEY = "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw";
 
 describe("meanthis bridge CLI", () => {
@@ -95,6 +96,108 @@ describe("meanthis bridge CLI", () => {
       },
     });
     expect(harness.runCodex).toHaveBeenCalledTimes(1);
+  });
+
+  test("generates a host configuration from the shared MCP descriptor", async () => {
+    const harness = createHarness();
+
+    const exitCode = await runBridgeCli(
+      ["config", "--host", "cursor", "--json"],
+      harness.io,
+      harness.dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(harness.io.stdout)).toEqual({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.bridge-config",
+      ok: true,
+      data: {
+        descriptor: {
+          name: "ui-attach",
+          transport: {
+            type: "stdio",
+            command: NODE_PATH,
+            args: [ENTRY_PATH, "mcp"],
+            env: null,
+            cwd: null,
+          },
+        },
+        setup: {
+          host: "cursor",
+          installation: "generated_only",
+          verification: "manual_required",
+          artifact: "config",
+          command: null,
+          config: {
+            mcpServers: {
+              "ui-attach": {
+                command: NODE_PATH,
+                args: [ENTRY_PATH, "mcp"],
+              },
+            },
+          },
+          configPath: "~/.cursor/mcp.json",
+        },
+      },
+    });
+    expect(harness.runCodex).not.toHaveBeenCalled();
+  });
+
+  test("accepts the explicit Codex host while retaining --codex compatibility", async () => {
+    const harness = createHarness();
+
+    expect(await runBridgeCli(
+      ["install", "--host", "codex", "--dry-run", "--json"],
+      harness.io,
+      harness.dependencies,
+    )).toBe(0);
+    const explicitHostOutput = JSON.parse(harness.io.stdout);
+    harness.io.reset();
+    harness.runCodex.mockClear();
+    expect(await runBridgeCli(
+      ["install", "--codex", "--dry-run", "--json"],
+      harness.io,
+      harness.dependencies,
+    )).toBe(0);
+    expect(JSON.parse(harness.io.stdout)).toEqual(explicitHostOutput);
+  });
+
+  test.each([
+    ["install", "claude-code"],
+    ["uninstall", "claude-code"],
+    ["install", "vscode"],
+    ["uninstall", "vscode"],
+    ["install", "cursor"],
+    ["uninstall", "cursor"],
+  ] as const)("does not pretend to automate %s for %s", async (command, host) => {
+    const harness = createHarness();
+
+    const exitCode = await runBridgeCli(
+      [command, "--host", host, "--json"],
+      harness.io,
+      harness.dependencies,
+    );
+
+    expect(exitCode).toBe(2);
+    expect(JSON.parse(harness.io.stderr)).toMatchObject({
+      error: { code: "HOST_INSTALL_NOT_AUTOMATED" },
+    });
+    expect(harness.runCodex).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["config", "--host", "unknown", "--json"],
+    ["install", "--codex", "--host", "codex", "--json"],
+    ["doctor", "--host", "cursor", "--json"],
+  ])("rejects invalid host arguments before starting a process", async (...args) => {
+    const harness = createHarness();
+
+    expect(await runBridgeCli(args, harness.io, harness.dependencies)).toBe(2);
+    expect(JSON.parse(harness.io.stderr)).toMatchObject({
+      error: { code: "INVALID_ARGUMENTS" },
+    });
+    expect(harness.runCodex).not.toHaveBeenCalled();
   });
 
   test("installs once and treats the exact registration as idempotent", async () => {

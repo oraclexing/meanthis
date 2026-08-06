@@ -54,7 +54,15 @@ Depending on the selected disclosure mode and available browser evidence, a hand
 
 This is reference context, not permission to operate the browser, filesystem, source tree, or another service.
 
-## Try the extension locally
+## Install the extension
+
+### Release download (no build required)
+
+After a release is published, download all three matching assets from [GitHub Releases](https://github.com/oraclexing/meanthis/releases): `meanthis-extension-mv3-<version>.zip`, its `.manifest.json`, and `.sha256`. Keep them in one directory and run `sha256sum --check meanthis-extension-mv3-<version>.sha256`; the checksum file verifies both the ZIP and manifest. Then extract the ZIP, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted directory containing `manifest.json`.
+
+This avoids a local Node.js build, but it is still an unpacked developer installation. A signed Chrome Web Store listing is the future true one-click install path; GitHub cannot directly install an ordinary CRX into Chrome.
+
+### Build from source
 
 Requirements: Node.js 22.12+ or 24.x and npm 11.16.0.
 
@@ -80,15 +88,33 @@ npm run demo
 
 The demo does not replace the native extension side panel or its saved-capture flow.
 
-## Optional local Agent bridge
+## Optional host-neutral MCP companion
 
-The public CLI package provides a default-off, read-only local companion and MCP server. From a source checkout:
+The CLI workspace in this public repository provides a default-off, read-only local companion. `meanthis mcp` is one standard stdio MCP server; it is not tied to Codex. Host adapters only describe how each client starts that same executable.
+
+From a source checkout, the Codex adapter can install and read back the exact registration automatically:
 
 ```bash
 npm run setup:codex-bridge
 ```
 
-The bridge binds to `127.0.0.1`, requires an explicit extension connection request and short-lived local approval, and exposes only the approved Agent-safe projection. It does not provide arbitrary selectors or browser-control operations. The primary extension workflow does not require it.
+For other supported hosts, build once and generate their command or JSON configuration without changing the host:
+
+```bash
+npm run build
+node apps/cli/dist/index.js bridge config --host claude-code --json
+node apps/cli/dist/index.js bridge config --host vscode --json
+node apps/cli/dist/index.js bridge config --host cursor --json
+```
+
+| Host | v0.1 setup boundary |
+| --- | --- |
+| Codex | Automated install, exact structured readback, and exact uninstall |
+| Claude Code | Official stdio add command generated; the user runs and verifies it |
+| VS Code | Official `code --add-mcp` command and server JSON generated |
+| Cursor | `mcpServers` JSON generated for `~/.cursor/mcp.json` |
+
+The shared descriptor and all four renderers are contract-tested. We do not claim a real-host canary for a client that was not actually installed and exercised. The bridge binds to `127.0.0.1`, requires an explicit extension connection request and short-lived local approval, and exposes only the approved Agent-safe projection. It does not provide arbitrary selectors or browser-control operations. The primary extension workflow does not require it.
 
 ## Packages
 

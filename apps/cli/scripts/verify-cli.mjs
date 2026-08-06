@@ -22,8 +22,25 @@ async function verifyCli() {
   require(help.status === 0, "Top-level help must exit 0.");
   require(help.stderr === "", "Top-level help must not write stderr.");
   require(
-    help.stdout.includes("meanthis bridge --help") && help.stdout.includes("meanthis mcp"),
+    help.stdout.includes("meanthis bridge --help")
+      && help.stdout.includes("meanthis mcp")
+      && help.stdout.includes("bridge config --host"),
     "Top-level help must expose bridge setup and MCP commands.",
+  );
+
+  const cursorConfig = runCli(["bridge", "config", "--host", "cursor", "--json"]);
+  require(cursorConfig.status === 0, "Cursor configuration generation must exit 0.");
+  require(cursorConfig.stderr === "", "Cursor configuration generation must not write stderr.");
+  const cursorConfigOutput = parseSingleJsonLine(cursorConfig.stdout, "Cursor config stdout");
+  require(
+    cursorConfigOutput.kind === "ui-attach.bridge-config"
+      && cursorConfigOutput.data?.descriptor?.transport?.type === "stdio"
+      && cursorConfigOutput.data?.setup?.host === "cursor"
+      && cursorConfigOutput.data?.setup?.installation === "generated_only"
+      && cursorConfigOutput.data?.setup?.verification === "manual_required"
+      && cursorConfigOutput.data?.setup?.config?.mcpServers?.["ui-attach"]?.command
+        === process.execPath,
+    "Cursor configuration must derive from the shared stdio descriptor.",
   );
 
   const sourceHash = await hashFile(twoAttachmentFixture);

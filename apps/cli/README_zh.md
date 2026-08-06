@@ -8,15 +8,46 @@
 
 需要 Node.js `^22.12.0` 或 `^24.0.0`。
 
+`0.1.0` 仍未发布。从当前 checkout 安装：
+
+```sh
+npm ci
+npm run build
+npm link --workspace @meanthis/cli
+```
+
+Package 发布后的预期等价命令是：
+
 ```sh
 npm install --global @meanthis/cli
 ```
 
-把默认 MCP surface 注册到 Codex：
+## 同一个 MCP server，多个宿主
+
+`meanthis mcp` 在所有 client 中启动的是同一套标准 stdio MCP server。Registration name `ui-attach` 作为协议兼容标识保留，并不表示 server 只支持 Codex。
+
+Codex 是第一个自动化 adapter，因为它的 CLI 支持结构化 registration 读回与精确移除：
 
 ```sh
-meanthis bridge install --codex --json
+meanthis bridge install --host codex --json
 ```
+
+旧命令 `meanthis bridge install --codex --json` 继续兼容。对于其他宿主，MeanThis 只生成官方 command 或 JSON，不会修改宿主：
+
+```sh
+meanthis bridge config --host claude-code --json
+meanthis bridge config --host vscode --json
+meanthis bridge config --host cursor --json
+```
+
+| 宿主 | 生成的 setup | 自动验证 |
+| --- | --- | --- |
+| Codex | `codex mcp add` registration | 有：结构化精确读回 |
+| Claude Code | `claude mcp add --transport stdio` argv | 无：需在 Claude Code 中执行并验证 |
+| VS Code | `code --add-mcp` argv 与 server JSON | 无：需在 VS Code 中执行并验证 |
+| Cursor | 写入 `~/.cursor/mcp.json` 的 `mcpServers` JSON | 无：需合并后在 Cursor 中验证 |
+
+JSON output 同时包含共享的 absolute-path stdio descriptor 与 host-specific setup。Command 以 executable 加 argv 的结构返回，不拼接 shell quoted string。
 
 随后重启 Agent client，打开 MeanThis 侧边栏，展开**本地 Agent 桥接**，选择信任范围，再点击**创建并复制请求**。复制出的请求只能粘贴到预期的本地 Agent 对话中。
 

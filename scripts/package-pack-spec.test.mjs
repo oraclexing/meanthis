@@ -34,6 +34,12 @@ describe("discoverPublicPackages", () => {
       "@meanthis/web-extractor",
       "@meanthis/web-picker",
     ]);
+    const cli = packages.find((packageInfo) => packageInfo.name === "@meanthis/cli");
+    expect(cli?.allowedFiles).toEqual(expect.arrayContaining([
+      "dist/mcp-host-config.d.ts",
+      "dist/mcp-host-config.js",
+      "dist/mcp-host-config.js.map",
+    ]));
   });
 });
 

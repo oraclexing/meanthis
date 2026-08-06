@@ -8,15 +8,46 @@ English | [中文](./README_zh.md)
 
 Requires Node.js `^22.12.0` or `^24.0.0`.
 
+`0.1.0` is still unpublished. From this checkout:
+
+```sh
+npm ci
+npm run build
+npm link --workspace @meanthis/cli
+```
+
+After the package is published, the intended equivalent is:
+
 ```sh
 npm install --global @meanthis/cli
 ```
 
-Register the default MCP surface with Codex:
+## One MCP server, multiple hosts
+
+`meanthis mcp` starts the same standard stdio MCP server in every client. The registration name `ui-attach` is retained as a protocol compatibility identifier; it does not mean the server is Codex-only.
+
+Codex is the first automated adapter because its CLI supports structured registration readback and exact removal:
 
 ```sh
-meanthis bridge install --codex --json
+meanthis bridge install --host codex --json
 ```
+
+The older `meanthis bridge install --codex --json` command remains compatible. For other hosts, MeanThis generates the official command or JSON without modifying the host:
+
+```sh
+meanthis bridge config --host claude-code --json
+meanthis bridge config --host vscode --json
+meanthis bridge config --host cursor --json
+```
+
+| Host | Generated setup | Automatic verification |
+| --- | --- | --- |
+| Codex | `codex mcp add` registration | Yes: structured exact readback |
+| Claude Code | `claude mcp add --transport stdio` argv | No: run and verify in Claude Code |
+| VS Code | `code --add-mcp` argv plus server JSON | No: run and verify in VS Code |
+| Cursor | `mcpServers` JSON for `~/.cursor/mcp.json` | No: merge and verify in Cursor |
+
+The JSON output contains both the shared absolute-path stdio descriptor and the host-specific setup. Commands are returned as executable-plus-argv data rather than a shell-quoted string.
 
 Then restart the agent client, open the MeanThis side panel, expand **Local agent bridge**, choose the trust scope, and select **Create & copy request**. Paste the copied request only into the intended local agent conversation.
 

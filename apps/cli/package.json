@@ -43,7 +43,7 @@
     "verify:cli": "node scripts/verify-cli.mjs",
     "verify:bridge-process": "node scripts/verify-local-bridge-process.mjs",
     "start": "node dist/index.js",
-    "test": "vitest run src/cli.test.ts src/bridge-cli.test.ts src/local-bridge.test.ts src/local-bridge-mcp.test.ts src/local-bridge-agent-auth.test.ts src/local-bridge-agent-token.test.ts src/local-bridge-owner.test.ts"
+    "test": "vitest run src/cli.test.ts src/bridge-cli.test.ts src/mcp-host-config.test.ts src/local-bridge.test.ts src/local-bridge-mcp.test.ts src/local-bridge-agent-auth.test.ts src/local-bridge-agent-token.test.ts src/local-bridge-owner.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

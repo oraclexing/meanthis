@@ -54,7 +54,15 @@ MeanThis 是面向人类与 Agent 协作的 local-first UI reference layer。你
 
 这些只是 reference context，不是操作浏览器、filesystem、source tree 或其他服务的权限。
 
-## 本地体验扩展
+## 安装扩展
+
+### 下载 Release（无需编译）
+
+Release 发布后，请从 [GitHub Releases](https://github.com/oraclexing/meanthis/releases) 下载同一版本的全部三个 asset：`meanthis-extension-mv3-<version>.zip`、对应 `.manifest.json` 与 `.sha256`。把它们放在同一目录，运行 `sha256sum --check meanthis-extension-mv3-<version>.sha256`；checksum file 会同时验证 ZIP 与 manifest。随后解压 ZIP，打开 `chrome://extensions`，启用**开发者模式**，选择**加载已解压的扩展程序**，再选择包含 `manifest.json` 的解压目录。
+
+这种方式不需要在本地安装 Node.js 或编译，但本质上仍是开发者模式的 unpacked installation。未来签名后的 Chrome Web Store 页面才是真正的一键安装路径；GitHub 不能把普通 CRX 直接安装进 Chrome。
+
+### 从源码构建
 
 需要 Node.js 22.12+ 或 24.x，以及 npm 11.16.0。
 
@@ -80,15 +88,33 @@ npm run demo
 
 Demo 不会替代原生扩展 side panel 或 saved-capture 流程。
 
-## 可选本地 Agent 桥接
+## 可选、宿主无关的 MCP companion
 
-公开 CLI package 提供默认关闭、只读的本地 companion 与 MCP server。从源码 checkout 中运行：
+Public repository 中的 CLI workspace 提供默认关闭、只读的本地 companion。`meanthis mcp` 是同一套标准 stdio MCP server，并不只属于 Codex；不同宿主的 adapter 只负责描述怎样启动同一个 executable。
+
+从源码 checkout 中，Codex adapter 可以自动安装并精确读回 registration：
 
 ```bash
 npm run setup:codex-bridge
 ```
 
-Bridge 只绑定 `127.0.0.1`，需要扩展显式创建连接请求并经过短时本地批准，只暴露已批准的 Agent-safe projection。它不接受任意 selector，也不提供浏览器控制操作。扩展的主要流程不依赖它。
+其他受支持宿主只需构建一次，然后生成对应 command 或 JSON config；MeanThis 不会修改这些宿主：
+
+```bash
+npm run build
+node apps/cli/dist/index.js bridge config --host claude-code --json
+node apps/cli/dist/index.js bridge config --host vscode --json
+node apps/cli/dist/index.js bridge config --host cursor --json
+```
+
+| 宿主 | v0.1 setup 边界 |
+| --- | --- |
+| Codex | 自动安装、精确结构化读回与精确卸载 |
+| Claude Code | 生成官方 stdio add command，由用户执行并验证 |
+| VS Code | 生成官方 `code --add-mcp` command 与 server JSON |
+| Cursor | 生成写入 `~/.cursor/mcp.json` 的 `mcpServers` JSON |
+
+共享 descriptor 与四种 renderer 都有 contract test。没有真实安装和运行过的 client，不会被标记为通过 real-host canary。Bridge 只绑定 `127.0.0.1`，需要扩展显式创建连接请求并经过短时本地批准，只暴露已批准的 Agent-safe projection。它不接受任意 selector，也不提供浏览器控制操作。扩展的主要流程不依赖它。
 
 ## Packages
 
