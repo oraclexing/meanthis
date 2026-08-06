@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="open_ui_attach">MeanThis</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div class="masthead-copy">
+          <p class="eyebrow">MeanThis</p>
+          <h1 data-i18n="element_capture">Element capture</h1>
+          <details id="capture-scope" class="capture-scope" hidden>
+            <summary>
+              <span class="capture-scope-label" data-i18n="capture_scope">Capture scope</span>
+              <span id="capture-scope-breadcrumb" class="capture-scope-breadcrumb"></span>
+            </summary>
+            <div class="capture-scope-popover">
+              <div
+                id="capture-scope-tree"
+                class="capture-scope-tree"
+                role="tree"
+                data-i18n-aria-label="capture_scope"
+                aria-label="Capture scope"
+              ></div>
+              <p id="capture-scope-help" class="capture-scope-help" data-i18n="capture_scope_auto_close_help">Selecting a scope closes this tree. Press Escape to close.</p>
+            </div>
+          </details>
+          <div class="selection-controls">
+            <button
+              id="element-selection-toggle"
+              class="selection-toggle primary-action"
+              type="button"
+              aria-pressed="false"
+              aria-describedby="element-selection-help"
+              data-i18n="add_elements"
+              disabled
+            >Add elements</button>
+            <span id="element-selection-help" data-i18n="element_selection_help">Click page elements to add them. Press Escape when done.</span>
+            <button
+              id="review-data-disclosure"
+              class="disclosure-review"
+              type="button"
+              data-i18n="review_data_disclosure"
+            >Review data disclosure</button>
+          </div>
+          <div class="current-settings-summary">
+            <span data-i18n="current_content_mode">Current content mode</span>
+            <strong id="current-content-mode">Agent-safe</strong>
+          </div>
+            <details id="local-bridge-settings" class="advanced-disclosure local-bridge">
+              <summary id="local-bridge-heading" data-i18n="local_agent_bridge">Local agent bridge</summary>
+              <div class="advanced-content">
+              <p class="muted" data-i18n="local_bridge_help">Optional. Connect a local agent for read-only Agent-safe page context.</p>
+              <ol id="local-bridge-steps" class="bridge-steps" aria-label="Connection steps" data-i18n-aria-label="bridge_steps_aria">
+                <li data-bridge-step="trust" data-state="upcoming">
+                  <span class="bridge-step-copy">
+                    <strong data-i18n="bridge_step_choose_trust">Choose trust</strong>
+                    <span data-i18n="bridge_step_choose_trust_help">Choose one-time approval or this browser session.</span>
+                  </span>
+                </li>
+                <li data-bridge-step="request" data-state="upcoming">
+                  <span class="bridge-step-copy">
+                    <strong data-i18n="bridge_step_create_request">Create request</strong>
+                    <span data-i18n="bridge_step_create_request_help">MeanThis copies a short-lived local request.</span>
+                  </span>
+                </li>
+                <li data-bridge-step="approve" data-state="upcoming">
+                  <span class="bridge-step-copy">
+                    <strong data-i18n="bridge_step_agent_approve">Approve in your agent</strong>
+                    <span data-i18n="bridge_step_agent_approve_help">Paste the request into the agent on this device.</span>
+                  </span>
+                </li>
+                <li data-bridge-step="connected" data-state="upcoming">
+                  <span class="bridge-step-copy">
+                    <strong data-i18n="bridge_step_connected">Connected</strong>
+                    <span data-i18n="bridge_step_connected_help">The agent can read current Agent-safe context.</span>
+                  </span>
+                </li>
+              </ol>
+              <label id="local-bridge-trust-field" class="field compact" for="local-bridge-approval-mode">
+                <span data-i18n="trust">Trust</span>
+                <select id="local-bridge-approval-mode">
+                  <option value="ask" data-i18n="ask_every_time">Ask every time</option>
+                  <option value="browser_session" data-i18n="trust_browser_session">Trust this browser session</option>
+                </select>
+              </label>
+              <p id="local-bridge-trust-help" class="muted" data-i18n="bridge_trust_ask_help">Ask for approval each time.</p>
+              <div class="actions">
+                <button id="local-bridge-request" class="utility-action" type="button" data-i18n="create_copy_request">Create &amp; copy request</button>
+                <button id="local-bridge-disconnect" class="utility-action destructive-action" type="button" data-i18n="disconnect" hidden>Disconnect</button>
+              </div>
+              <details id="local-bridge-details" class="bridge-details" hidden>
+                <summary data-i18n="connection_details">Connection details</summary>
+                <div class="bridge-details-content">
+                  <p class="muted" data-i18n="local_bridge_security_detail">Short-lived approval material stays on this device.</p>
+                  <textarea
+                    id="local-bridge-request-text"
+                    rows="7"
+                    readonly
+                    hidden
+                    aria-label="Local agent connection request"
+                    data-i18n-aria-label="local_connection_request_aria"
+                  ></textarea>
+                  <p id="local-bridge-instance" class="muted" hidden></p>
+                </div>
+              </details>
+              <p id="local-bridge-status" class="muted bridge-status" role="status" aria-live="polite" data-i18n="ready_to_connect">Ready to connect. Start by choosing trust.</p>
+              </div>
+            </details>
+        </div>
+        <button
+          id="open-settings"
+          class="settings-button"
+          type="button"
+          title="Settings"
+          aria-label="Settings"
+          data-i18n-title="settings"
+          data-i18n-aria-label="settings"
+        ><span class="settings-icon" aria-hidden="true"></span></button>
+        <span id="origin" class="origin" hidden></span>
+      </header>
+
+      <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true" data-i18n="ready_add_elements">
+        Ready to attach UI. Start with Add elements.
+      </p>
+
+      <section
+        id="page-access-recovery"
+        class="page-access-recovery"
+        aria-labelledby="page-access-recovery-heading"
+        hidden
+      >
+        <div class="toolbar-cue" aria-hidden="true">
+          <span class="toolbar-cue-label" data-i18n="page_access_toolbar_cue">Browser toolbar</span>
+          <span class="toolbar-cue-action">
+            <img src="/icons/meanthis-32.png" alt="" />
+            <span>MeanThis</span>
+          </span>
+        </div>
+        <div class="page-access-recovery-copy">
+          <h2 id="page-access-recovery-heading" data-i18n="page_access_recovery_heading">Reconnect this page</h2>
+          <p id="page-access-recovery-reason" data-i18n="page_access_permission_reason">For your privacy, the browser only lets MeanThis read a page after you select MeanThis from the toolbar on that page.</p>
+          <ol class="page-access-recovery-steps">
+            <li id="page-access-recovery-first-step" data-i18n="page_access_step_keep_active">Keep this page active.</li>
+            <li data-i18n="page_access_step_toolbar">Select MeanThis in the browser toolbar.</li>
+            <li data-i18n="page_access_step_retry">Select Add elements again.</li>
+          </ol>
+          <p class="muted page-access-recovery-limit" data-i18n="page_access_limit">Keep this side panel open. After you select MeanThis in the toolbar, it refreshes automatically.</p>
+        </div>
+      </section>
+
+      <section id="empty-workflow" class="workflow-guide" aria-labelledby="workflow-heading" hidden>
+        <h2 id="workflow-heading" data-i18n="workflow_heading">Attach UI in three steps</h2>
+        <ol class="workflow-steps">
+          <li>
+            <strong data-i18n="add_elements">Add elements</strong>
+            <span data-i18n="add_elements_help">Select Add elements, then click each page target.</span>
+          </li>
+          <li>
+            <strong data-i18n="describe_change">Describe the change</strong>
+            <span data-i18n="describe_change_help">Write the result you want.</span>
+          </li>
+          <li>
+            <strong data-i18n="copy_for_agent">Copy for agent</strong>
+            <span data-i18n="copy_for_agent_help">Review the selected labels, then copy the handoff.</span>
+          </li>
+        </ol>
+      </section>
+
+      <section id="session" class="session" aria-labelledby="session-heading" hidden>
+        <div class="session-heading">
+          <div>
+            <h2 id="session-heading" data-i18n="session">Selected elements</h2>
+            <p id="session-count" class="muted">0 of 26 elements</p>
+          </div>
+          <div class="actions session-actions">
+            <button id="clear-session" class="session-reset utility-action destructive-action" type="button" data-i18n="clear_selected_elements">Clear selected elements</button>
+          </div>
+        </div>
+        <div class="session-list-frame">
+          <div id="session-list" class="session-list" aria-label="Captured elements" data-i18n-aria-label="captured_elements_aria"></div>
+        </div>
+        <div id="intent-recovery" class="intent-recovery" hidden>
+          <span data-i18n="unsaved_intent_attention">Unsaved intent needs attention.</span>
+          <button id="retry-intent" class="utility-action" type="button" data-i18n="retry_save">Retry save</button>
+          <button id="discard-intent" class="utility-action destructive-action" type="button" data-i18n="discard_changes">Discard changes</button>
+        </div>
+        <details id="advanced-session-tools" class="advanced-disclosure" data-developer-tooling hidden>
+          <summary data-i18n="advanced_session_tools">Advanced session tools</summary>
+          <div class="advanced-content">
+            <p class="muted" data-i18n="source_export_help">Export the source-bound session for diagnostics or checkout-based tooling.</p>
+            <button id="export-session" class="utility-action" type="button" data-i18n="export_source_session">Export source session</button>
+          </div>
+        </details>
+      </section>
+
+      <section id="capture" class="capture" hidden>
+        <div class="field task-field">
+          <div class="task-field-heading">
+            <label for="intent" data-i18n="task">Task note for selected element</label>
+            <button
+              id="remove-selected-item"
+              class="remove-selected-item utility-action destructive-action"
+              type="button"
+              data-i18n="remove_selected_element"
+            >Remove selected element</button>
+          </div>
+          <p
+            id="selected-target-summary"
+            class="selected-target-summary"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            hidden
+          ></p>
+          <details id="selected-target-details" class="selected-target-details" hidden>
+            <summary data-i18n="target_details">Target details</summary>
+            <dl class="selected-target-details-list">
+              <div>
+                <dt data-i18n="selected_element">Selected element</dt>
+                <dd id="selected-target-full"></dd>
+              </div>
+              <div>
+                <dt data-i18n="captured">Captured</dt>
+                <dd id="selected-target-captured-at"></dd>
+              </div>
+              <div>
+                <dt data-i18n="source">Source</dt>
+                <dd id="selected-target-source"></dd>
+              </div>
+              <div id="selected-target-rebind-row" hidden>
+                <dt data-i18n="current_page">Current page</dt>
+                <dd id="selected-target-rebind-status" class="session-rebind-status"></dd>
+              </div>
+            </dl>
+          </details>
+          <textarea id="intent" rows="3" aria-describedby="selected-target-summary" placeholder="Describe the result you want" data-i18n-placeholder="intent_placeholder"></textarea>
+        </div>
+
+        <div id="capture-boundary" class="capture-boundary" aria-labelledby="capture-boundary-title" hidden>
+          <strong id="capture-boundary-title" data-i18n="embedded_frame">Embedded frame</strong>
+          <p id="capture-boundary-message" role="status" aria-live="polite" data-i18n="embedded_frame_boundary_notice">MeanThis captured the embedded frame boundary, not its internal page. Use Capture scope above to work inside the frame, or use a frame-aware browser tool.</p>
+        </div>
+
+        <p id="handoff-scope-summary" class="handoff-scope-summary muted" role="status" aria-live="polite"></p>
+
+        <details id="relation-settings" class="advanced-disclosure secondary-settings" hidden>
+          <summary data-i18n="layout_relationship_optional">Task note shortcuts (optional)</summary>
+          <div class="advanced-content secondary-settings-content">
+            <div
+              id="relation-composer"
+              class="relation-composer optional-settings-group"
+              hidden
+            >
+              <div class="relation-composer-content">
+                <p class="muted relation-help" data-i18n="relation_help">A shortcut writes a task note only for the current task element. The reference element is not given its own task.</p>
+                <p
+                  id="relation-role-summary"
+                  class="relation-role-summary"
+                  hidden
+                ></p>
+                <div class="relation-controls">
+                  <label class="relation-field">
+                    <span data-i18n="relationship">Shortcut</span>
+                    <select id="relation-action" aria-label="Task note shortcut" data-i18n-aria-label="relationship">
+                      <option value="below" data-i18n="below">Below</option>
+                      <option value="above" data-i18n="above">Above</option>
+                      <option value="left-of" data-i18n="left_of">Left of</option>
+                      <option value="right-of" data-i18n="right_of">Right of</option>
+                      <option value="align-left" data-i18n="align_left">Align left</option>
+                      <option value="match-width" data-i18n="match_width">Match width</option>
+                    </select>
+                  </label>
+                  <label class="relation-field">
+                    <span data-i18n="relative_to">Relative to</span>
+                    <select id="relation-reference" aria-label="Reference element" data-i18n-aria-label="reference_element_aria"></select>
+                  </label>
+                </div>
+                <button
+                  id="apply-relation"
+                  class="relation-apply utility-action"
+                  type="button"
+                  data-i18n="use_in_task_note"
+                >Fill task note</button>
+                <p
+                  id="relation-apply-status"
+                  class="relation-apply-status"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  hidden
+                ></p>
+                <button
+                  id="change-generated-relation"
+                  class="relation-change utility-action"
+                  type="button"
+                  hidden
+                  disabled
+                  data-i18n="change_relationship"
+                >Change shortcut</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <div class="actions primary-actions">
+          <button id="copy-summary" class="copy-action primary-action" type="button" data-i18n="copy_for_agent">Copy for agent</button>
+          <div
+            id="agent-handoff-copy-feedback"
+            class="handoff-copy-feedback"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <p
+              id="agent-handoff-copy-status"
+              class="handoff-copy-status"
+              hidden
+            ></p>
+            <p
+              id="agent-handoff-copy-next-step"
+              class="handoff-copy-next-step"
+              hidden
+            ></p>
+          </div>
+        </div>
+
+        <details id="optional-settings" class="advanced-disclosure secondary-settings" hidden>
+          <summary data-i18n="copy_content_recovery">Copy options</summary>
+          <div class="advanced-content secondary-settings-content">
+            <div
+              id="handoff-options"
+              class="handoff-options optional-settings-group"
+              hidden
+            >
+              <div class="handoff-options-content">
+                <label id="handoff-format-field" class="field compact" for="handoff-format">
+                  <span data-i18n="handoff_format">Handoff detail</span>
+                  <select id="handoff-format">
+                    <option value="exact" data-i18n="handoff_format_exact">Full detail</option>
+                    <option value="compact" data-i18n="handoff_format_compact">Compact (token-efficient)</option>
+                  </select>
+                </label>
+                <details
+                  id="agent-handoff-preview"
+                  class="handoff-preview-content"
+                  aria-labelledby="agent-handoff-preview-heading"
+                >
+                  <summary
+                    id="agent-handoff-preview-heading"
+                    class="label"
+                    data-i18n="view_exact_handoff"
+                  >Preview copy content</summary>
+                  <div class="handoff-preview-body">
+                    <p class="muted" data-i18n="agent_handoff_preview_help">This is the exact text used by Copy for agent. You can copy it manually if browser clipboard access fails.</p>
+                    <textarea
+                      id="agent-handoff-text"
+                      rows="8"
+                      readonly
+                      aria-label="Agent handoff preview"
+                      data-i18n-aria-label="agent_handoff_preview_aria"
+                    ></textarea>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details id="advanced-data" class="advanced-disclosure" data-developer-tooling hidden>
+          <summary data-i18n="advanced_attachment_data">Developer diagnostics</summary>
+          <div class="advanced-content">
+            <p class="muted" data-i18n="developer_diagnostics_help">Raw metadata and separate Markdown/JSON copies for debugging integrations.</p>
+            <div class="summary">
+              <span class="label" data-i18n="selected_element">Selected element</span>
+              <strong id="element-summary" data-i18n="no_element">No element</strong>
+              <span id="locator-summary" class="muted"></span>
+              <dl class="metadata">
+                <div>
+                  <dt data-i18n="captured">Captured</dt>
+                  <dd id="captured-at" data-i18n="none">none</dd>
+                </div>
+                <div>
+                  <dt data-i18n="redacted">Redacted</dt>
+                  <dd id="redacted-fields" data-i18n="none">none</dd>
+                </div>
+                <div>
+                  <dt data-i18n="sensitive_hints">Sensitive hints</dt>
+                  <dd id="sensitive-hints" data-i18n="none">none</dd>
+                </div>
+                <div>
+                  <dt data-i18n="included_sensitive">Included sensitive</dt>
+                  <dd id="included-sensitive-fields" data-i18n="none">none</dd>
+                </div>
+              </dl>
+            </div>
+
+            <label class="field">
+              <span data-i18n="agent_summary">Agent summary</span>
+              <textarea id="agent-summary" rows="8" readonly></textarea>
+            </label>
+
+            <label class="field">
+              <span data-i18n="prompt_markdown">Prompt markdown</span>
+              <textarea id="markdown" rows="12" readonly></textarea>
+            </label>
+
+            <label class="field">
+              <span data-i18n="attachment_json">Attachment JSON</span>
+              <textarea id="json" rows="10" readonly></textarea>
+            </label>
+
+            <div class="actions">
+              <button id="copy-markdown" class="utility-action" type="button" data-i18n="copy_markdown">Copy markdown</button>
+              <button id="copy-json" class="utility-action" type="button" data-i18n="copy_json">Copy JSON</button>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <details id="saved-sites" class="advanced-disclosure saved-sites" hidden>
+        <summary class="saved-sites-summary">
+          <span data-i18n="saved_sites">Saved captures</span>
+          <span id="saved-sites-count" class="saved-sites-badge" aria-label="Saved captures: 0">0</span>
+        </summary>
+        <div class="advanced-content">
+          <p class="muted" data-i18n="saved_sites_help">Review, reopen, restore, or clear UI references saved on this device.</p>
+          <div id="saved-sites-list" class="saved-sites-list" aria-label="Saved captures" data-i18n-aria-label="saved_sites_aria"></div>
+          <button id="clear-all-saved-sites" class="utility-action destructive-action" type="button" data-i18n="clear_all_saved_captures" disabled>Clear all saved captures</button>
+          <p id="saved-sites-status" class="muted" role="status" aria-live="polite"></p>
+        </div>
+      </details>
+    </main>
+    <dialog
+      id="first-capture-disclosure"
+      class="first-capture-disclosure"
+      aria-labelledby="first-capture-disclosure-heading"
+      aria-describedby="first-capture-disclosure-intro"
+    >
+      <div class="first-capture-disclosure-content">
+        <div>
+          <p class="eyebrow">MeanThis</p>
+          <h2 id="first-capture-disclosure-heading" data-i18n="first_capture_disclosure_heading">Before your first capture</h2>
+        </div>
+        <p id="first-capture-disclosure-intro" data-i18n="first_capture_disclosure_intro">MeanThis creates references for elements you choose. Each reference may also include page and nearby context.</p>
+        <ul class="first-capture-disclosure-points">
+          <li data-i18n="first_capture_disclosure_data">A selected reference can include the page URL and title; the canonical top-page-to-selected-frame origin/path route; element structure, accessibility facts, labels, styles, bounds, locator and replay evidence, selected text (including hidden descendant text), nearby text, your task notes, optional source anchors, and iframe origin/path boundaries.</li>
+          <li data-i18n="first_capture_disclosure_local">Captures and session state stay in this browser profile. Copies leave only when you choose to copy, export, or connect the optional local agent bridge.</li>
+          <li data-i18n="first_capture_disclosure_redaction">Agent-safe is the default and tries to redact likely sensitive text. Developer diagnostic keeps more route detail, and Full debug can retain recognized sensitive values. Screenshots and DOM snippets remain excluded; no mode guarantees that all sensitive information is removed.</li>
+          <li data-i18n="first_capture_disclosure_receiver">Copy for agent writes the handoff text to your system clipboard; Export writes a local file. Your browser, operating system, and applications that can access or receive those copies control them afterward. While the optional local agent bridge is connected, Agent-safe context refreshes automatically over that local connection.</li>
+        </ul>
+        <p class="first-capture-disclosure-trial" data-i18n="first_capture_disclosure_first_trial">For your first trial, use a non-sensitive, unauthenticated HTTP(S) page.</p>
+        <p id="first-capture-disclosure-status" class="first-capture-disclosure-status" role="status" aria-live="polite"></p>
+        <div class="first-capture-disclosure-actions">
+          <button id="acknowledge-first-capture" class="disclosure-primary" type="button" data-i18n="acknowledge_and_return">I understand — return to Add elements</button>
+          <button id="dismiss-first-capture" class="disclosure-secondary utility-action" type="button" data-i18n="not_now">Not now</button>
+        </div>
+      </div>
+    </dialog>
+    <script type="module" src="./src/panel-entry.ts"></script>
+  </body>
+</html>

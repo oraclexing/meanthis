@@ -1,0 +1,44 @@
+{
+  "name": "@meanthis/source-map-core",
+  "version": "0.1.0",
+  "description": "Trusted local source-map sidecar validation and exact source resolution for MeanThis integrations.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git",
+    "directory": "tools/source-map-core"
+  },
+  "homepage": "https://github.com/oraclexing/meanthis/tree/main/tools/source-map-core#readme",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "README_zh.md",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "prepack": "npm run build",
+    "test": "vitest run src/index.test.ts"
+  },
+  "dependencies": {
+    "@meanthis/schema": "0.1.0"
+  }
+}

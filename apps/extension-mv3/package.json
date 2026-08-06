@@ -1,0 +1,24 @@
+{
+  "name": "@meanthis/extension-mv3",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run verify:icons && tsc -b && vite build --mode consumer && vite build --config vite.content.config.ts --mode consumer && npm run verify:extension -- consumer",
+    "generate:icons": "node scripts/generate-icons.mjs",
+    "verify:icons": "node scripts/generate-icons.mjs --check",
+    "verify:extension": "node scripts/verify-extension.mjs",
+    "verify:release": "node scripts/verify-release-artifact.mjs consumer",
+    "pack:release": "npm run build && npm run verify:release && node scripts/create-release-artifact.mjs consumer"
+  },
+  "dependencies": {
+    "@meanthis/hub-core": "0.1.0",
+    "@meanthis/prompt": "0.1.0",
+    "@meanthis/replay": "0.1.0",
+    "@meanthis/schema": "0.1.0",
+    "@meanthis/web-extractor": "0.1.0"
+  },
+  "devDependencies": {
+    "vite": "8.1.2"
+  }
+}

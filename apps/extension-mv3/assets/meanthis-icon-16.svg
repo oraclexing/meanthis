@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-labelledby="title description">
+  <title id="title">MeanThis 16px optical master</title>
+  <desc id="description">An asymmetric impatient cat stare drawn directly on a 16 pixel grid.</desc>
+  <rect width="16" height="16" rx="4" fill="#2457d6" />
+  <path d="M.2 2.5 8 7.2q-.4 2.9-2.8 4-2.9.5-4.5-2.4Q.1 6.1.2 2.5Z" fill="#ffc44d" />
+  <path d="M9 7.6 15.7 4.8q-.3 2.6-1.9 4.3-1.6 1.2-3.4.3-.9-.4-1.4-1.8Z" fill="#ffc44d" />
+  <rect x="3.9" y="5.9" width="1.5" height="3.6" rx=".75" fill="#050b20" />
+  <rect x="12.15" y="6.4" width="1.1" height="2.4" rx=".55" fill="#050b20" />
+  <g fill="none" stroke="#fff0cc" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M.1 2q3.9 2.2 7.9 5.1" stroke-width=".85" />
+    <path d="M15.9 3.6q-3.8 1.3-6.8 3.7" stroke-width=".72" />
+    <path d="M7.7 9.6Q4.4 13 .8 15.5" stroke-width=".8" />
+    <path d="M9.1 9.6q3.2 3.1 6.5 5.2" stroke-width=".7" />
+    <path d="M5 14.4q3.1-2.8 5.4-1.2 1.2 1 2.5-.4" stroke-width="1.2" />
+  </g>
+  <path d="M5 14.4q3.1-2.8 5.4-1.2 1.2 1 2.5-.4" fill="none" stroke="#ffc44d" stroke-width=".65" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

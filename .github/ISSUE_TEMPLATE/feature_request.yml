@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose a focused improvement to MeanThis's UI reference and handoff workflow.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement.
+
+        **Keep this issue public-safe.** Do not paste private page content, raw captures, credentials, tokens, cookies, private source, or absolute machine paths. Use a public or synthetic example and sanitized excerpts or screenshots.
+
+        MeanThis is a local-first UI reference layer: it helps a person point to UI and gives another agent structured context. The downstream agent platform owns editing and execution.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user workflow or communication failure, not only the proposed control or API.
+      placeholder: When I try to ..., I cannot reliably ... because ...
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Product-boundary fit
+      description: Which part of the MeanThis reference workflow would this improve?
+      options:
+        - Selecting or confirming UI references
+        - Capturing deterministic DOM or accessibility facts
+        - Reviewing, saving, or copying a handoff
+        - Locator replay or source resolution
+        - Integration with an agent platform
+        - Documentation or contributor experience
+        - Downstream browser control or source editing
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed user outcome
+      description: Explain the smallest useful end-to-end behavior from the user's perspective.
+      placeholder: A user can ..., verify ..., and hand off ...
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Reproducible example
+      description: Give a public or synthetic scenario that could demonstrate the need and validate a solution.
+      placeholder: On a local fixture with ..., the user currently ..., and success would mean ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance signals
+      description: List observable outcomes or focused checks that would show the request is solved.
+      placeholder: |
+        - The selected target remains unambiguous after ...
+        - A focused test verifies ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note any simpler workflow, existing feature, or integration you considered.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data check
+      options:
+        - label: I removed private page content, raw captures, credentials, tokens, cookies, private source, and absolute machine paths.
+          required: true

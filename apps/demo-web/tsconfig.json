@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "lib": ["ES2022", "DOM"],
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "references": [
+    { "path": "../../packages/schema" },
+    { "path": "../../packages/prompt" },
+    { "path": "../../packages/hub-core" },
+    { "path": "../../packages/web-extractor" },
+    { "path": "../../packages/web-picker" },
+    { "path": "../../packages/replay" }
+  ],
+  "include": ["src/main.ts", "src/replay-dom.ts", "src/ui-attach-runtime.ts"]
+}

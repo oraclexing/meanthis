@@ -1,0 +1,59 @@
+{
+  "name": "meanthis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first UI reference layer for precise human-to-agent context",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git"
+  },
+  "homepage": "https://oraclexing.github.io/meanthis/",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0",
+    "npm": "11.16.0"
+  },
+  "workspaces": [
+    "packages/schema",
+    "packages/prompt",
+    "packages/web-extractor",
+    "packages/hub-core",
+    "packages/web-picker",
+    "packages/replay",
+    "tools/source-map-core",
+    "tools/source-resolver-mcp",
+    "apps/cli",
+    "apps/demo-web",
+    "apps/extension-mv3"
+  ],
+  "overrides": {
+    "@modelcontextprotocol/sdk": {
+      "@hono/node-server": "$@hono/node-server"
+    }
+  },
+  "scripts": {
+    "build": "npm run verify:version-alignment && npm run build:packages && npm --workspace @meanthis/cli run build && npm --workspace @meanthis/demo-web run build && npm --workspace @meanthis/extension-mv3 run build && npm run verify:examples && npm run verify:packages",
+    "build:packages": "tsc -b packages/schema packages/prompt packages/web-extractor packages/hub-core packages/web-picker packages/replay tools/source-map-core tools/source-resolver-mcp",
+    "test": "npm run build:packages && vitest run --maxWorkers=4",
+    "typecheck": "tsc -b packages/schema packages/prompt packages/web-extractor packages/hub-core packages/web-picker packages/replay tools/source-map-core tools/source-resolver-mcp apps/cli apps/demo-web apps/extension-mv3",
+    "demo": "npm --workspace @meanthis/demo-web run dev",
+    "cli": "node apps/cli/dist/index.js",
+    "setup:codex-bridge": "npm --workspace @meanthis/cli run build && node apps/cli/dist/index.js bridge install --codex --json",
+    "verify:version-alignment": "node scripts/version-alignment.mjs",
+    "verify:examples": "node examples/saved-snapshot-trusted-host/run-synthetic.mjs && node examples/saved-snapshot-text-consumer/run-synthetic.mjs && node examples/saved-snapshot-text-consumer/verify-accept-saved-bundle.mjs",
+    "verify:packages": "node scripts/verify-package-packs.mjs",
+    "pack:extension": "npm --workspace @meanthis/extension-mv3 run pack:release"
+  },
+  "devDependencies": {
+    "@hono/node-server": "2.0.11",
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3",
+    "vite": "8.1.2",
+    "vitest": "^4.1.9"
+  }
+}

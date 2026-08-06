@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="{{ page.lang | default: 'en' }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>{% if page.title %}{{ page.title }} · {% endif %}MeanThis</title>
+    <meta name="description" content="{{ page.description | default: site.description }}">
+    <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="{{ '/' | relative_url }}" aria-label="MeanThis home">
+        <img src="{{ '/assets/meanthis-mark.svg' | relative_url }}" width="36" height="36" alt="">
+        <span>MeanThis</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="https://github.com/oraclexing/meanthis">GitHub</a>
+        <a href="{{ '/privacy/' | relative_url }}">Privacy</a>
+        <a href="{{ '/zh/privacy/' | relative_url }}">中文</a>
+      </nav>
+    </header>
+    <main class="content">
+      {{ content }}
+    </main>
+    <footer>
+      MeanThis is a local-first UI reference layer. It does not operate the page for an Agent.
+    </footer>
+  </body>
+</html>

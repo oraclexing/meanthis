@@ -1,0 +1,45 @@
+{
+  "name": "@meanthis/replay",
+  "version": "0.1.0",
+  "description": "Playwright-like locator replay verification for structured UI attachments.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git",
+    "directory": "packages/replay"
+  },
+  "homepage": "https://github.com/oraclexing/meanthis/tree/main/packages/replay#readme",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "README_zh.md",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/locator-expression.js",
+    "dist/locator-expression.js.map",
+    "dist/locator-expression.d.ts",
+    "dist/types.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "prepack": "npm run build",
+    "test": "vitest run src/index.test.ts src/locator-expression.test.ts"
+  },
+  "dependencies": {
+    "@meanthis/schema": "0.1.0"
+  }
+}

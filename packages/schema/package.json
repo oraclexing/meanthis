@@ -1,0 +1,38 @@
+{
+  "name": "@meanthis/schema",
+  "version": "0.1.0",
+  "description": "Shared UI attachment schema and validators for MeanThis integrations.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git",
+    "directory": "packages/schema"
+  },
+  "homepage": "https://github.com/oraclexing/meanthis/tree/main/packages/schema#readme",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "README_zh.md",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "prepack": "npm run build",
+    "test": "vitest run src/index.test.ts src/local-bridge.test.ts src/saved-snapshot-control-policy.test.ts"
+  }
+}

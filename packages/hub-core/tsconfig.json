@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "references": [
+    { "path": "../schema" },
+    { "path": "../prompt" },
+    { "path": "../web-extractor" }
+  ],
+  "include": ["src/**/*.ts"]
+}

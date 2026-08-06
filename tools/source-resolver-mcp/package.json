@@ -1,0 +1,55 @@
+{
+  "name": "@meanthis/source-resolver-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP adapter for verified MeanThis source-anchor resolution.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git",
+    "directory": "tools/source-resolver-mcp"
+  },
+  "homepage": "https://github.com/oraclexing/meanthis/tree/main/tools/source-resolver-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "meanthis-source-resolver": "./dist/cli.js"
+  },
+  "files": [
+    "README_zh.md",
+    "dist/cli.d.ts",
+    "dist/cli.js",
+    "dist/cli.js.map",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "doctor:codex": "node scripts/manage-codex-registration.mjs doctor --codex --json",
+    "prepack": "npm run build",
+    "remove:codex": "node scripts/manage-codex-registration.mjs uninstall --codex --json",
+    "setup:codex": "npm run build && node scripts/manage-codex-registration.mjs install --codex --json",
+    "test": "vitest run src/index.test.ts scripts/manage-codex-registration.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@meanthis/source-map-core": "0.1.0",
+    "zod": "4.4.3"
+  }
+}

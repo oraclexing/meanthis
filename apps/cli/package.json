@@ -1,0 +1,58 @@
+{
+  "name": "@meanthis/cli",
+  "version": "0.1.0",
+  "description": "Local, read-only MeanThis companion and MCP server for explicitly shared UI captures.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oraclexing/meanthis.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/oraclexing/meanthis/tree/main/apps/cli#readme",
+  "bugs": {
+    "url": "https://github.com/oraclexing/meanthis/issues"
+  },
+  "type": "module",
+  "main": "./dist/local-bridge-mcp.js",
+  "types": "./dist/local-bridge-mcp.d.ts",
+  "files": [
+    "README_zh.md",
+    "dist/*.d.ts",
+    "dist/*.js",
+    "dist/*.js.map"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/local-bridge-mcp.d.ts",
+      "default": "./dist/local-bridge-mcp.js"
+    }
+  },
+  "bin": {
+    "meanthis": "./dist/index.js",
+    "ui-attach": "./dist/index.js"
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b && npm run verify:cli",
+    "prepack": "tsc -b",
+    "verify:cli": "node scripts/verify-cli.mjs",
+    "verify:bridge-process": "node scripts/verify-local-bridge-process.mjs",
+    "start": "node dist/index.js",
+    "test": "vitest run src/cli.test.ts src/bridge-cli.test.ts src/local-bridge.test.ts src/local-bridge-mcp.test.ts src/local-bridge-agent-auth.test.ts src/local-bridge-agent-token.test.ts src/local-bridge-owner.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@meanthis/hub-core": "0.1.0",
+    "@meanthis/schema": "0.1.0",
+    "@meanthis/source-resolver-mcp": "0.1.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@meanthis/source-map-core": "0.1.0"
+  }
+}

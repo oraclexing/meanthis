@@ -1,0 +1,32 @@
+title: MeanThis
+description: Local-first UI reference layer for precise human-to-Agent context.
+url: "https://oraclexing.github.io"
+baseurl: "/meanthis"
+repository: oraclexing/meanthis
+markdown: kramdown
+exclude:
+  - .github
+  - .meanthis-public-projection.json
+  - apps
+  - examples
+  - node_modules
+  - output
+  - packages
+  - scripts
+  - tools
+  - CHANGELOG.md
+  - CHANGELOG_zh.md
+  - CONTRIBUTING.md
+  - CONTRIBUTING_zh.md
+  - README.md
+  - README_zh.md
+  - RELEASING.md
+  - RELEASING_zh.md
+  - SECURITY.md
+  - SECURITY_zh.md
+  - THIRD_PARTY_NOTICES.md
+  - package-lock.json
+  - package.json
+  - tsconfig.base.json
+  - vitest.config.ts
+  - LICENSE

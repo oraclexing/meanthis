@@ -1,0 +1,222 @@
+{
+  "schemaVersion": "0.1.0",
+  "kind": "ui-attach.capture-session",
+  "session": {
+    "id": "session-1",
+    "title": null,
+    "createdAt": "2026-07-11T10:00:00.000Z",
+    "updatedAt": "2026-07-11T10:02:00.000Z",
+    "origin": "https://app.example.test",
+    "attachments": [
+      {
+        "id": "att_save",
+        "createdAt": "2026-07-11T10:00:00.000Z",
+        "labels": [
+          "A"
+        ],
+        "sourceRecord": {
+          "origin": "https://app.example.test",
+          "pageUrl": "https://app.example.test/settings",
+          "pageTitle": "Settings",
+          "attachment": {
+            "schemaVersion": "0.3.0",
+            "id": "att_save",
+            "capturedAt": "2026-07-11T10:00:00.000Z",
+            "source": {
+              "kind": "web",
+              "url": "https://app.example.test/settings",
+              "title": "Settings"
+            },
+            "element": {
+              "tagName": "button",
+              "role": "button",
+              "text": "Save changes",
+              "accessibleName": "Save changes",
+              "bbox": {
+                "x": 10,
+                "y": 20,
+                "width": 100,
+                "height": 36
+              },
+              "visible": true,
+              "enabled": true
+            },
+            "style": {
+              "display": "block",
+              "color": "rgb(255, 255, 255)",
+              "backgroundColor": "rgb(31, 99, 255)"
+            },
+            "context": {
+              "parentSummary": "section Settings",
+              "nearbyText": [],
+              "selectorHints": []
+            },
+            "locatorBundle": {
+              "primary": {
+                "strategy": "playwright.role",
+                "value": "page.getByRole(\"button\", { name: \"Save changes\" })",
+                "confidence": 0.92,
+                "notes": "Stable accessible name"
+              },
+              "candidates": [
+                {
+                  "strategy": "css",
+                  "value": "[data-testid=\"save\"]",
+                  "confidence": 0.8
+                }
+              ],
+              "stability": {
+                "score": 76,
+                "uniqueness": true,
+                "replayVerified": true,
+                "failureReason": null,
+                "verifiedBy": "playwright.role",
+                "verifiedValue": "page.getByRole(\"button\", { name: \"Save changes\" })"
+              }
+            },
+            "policy": {
+              "disclosureMode": "agent_safe",
+              "redactionLevel": "strict",
+              "actionMode": "suggest_patch",
+              "allowScreenshot": false,
+              "allowDomSnippet": false,
+              "allowNetworkSend": false,
+              "allowedDomains": [
+                "https://app.example.test"
+              ],
+              "redactedFields": [],
+              "sensitiveHints": [],
+              "includedSensitiveFields": []
+            },
+            "artifacts": {
+              "screenshotCrop": null,
+              "overlayImage": null
+            }
+          },
+          "intent": "Keep A as the primary confirmation action.",
+          "replayAttempts": [
+            {
+              "count": 1,
+              "strategy": "playwright.role",
+              "value": "page.getByRole(\"button\", { name: \"Save changes\" })",
+              "visible": true
+            }
+          ],
+          "capturedAt": "2026-07-11T10:00:00.000Z",
+          "tabId": 1,
+          "frameId": 0
+        }
+      },
+      {
+        "id": "att_cancel",
+        "createdAt": "2026-07-11T10:02:00.000Z",
+        "labels": [
+          "B"
+        ],
+        "sourceRecord": {
+          "origin": "https://app.example.test",
+          "pageUrl": "https://app.example.test/settings?token=secret#billing",
+          "pageTitle": "Settings",
+          "attachment": {
+            "schemaVersion": "0.3.0",
+            "id": "att_cancel",
+            "capturedAt": "2026-07-11T10:02:00.000Z",
+            "source": {
+              "kind": "web",
+              "url": "https://app.example.test/settings?token=secret#billing",
+              "title": "Settings"
+            },
+            "element": {
+              "tagName": "button",
+              "role": "button",
+              "text": "Cancel",
+              "accessibleName": "Cancel",
+              "bbox": {
+                "x": 10,
+                "y": 20,
+                "width": 100,
+                "height": 36
+              },
+              "visible": true,
+              "enabled": true
+            },
+            "style": {
+              "display": "block",
+              "color": "rgb(255, 255, 255)",
+              "backgroundColor": "rgb(31, 99, 255)"
+            },
+            "context": {
+              "parentSummary": "section Settings",
+              "nearbyText": [
+                "Signed in as ada@example.com"
+              ],
+              "selectorHints": [
+                "token=sk-test-1234567890"
+              ]
+            },
+            "locatorBundle": {
+              "primary": {
+                "strategy": "playwright.role",
+                "value": "page.getByRole(\"button\", { name: \"Cancel\" })",
+                "confidence": 0.92,
+                "notes": "Stable accessible name"
+              },
+              "candidates": [
+                {
+                  "strategy": "css",
+                  "value": "[data-testid=\"cancel\"]",
+                  "confidence": 0.8
+                }
+              ],
+              "stability": {
+                "score": 76,
+                "uniqueness": true,
+                "replayVerified": true,
+                "failureReason": null,
+                "verifiedBy": "playwright.role",
+                "verifiedValue": "page.getByRole(\"button\", { name: \"Cancel\" })"
+              }
+            },
+            "policy": {
+              "disclosureMode": "full_debug",
+              "redactionLevel": "debug",
+              "actionMode": "suggest_patch",
+              "allowScreenshot": false,
+              "allowDomSnippet": false,
+              "allowNetworkSend": false,
+              "allowedDomains": [
+                "https://app.example.test"
+              ],
+              "redactedFields": [],
+              "sensitiveHints": [],
+              "includedSensitiveFields": [
+                "source.url",
+                "context.nearbyText",
+                "context.selectorHints"
+              ]
+            },
+            "artifacts": {
+              "screenshotCrop": null,
+              "overlayImage": null
+            }
+          },
+          "intent": "Keep B as the secondary cancellation action.",
+          "replayAttempts": [
+            {
+              "nested": {
+                "email": "ada@example.com",
+                "token": "sk-test-1234567890"
+              },
+              "strategy": "playwright.role",
+              "value": "page.getByRole(\"button\", { name: \"Cancel\" })",
+              "z": "preserved last after sort"
+            }
+          ],
+          "capturedAt": "2026-07-11T10:02:00.000Z",
+          "tabId": 1,
+          "frameId": 0
+        }
+      }
+    ]
+  }
+}

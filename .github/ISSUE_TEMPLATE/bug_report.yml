@@ -1,0 +1,97 @@
+name: Bug report
+description: Report reproducible behavior that differs from MeanThis's documented contract.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve MeanThis.
+
+        **Keep this issue public-safe.** Do not paste private page content, raw captures, credentials, tokens, cookies, private source, or absolute machine paths. Use a minimal local fixture and sanitized excerpts or screenshots. For a suspected vulnerability, do not open a public issue; follow `SECURITY.md` and use GitHub private vulnerability reporting.
+
+        MeanThis captures and hands off UI reference context. It does not edit source, control the browser for a downstream agent, or perform the requested work itself.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Choose the closest MeanThis surface.
+      options:
+        - Browser extension capture or review
+        - Copy or serialized handoff
+        - Locator or replay metadata
+        - Saved snapshots
+        - Source resolution or integration
+        - Public package API
+        - Documentation or contributor tooling
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and why it appears incorrect.
+      placeholder: A short, concrete description of the failure.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give the smallest reproducible sequence using public or synthetic data.
+      placeholder: |
+        1. Start from ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should MeanThis have produced or displayed?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: Include sanitized error text or output if useful.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the MeanThis version or commit tested; say "unknown" if unavailable.
+      placeholder: 0.1.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant browser, OS, Node.js, npm, and installation method without absolute paths.
+      placeholder: Chrome 126; Windows 11; Node.js 22.12; unpacked extension from a local checkout
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Focused verification
+      description: If available, list the narrow checks you ran and their exact outcomes.
+      placeholder: Command or manual check, followed by pass/fail and the relevant sanitized output.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional public-safe context
+      description: Add only sanitized details that materially help reproduce or diagnose the issue.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-data check
+      options:
+        - label: I removed private page content, raw captures, credentials, tokens, cookies, private source, and absolute machine paths.
+          required: true
+        - label: This is not a suspected security vulnerability requiring private reporting.
+          required: true

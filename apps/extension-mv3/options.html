@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="settings_title">MeanThis settings</title>
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header class="settings-header">
+        <p class="eyebrow">MeanThis</p>
+        <h1 data-i18n="settings">Settings</h1>
+        <p class="settings-intro" data-i18n="settings_intro">
+          Choose defaults for capture, task-note shortcuts, page access, and appearance. Simple settings save immediately; shortcuts save when you choose Add or Save.
+        </p>
+      </header>
+
+      <section class="settings-section" aria-labelledby="capture-privacy-heading">
+        <div class="section-copy">
+          <h2 id="capture-privacy-heading" data-i18n="settings_capture_privacy">Capture and privacy</h2>
+          <p data-i18n="settings_capture_privacy_help">Set the default amount of page-derived detail included in new captures.</p>
+        </div>
+        <div class="section-controls">
+          <label class="field" for="capture-mode">
+            <span data-i18n="content_detail">Content detail</span>
+            <select id="capture-mode">
+              <option value="agent_safe" data-i18n="agent_safe">Agent-safe</option>
+              <option value="developer_diagnostic" data-i18n="developer_diagnostic">Developer diagnostic</option>
+              <option value="full_debug" data-i18n="full_debug">Full debug</option>
+            </select>
+            <span class="field-help" data-i18n="content_detail_help">Agent-safe is the recommended default for copying context to an Agent.</span>
+          </label>
+          <label class="field" for="context-menu-selection-mode">
+            <span data-i18n="context_menu_selection_mode">After right-click confirmation</span>
+            <select id="context-menu-selection-mode" aria-describedby="context-menu-selection-mode-help">
+              <option value="single" data-i18n="context_menu_selection_single">Stop after one element</option>
+              <option value="continuous" data-i18n="context_menu_selection_continuous">Keep selecting elements</option>
+            </select>
+            <span id="context-menu-selection-mode-help" class="field-help" data-i18n="context_menu_selection_mode_help">Add page element starts the picker and previews the right-clicked target when available. Left-click confirms it. Continuous selection ends with Escape or Stop selecting.</span>
+          </label>
+          <label class="switch-setting" for="frame-scope-auto-start">
+            <span class="switch-setting-copy">
+              <strong data-i18n="frame_scope_auto_start">Start selecting after changing scope</strong>
+              <span id="frame-scope-auto-start-help" class="field-help" data-i18n="frame_scope_auto_start_help">Off by default. When off, changing scope only changes where MeanThis will capture; choose Add elements when ready.</span>
+            </span>
+            <span class="switch-control">
+              <input
+                id="frame-scope-auto-start"
+                type="checkbox"
+                role="switch"
+                aria-describedby="frame-scope-auto-start-help"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="relation-shortcuts-heading">
+        <div class="section-copy">
+          <h2 id="relation-shortcuts-heading" data-i18n="settings_relation_shortcuts">Task note shortcuts</h2>
+          <p data-i18n="settings_relation_shortcuts_help">Add optional shortcuts that fill the selected element's task note. Custom text stays on this device.</p>
+        </div>
+        <div class="section-controls relation-shortcut-settings">
+          <div class="relation-shortcut-toolbar">
+            <strong data-i18n="saved_shortcuts">Saved shortcuts</strong>
+            <button id="new-relation-shortcut" type="button" data-i18n="new_shortcut">New shortcut</button>
+          </div>
+          <ul
+            id="relation-shortcuts-list"
+            class="relation-shortcuts-list"
+            aria-label="Saved task note shortcuts"
+            data-i18n-aria-label="relation_shortcuts_list_aria"
+          ></ul>
+          <p id="relation-shortcuts-empty" class="field-help" data-i18n="relation_shortcuts_empty">No custom shortcuts.</p>
+          <form id="relation-shortcut-editor" class="relation-shortcut-editor" aria-labelledby="relation-shortcut-editor-heading">
+            <div class="relation-shortcut-editor-header">
+              <h3 id="relation-shortcut-editor-heading" data-i18n="new_shortcut">New shortcut</h3>
+              <span id="relation-shortcut-editor-status" class="relation-shortcut-editor-status" role="status" aria-live="polite"></span>
+            </div>
+            <label class="field" for="relation-shortcut-label">
+              <span data-i18n="shortcut_name">Shortcut name</span>
+              <input
+                id="relation-shortcut-label"
+                type="text"
+                maxlength="48"
+                autocomplete="off"
+                placeholder="Same spacing"
+                data-i18n-placeholder="shortcut_name_placeholder"
+              />
+            </label>
+            <label class="field" for="relation-shortcut-template">
+              <span data-i18n="shortcut_template">Task note template</span>
+              <textarea
+                id="relation-shortcut-template"
+                rows="3"
+                maxlength="280"
+                aria-describedby="relation-shortcut-template-help"
+                placeholder="Keep {selected} the same distance from {reference}."
+                data-i18n-placeholder="shortcut_template_placeholder"
+              ></textarea>
+              <span id="relation-shortcut-template-help" class="field-help" data-i18n="shortcut_template_help">Include both {selected} and {reference}. Up to eight custom shortcuts.</span>
+            </label>
+            <div class="relation-shortcut-editor-actions">
+              <button id="remove-relation-shortcut" type="button" data-i18n="remove_shortcut" hidden>Remove</button>
+              <div class="relation-shortcut-editor-primary-actions">
+                <button id="cancel-relation-shortcut" type="button" data-i18n="cancel_shortcut_changes">Cancel</button>
+                <button id="save-relation-shortcut" type="submit" data-i18n="add_shortcut">Add shortcut</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="page-access-heading">
+        <div class="section-copy">
+          <h2 id="page-access-heading" data-i18n="settings_page_access">Page access</h2>
+          <p data-i18n="settings_page_access_help">Control whether MeanThis follows ordinary web tabs without another toolbar click.</p>
+        </div>
+        <div class="section-controls">
+          <label class="switch-setting automatic-page-access-setting" for="automatic-page-access">
+            <span class="switch-setting-copy automatic-page-access-copy">
+              <strong data-i18n="automatic_page_access">Follow active tab automatically</strong>
+              <span id="automatic-page-access-help" class="field-help" data-i18n="automatic_page_access_help">Optional. Chrome will ask for persistent access to all ordinary HTTP(S) websites. MeanThis still creates captures only after you choose Add elements.</span>
+            </span>
+            <span class="switch-control">
+              <input
+                id="automatic-page-access"
+                type="checkbox"
+                role="switch"
+                aria-describedby="automatic-page-access-help automatic-page-access-status"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+          <p id="automatic-page-access-status" class="setting-status" role="status" aria-live="polite" hidden></p>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="appearance-heading">
+        <div class="section-copy">
+          <h2 id="appearance-heading" data-i18n="settings_appearance">Appearance</h2>
+          <p data-i18n="settings_appearance_help">Choose how the side panel and settings page follow your display.</p>
+        </div>
+        <div class="section-controls">
+          <label class="field" for="theme-preference">
+            <span data-i18n="theme">Theme</span>
+            <select id="theme-preference">
+              <option value="system" data-i18n="system">System</option>
+              <option value="light" data-i18n="light">Light</option>
+              <option value="dark" data-i18n="dark">Dark</option>
+            </select>
+          </label>
+          <label class="field" for="time-display-preference">
+            <span data-i18n="time_display">Time display</span>
+            <select id="time-display-preference">
+              <option value="local" data-i18n="local_time_recommended">Local time (recommended)</option>
+              <option value="utc" data-i18n="utc_time">UTC</option>
+            </select>
+            <span class="field-help" data-i18n="time_display_help">This changes only visible timestamps. Stored and exported capture times remain UTC.</span>
+          </label>
+          <label class="field" for="overlay-visibility-preference">
+            <span data-i18n="page_marker_visibility">Page markers</span>
+            <select id="overlay-visibility-preference" aria-describedby="overlay-visibility-preference-help">
+              <option value="panel" data-i18n="page_markers_while_open">While MeanThis is open (recommended)</option>
+              <option value="always" data-i18n="page_markers_always">Always on matching pages</option>
+            </select>
+            <span id="overlay-visibility-preference-help" class="field-help" data-i18n="page_marker_visibility_help">Hiding page markers does not remove saved captures. Reopening MeanThis restores matching markers.</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="advanced-heading">
+        <div class="section-copy">
+          <h2 id="advanced-heading" data-i18n="settings_advanced">Advanced</h2>
+          <p data-i18n="settings_advanced_help">Override how captured detail is previewed and copied without changing future capture detail.</p>
+        </div>
+        <div class="section-controls">
+          <label class="switch-setting independent-view-mode-setting" for="independent-view-mode">
+            <span class="switch-setting-copy">
+              <strong data-i18n="independent_preview_copy_mode">Set preview and copy separately</strong>
+              <span id="independent-view-mode-help" class="field-help" data-i18n="independent_preview_copy_mode_help">Off by default. Preview and copy follow content detail until this is turned on.</span>
+            </span>
+            <span class="switch-control">
+              <input
+                id="independent-view-mode"
+                type="checkbox"
+                role="switch"
+                aria-controls="view-mode-field"
+                aria-describedby="independent-view-mode-help"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+          <label id="view-mode-field" class="field" for="view-mode" hidden>
+            <span data-i18n="preview_copy_as">Preview and copy as</span>
+            <select id="view-mode">
+              <option value="agent_safe" data-i18n="agent_safe">Agent-safe</option>
+              <option value="developer_diagnostic" data-i18n="developer_diagnostic">Developer diagnostic</option>
+              <option value="full_debug" data-i18n="full_debug">Full debug</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <p id="settings-status" class="settings-save-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    </main>
+    <script type="module" src="/src/options-entry.ts"></script>
+  </body>
+</html>

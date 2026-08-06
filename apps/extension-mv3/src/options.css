@@ -1,0 +1,330 @@
+:root {
+  color-scheme: light;
+  --color-canvas: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-surface-control: #f5f7fa;
+  --color-surface-disabled: #edf0f5;
+  --color-text: #18202f;
+  --color-text-strong: #26334a;
+  --color-text-secondary: #42506a;
+  --color-text-muted: #5c667a;
+  --color-text-disabled: #8a94a8;
+  --color-border: #d4d8e2;
+  --color-border-input: #aeb6c6;
+  --color-focus: #1f5eff;
+  --color-primary: #2a69d3;
+  --color-primary-hover: #2059b6;
+  --color-control-hover-bg: #e9eef6;
+  --color-control-hover-border: #8090a8;
+  color: var(--color-text);
+  background: var(--color-canvas);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-canvas: #10141c;
+  --color-surface: #181e29;
+  --color-surface-control: #202735;
+  --color-surface-disabled: #252c38;
+  --color-text: #f3f5f8;
+  --color-text-strong: #e7eaf0;
+  --color-text-secondary: #c5ccd8;
+  --color-text-muted: #aeb8c8;
+  --color-text-disabled: #9da7b6;
+  --color-border: #394353;
+  --color-border-input: #566377;
+  --color-focus: #86a8ff;
+  --color-primary: #6f9cff;
+  --color-primary-hover: #8bb0ff;
+  --color-control-hover-bg: #252d3a;
+  --color-control-hover-border: #6a7890;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-canvas: #10141c;
+    --color-surface: #181e29;
+    --color-surface-control: #202735;
+    --color-surface-disabled: #252c38;
+    --color-text: #f3f5f8;
+    --color-text-strong: #e7eaf0;
+    --color-text-secondary: #c5ccd8;
+    --color-text-muted: #aeb8c8;
+    --color-text-disabled: #9da7b6;
+    --color-border: #394353;
+    --color-border-input: #566377;
+    --color-focus: #86a8ff;
+    --color-primary: #6f9cff;
+    --color-primary-hover: #8bb0ff;
+    --color-control-hover-bg: #252d3a;
+    --color-control-hover-border: #6a7890;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; }
+
+button, select, input, textarea { font: inherit; }
+
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.settings-shell {
+  width: min(760px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 48px 0 64px;
+}
+
+.settings-header { margin-bottom: 28px; }
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 10px; font-size: 30px; line-height: 1.15; }
+h2 { margin-bottom: 7px; font-size: 18px; line-height: 1.3; }
+h3 { margin-bottom: 0; font-size: 15px; line-height: 1.35; }
+
+.settings-intro,
+.section-copy p,
+.field-help {
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.settings-intro { max-width: 620px; margin-bottom: 0; }
+.section-copy p { margin-bottom: 0; }
+
+.settings-section {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.25fr);
+  gap: 28px;
+  align-items: start;
+  border-top: 1px solid var(--color-border);
+  padding: 24px 0;
+}
+
+.settings-section > * { min-width: 0; }
+
+.section-controls {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  color: var(--color-text-strong);
+  font-weight: 650;
+}
+
+.field[hidden] { display: none; }
+
+.field-help { font-size: 13px; font-weight: 400; }
+
+select,
+input[type="text"],
+textarea {
+  width: 100%;
+  border: 1px solid var(--color-border-input);
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+select { min-height: 42px; padding-right: 36px; }
+textarea { min-height: 82px; resize: vertical; line-height: 1.45; }
+
+select:not(:disabled):hover {
+  border-color: var(--color-control-hover-border);
+  background: var(--color-control-hover-bg);
+}
+
+input[type="text"]:not(:disabled):hover,
+textarea:not(:disabled):hover {
+  border-color: var(--color-control-hover-border);
+  background: var(--color-control-hover-bg);
+}
+
+select:disabled {
+  color: var(--color-text-disabled);
+  background: var(--color-surface-disabled);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+input:disabled,
+textarea:disabled {
+  color: var(--color-text-disabled);
+  background: var(--color-surface-disabled);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+button {
+  min-height: 40px;
+  border: 1px solid var(--color-border-input);
+  border-radius: 8px;
+  padding: 8px 13px;
+  color: var(--color-text-strong);
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+button:not(:disabled):hover {
+  border-color: var(--color-control-hover-border);
+  background: var(--color-control-hover-bg);
+}
+
+button:disabled { cursor: not-allowed; opacity: .65; }
+
+.relation-shortcut-settings { gap: 14px; }
+
+.relation-shortcut-toolbar,
+.relation-shortcut-editor-header,
+.relation-shortcut-editor-actions,
+.relation-shortcut-editor-primary-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.relation-shortcut-toolbar,
+.relation-shortcut-editor-header,
+.relation-shortcut-editor-actions {
+  justify-content: space-between;
+}
+
+.relation-shortcut-toolbar button,
+.relation-shortcut-editor-actions button {
+  min-height: 36px;
+  padding: 6px 11px;
+}
+
+.relation-shortcuts-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.relation-shortcut-list-button {
+  width: 100%;
+  min-height: 42px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-shortcut-list-button[aria-pressed="true"] {
+  border-color: var(--color-primary);
+  background: var(--color-surface-control);
+}
+
+.relation-shortcut-editor {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--color-surface-control);
+}
+
+.relation-shortcut-editor-status {
+  min-height: 18px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.relation-shortcut-editor-primary-actions { justify-content: flex-end; }
+
+.switch-setting {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  justify-content: space-between;
+  color: var(--color-text-strong);
+}
+
+.switch-setting-copy { display: grid; gap: 6px; }
+.switch-control { position: relative; flex: 0 0 auto; width: 42px; height: 24px; }
+.switch-control input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--color-border-input);
+  border-radius: 999px;
+  background: var(--color-surface-control);
+  cursor: pointer;
+}
+.switch-track::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  content: "";
+  transition: transform 120ms ease, background 120ms ease;
+}
+.switch-control input:checked + .switch-track { border-color: var(--color-primary); background: var(--color-primary); }
+.switch-control input:checked + .switch-track::after { transform: translateX(18px); background: #fff; }
+.switch-control input:focus-visible + .switch-track { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.switch-control input:disabled + .switch-track { cursor: wait; opacity: .6; }
+.switch-setting:hover input:not(:checked):not(:disabled) + .switch-track {
+  border-color: var(--color-control-hover-border);
+  background: var(--color-control-hover-bg);
+}
+.switch-setting:hover input:checked:not(:disabled) + .switch-track {
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
+}
+
+.setting-status,
+.settings-save-status {
+  min-height: 20px;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-save-status { border-top: 1px solid var(--color-border); padding-top: 16px; }
+
+@media (max-width: 620px) {
+  .settings-shell { width: min(100% - 28px, 760px); padding-top: 28px; }
+  .settings-section { grid-template-columns: 1fr; gap: 16px; }
+  .relation-shortcut-editor-actions { align-items: stretch; }
+}
+
+@media (max-width: 420px) {
+  .relation-shortcut-editor-actions { flex-direction: column-reverse; }
+  .relation-shortcut-editor-primary-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .relation-shortcut-editor-actions > button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; }
+}
