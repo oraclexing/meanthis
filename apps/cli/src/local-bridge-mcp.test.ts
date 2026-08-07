@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   MEANTHIS_CHROME_WEB_STORE_EXTENSION_ID,
   createLocalBridgeState,
@@ -22,6 +22,7 @@ import {
   connectLocalBridgeMcpSurface,
   createHttpLocalBridgeReader,
   createLocalBridgeMcpServer,
+  startLocalBridgeOwnerLease,
 } from "./local-bridge-mcp";
 import {
   RESPONSE_PROOF_HEADER,
@@ -128,6 +129,47 @@ describe("local agent bridge MCP read surface", () => {
       "owner-start",
       "owner-unavailable",
     ]);
+  });
+
+  test("keeps renewing the authenticated owner lease and retries after failure", async () => {
+    let renew: (() => void) | null = null;
+    let attempts = 0;
+    const unavailable = vi.fn();
+    const unref = vi.fn();
+    const clearInterval = vi.fn();
+    const lease = startLocalBridgeOwnerLease({
+      ensureOwner: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("owner unavailable");
+      },
+      onOwnerUnavailable: unavailable,
+    }, {
+      intervalMs: 15_000,
+      setInterval: (callback, intervalMs) => {
+        expect(intervalMs).toBe(15_000);
+        renew = callback;
+        return { unref } as unknown as ReturnType<typeof setInterval>;
+      },
+      clearInterval,
+    });
+
+    expect(attempts).toBe(0);
+    expect(unref).toHaveBeenCalledTimes(1);
+    await lease.refresh();
+    expect(attempts).toBe(1);
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    await lease.refresh();
+    expect(attempts).toBe(2);
+    expect(renew).not.toBeNull();
+    renew?.();
+    expect(attempts).toBe(3);
+    await Promise.resolve();
+
+    lease.stop();
+    renew?.();
+    await lease.refresh();
+    expect(attempts).toBe(3);
+    expect(clearInterval).toHaveBeenCalledTimes(1);
   });
 
   test("approves through the authenticated owner without returning the extension credential", async () => {

@@ -121,7 +121,7 @@ meanthis bridge config --host cursor --json
 | VS Code | Official `code --add-mcp` command and server JSON generated |
 | Cursor | `mcpServers` JSON generated for `~/.cursor/mcp.json` |
 
-The shared descriptor and all four renderers are contract-tested. We do not claim a real-host canary for a client that was not actually installed and exercised. The bridge binds to `127.0.0.1`, requires an explicit extension connection request and short-lived local approval, and exposes only the approved Agent-safe projection. It does not provide arbitrary selectors or browser-control operations. The primary extension workflow does not require it.
+The shared descriptor and all four renderers are contract-tested. We do not claim a real-host canary for a client that was not actually installed and exercised. While an MCP host process is active, an authenticated lease renews the local owner every 15 seconds and recreates it after a loss; after all hosts exit, the owner still closes after 30 minutes without authenticated activity. The bridge binds to `127.0.0.1`, requires an explicit extension connection request and short-lived local approval, and exposes only the approved Agent-safe projection. It does not provide arbitrary selectors or browser-control operations. The primary extension workflow does not require it.
 
 ## Packages
 

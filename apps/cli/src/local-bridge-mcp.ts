@@ -129,6 +129,52 @@ export interface LocalBridgeMcpSurfaceDependencies {
   onOwnerUnavailable(): void;
 }
 
+export interface LocalBridgeOwnerLeaseDependencies {
+  ensureOwner(): Promise<void>;
+  onOwnerUnavailable?(): void;
+}
+
+export interface LocalBridgeOwnerLease {
+  refresh(): Promise<void>;
+  stop(): void;
+}
+
+export function startLocalBridgeOwnerLease(
+  dependencies: LocalBridgeOwnerLeaseDependencies,
+  options: {
+    intervalMs?: number;
+    setInterval?: typeof setInterval;
+    clearInterval?: typeof clearInterval;
+  } = {},
+): LocalBridgeOwnerLease {
+  const intervalMs = options.intervalMs ?? 15_000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
+    throw new Error("Invalid local bridge owner lease interval.");
+  }
+  const schedule = options.setInterval ?? setInterval;
+  const cancel = options.clearInterval ?? clearInterval;
+  let stopped = false;
+  let inFlight: Promise<void> | null = null;
+  const refresh = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (inFlight) return inFlight;
+    inFlight = dependencies.ensureOwner()
+      .catch(() => { dependencies.onOwnerUnavailable?.(); })
+      .finally(() => { inFlight = null; });
+    return inFlight;
+  };
+  const timer = schedule(() => { void refresh(); }, intervalMs);
+  timer.unref?.();
+  return {
+    refresh,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      cancel(timer);
+    },
+  };
+}
+
 export async function connectLocalBridgeMcpSurface(
   dependencies: LocalBridgeMcpSurfaceDependencies,
 ): Promise<void> {
@@ -786,26 +832,31 @@ export async function runLocalBridgeMcpServer(
   const reader = createHttpLocalBridgeReader(UI_ATTACH_LOCAL_BRIDGE_ORIGIN, agentToken, {
     expectedOwnerIdentity,
   });
-  const startupReader = createHttpLocalBridgeReader(UI_ATTACH_LOCAL_BRIDGE_ORIGIN, agentToken, {
-    expectedOwnerIdentity,
-    requestTimeoutMs: 250,
-  });
   const server = createLocalBridgeMcpServer(reader, {
     launchWorkspaceRoot: process.cwd(),
     includeCompatibilityTools: options.includeCompatibilityTools,
   });
+  const ensureOwner = async (): Promise<void> => {
+    const startupReader = createHttpLocalBridgeReader(UI_ATTACH_LOCAL_BRIDGE_ORIGIN, agentToken, {
+      expectedOwnerIdentity: loadLocalBridgeOwnerIdentity(),
+      requestTimeoutMs: 250,
+    });
+    await ensureLocalBridgeOwner({
+      probe: async () => { await startupReader.getStatus(); },
+      spawnOwner: spawnDetachedLocalBridgeOwner,
+      wait: waitForLocalBridgeOwner,
+    });
+  };
+  let ownerLease: LocalBridgeOwnerLease | null = null;
   const close = async (): Promise<void> => {
+    ownerLease?.stop();
     await server.close();
   };
   process.once("SIGINT", () => void close());
   process.once("SIGTERM", () => void close());
   await connectLocalBridgeMcpSurface({
     connect: async () => { await server.connect(new StdioServerTransport()); },
-    ensureOwner: async () => ensureLocalBridgeOwner({
-      probe: async () => { await startupReader.getStatus(); },
-      spawnOwner: spawnDetachedLocalBridgeOwner,
-      wait: waitForLocalBridgeOwner,
-    }),
+    ensureOwner,
     onReady: () => {
       process.stderr.write("MeanThis local bridge MCP proxy ready on stdio.\n");
     },
@@ -813,6 +864,7 @@ export async function runLocalBridgeMcpServer(
       process.stderr.write("MeanThis browser bridge owner unavailable; bridge reads fail closed.\n");
     },
   });
+  ownerLease = startLocalBridgeOwnerLease({ ensureOwner });
 }
 
 function textResult(value: unknown) {

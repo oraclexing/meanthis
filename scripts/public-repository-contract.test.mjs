@@ -1,10 +1,13 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const agentDocsRoot = existsSync(join(root, "AGENT_INSTALL.md"))
+  ? root
+  : resolve(root, "..", "..");
 
 describe("public repository contract", () => {
   test("keeps the projected repository product-first and public-safe", async () => {
@@ -23,15 +26,15 @@ describe("public repository contract", () => {
     ] = await Promise.all([
       readFile(join(root, "README.md"), "utf8"),
       readFile(join(root, "README_zh.md"), "utf8"),
-      readFile(join(root, "AGENT_INSTALL.md"), "utf8"),
-      readFile(join(root, "AGENT_INSTALL_zh.md"), "utf8"),
+      readFile(join(agentDocsRoot, "AGENT_INSTALL.md"), "utf8"),
+      readFile(join(agentDocsRoot, "AGENT_INSTALL_zh.md"), "utf8"),
       readFile(join(root, "PRIVACY.md"), "utf8"),
       readFile(join(root, "PRIVACY_zh.md"), "utf8"),
       readFile(join(root, "RELEASING.md"), "utf8"),
       readFile(join(root, "RELEASING_zh.md"), "utf8"),
       readFile(join(root, "_config.yml"), "utf8"),
       readFile(join(root, ".github", "workflows", "release.yml"), "utf8"),
-      readFile(join(root, "package.json"), "utf8").then(JSON.parse),
+      readFile(join(agentDocsRoot, "package.json"), "utf8").then(JSON.parse),
     ]);
     for (const heading of [
       "## Why MeanThis",

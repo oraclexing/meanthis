@@ -121,7 +121,7 @@ meanthis bridge config --host cursor --json
 | VS Code | 生成官方 `code --add-mcp` command 与 server JSON |
 | Cursor | 生成写入 `~/.cursor/mcp.json` 的 `mcpServers` JSON |
 
-共享 descriptor 与四种 renderer 都有 contract test。没有真实安装和运行过的 client，不会被标记为通过 real-host canary。Bridge 只绑定 `127.0.0.1`，需要扩展显式创建连接请求并经过短时本地批准，只暴露已批准的 Agent-safe projection。它不接受任意 selector，也不提供浏览器控制操作。扩展的主要流程不依赖它。
+共享 descriptor 与四种 renderer 都有 contract test。没有真实安装和运行过的 client，不会被标记为通过 real-host canary。MCP host process 运行期间，经过认证的 lease 会每 15 秒续订本地 owner，并在 owner 丢失后重建；所有 host 退出后，owner 仍会在 30 分钟没有认证活动时关闭。Bridge 只绑定 `127.0.0.1`，需要扩展显式创建连接请求并经过短时本地批准，只暴露已批准的 Agent-safe projection。它不接受任意 selector，也不提供浏览器控制操作。扩展的主要流程不依赖它。
 
 ## Packages
 

@@ -54,6 +54,7 @@ async function runWorker(workerRole) {
   const {
     approveHttpLocalBridgeConnectionRequest,
     createHttpLocalBridgeReader,
+    startLocalBridgeOwnerLease,
   } = await import("../dist/local-bridge-mcp.js");
   const origin = requireEnvironment("UI_ATTACH_BRIDGE_PROCESS_ORIGIN");
   const reader = createHttpLocalBridgeReader(origin, agentToken, {
@@ -67,6 +68,27 @@ async function runWorker(workerRole) {
       type: "status",
       instanceCount: status.instances.length,
     });
+    if (process.connected) process.disconnect();
+    return;
+  }
+
+  if (workerRole === "lease-proxy") {
+    const lease = startLocalBridgeOwnerLease({
+      ensureOwner: async () => { await reader.getStatus(); },
+    }, {
+      intervalMs: Number(requireEnvironment("UI_ATTACH_BRIDGE_PROCESS_LEASE_INTERVAL_MS")),
+    });
+    try {
+      await lease.refresh();
+      await new Promise((resolveDelay) => setTimeout(
+        resolveDelay,
+        Number(requireEnvironment("UI_ATTACH_BRIDGE_PROCESS_LEASE_DURATION_MS")),
+      ));
+      await reader.getStatus();
+      sendMessage({ type: "lease-held" });
+    } finally {
+      lease.stop();
+    }
     if (process.connected) process.disconnect();
     return;
   }
@@ -226,6 +248,32 @@ async function runParent() {
     assert.equal(owner.child.exitCode, null, "owner exited with its fresh read proxy");
     await assertCleanExit(owner, 10_000, "idle owner");
 
+    const leaseSentinel = join(temporaryRoot, "lease-build-hash.txt");
+    const leaseIdentity = {
+      executablePath: process.execPath,
+      entryPath: `${scriptPath}#lease-owner`,
+      buildHash: "d".repeat(64),
+    };
+    await writeFile(leaseSentinel, leaseIdentity.buildHash, "utf8");
+    const leaseOwner = spawnWorker("owner", {
+      agentToken,
+      ownerIdentity: leaseIdentity,
+      sentinelPath: leaseSentinel,
+      idleMs: 250,
+      idleCheckMs: 10,
+    });
+    workers.add(leaseOwner);
+    const leaseReady = await waitForMessage(leaseOwner, "ready");
+    await runProxy(workers, "lease-proxy", {
+      agentToken,
+      ownerIdentity: leaseIdentity,
+      origin: leaseReady.origin,
+      leaseDurationMs: 750,
+      leaseIntervalMs: 50,
+    }, "lease-held");
+    assert.equal(leaseOwner.child.exitCode, null, "owner exited while an MCP lease was active");
+    await assertCleanExit(leaseOwner, 2_000, "post-lease idle owner");
+
     const buildSentinel = join(temporaryRoot, "changed-build-hash.txt");
     const buildIdentity = {
       executablePath: process.execPath,
@@ -246,7 +294,7 @@ async function runParent() {
     await assertCleanExit(buildOwner, 5_000, "build-changed owner");
 
     process.stdout.write(
-      "Local bridge owner process smoke verified: browser request approval, fresh proxy read, idle cleanup, and build-change cleanup passed.\n",
+      "Local bridge owner process smoke verified: browser request approval, fresh proxy read, active MCP lease, post-lease idle cleanup, and build-change cleanup passed.\n",
     );
   } finally {
     const cleanup = await Promise.allSettled([...workers].map(stopWorker));
@@ -281,6 +329,12 @@ function spawnWorker(workerRole, options) {
       } : {}),
       ...(options.approvalKey ? {
         UI_ATTACH_BRIDGE_PROCESS_APPROVAL_KEY: options.approvalKey,
+      } : {}),
+      ...(options.leaseDurationMs ? {
+        UI_ATTACH_BRIDGE_PROCESS_LEASE_DURATION_MS: String(options.leaseDurationMs),
+      } : {}),
+      ...(options.leaseIntervalMs ? {
+        UI_ATTACH_BRIDGE_PROCESS_LEASE_INTERVAL_MS: String(options.leaseIntervalMs),
       } : {}),
     },
     stdio: ["ignore", "pipe", "pipe", "ipc"],

@@ -26,7 +26,7 @@ npm run setup:bridge:codex
 meanthis bridge doctor --json
 ```
 
-The setup command builds and links the CLI, backs up the Codex configuration before a real change, registers the MCP server as `meanthis`, safely removes an exact legacy `ui-attach` registration from the same installation, and starts and verifies the local bridge owner. A conflicting registration is never overwritten.
+The setup command builds and links the CLI, backs up the Codex configuration before a real change, registers the MCP server as `meanthis`, safely removes an exact legacy `ui-attach` registration from the same installation, and starts and verifies the local bridge owner. A conflicting registration is never overwritten. While the MCP host process is active, an authenticated lease keeps the owner available and automatically recreates it after a loss; after all hosts exit, the owner still closes after 30 minutes without authenticated activity.
 
 For Claude Code, VS Code, or Cursor, first build and link the companion, then generate the host-specific artifact:
 
@@ -56,7 +56,7 @@ Before the Chrome Web Store listing is public, use the reviewed extension artifa
 4. Confirm the result without repeating the approval key.
 5. Discover captures with `meanthis_list_captures`, then request only the necessary detail with `meanthis_read_capture`. Use `meanthis_resolve_source` only when a capture contains a source anchor.
 
-If the side panel reports that the local Agent connection failed, run `meanthis bridge start --json`, verify a successful result, and let the user retry. Do not ask the user to click repeatedly to bootstrap the runtime.
+If the side panel reports that the local Agent connection failed, run `meanthis bridge doctor --json`. An active MCP host normally repairs the owner within 15 seconds; if the host has not started its MCP process, run `meanthis bridge start --json`, verify a successful result, and let the user retry. Do not ask the user to click repeatedly to bootstrap the runtime.
 
 If `npm link` reports `EEXIST` for an old `ui-attach` shim, do not use `--force`. Inspect the shim and the package under `npm root --global`; only when both resolve to this exact checkout and the linked package now identifies itself as `@meanthis/cli`, run `npm unlink --global` with the exact legacy package name read from that package's metadata, then rerun setup. Leave any foreign installation untouched.
 

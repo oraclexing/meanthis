@@ -26,7 +26,7 @@ npm run setup:bridge:codex
 meanthis bridge doctor --json
 ```
 
-Setup 会 build 并 link CLI，在真实修改前备份 Codex configuration，把 MCP server 注册为 `meanthis`，安全移除来自同一安装的精确 legacy `ui-attach` registration，并启动和验证本地 bridge owner。遇到冲突 registration 时不会覆盖。
+Setup 会 build 并 link CLI，在真实修改前备份 Codex configuration，把 MCP server 注册为 `meanthis`，安全移除来自同一安装的精确 legacy `ui-attach` registration，并启动和验证本地 bridge owner。遇到冲突 registration 时不会覆盖。MCP host process 运行期间，经过认证的 lease 会让 owner 保持可用，并在 owner 丢失后自动重建；所有 host 都退出后，owner 仍会在 30 分钟没有认证活动时关闭。
 
 Claude Code、VS Code 或 Cursor 先 build/link companion，再生成对应 host artifact：
 
@@ -56,7 +56,7 @@ Chrome Web Store listing 公开前，使用项目 release instructions 指定的
 4. 确认结果，但不要复述 approval key。
 5. 先用 `meanthis_list_captures` 发现 capture，再用 `meanthis_read_capture` 渐进读取必要细节。只有 capture 含 source anchor 时才使用 `meanthis_resolve_source`。
 
-如果 side panel 显示本地 Agent 连接失败，运行 `meanthis bridge start --json`，确认成功后再让用户重试。不要要求用户反复点击来隐式启动 runtime。
+如果 side panel 显示本地 Agent 连接失败，先运行 `meanthis bridge doctor --json`。正在运行的 MCP host 通常会在 15 秒内修复 owner；如果 host 还没有启动 MCP process，则运行 `meanthis bridge start --json`，确认成功后再让用户重试。不要要求用户反复点击来隐式启动 runtime。
 
 如果 `npm link` 因旧 `ui-attach` shim 返回 `EEXIST`，不要使用 `--force`。先检查该 shim 与 `npm root --global` 下的 package；只有两者都解析到当前精确 checkout，且 linked package 现在将自己标识为 `@meanthis/cli` 时，才用该 package metadata 中读到的精确 legacy package name 运行 `npm unlink --global`，再重试 setup。任何 foreign installation 都必须保持不动。
 

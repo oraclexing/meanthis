@@ -32,7 +32,7 @@ Codex 是第一个自动化 adapter，因为它的 CLI 支持结构化 registrat
 meanthis bridge install --host codex --json
 ```
 
-该命令还会启动并验证 detached local owner。它会安全迁移指向同一安装的精确 legacy `ui-attach` registration，绝不会覆盖冲突 registration。
+该命令还会启动并验证 detached local owner。它会安全迁移指向同一安装的精确 legacy `ui-attach` registration，绝不会覆盖冲突 registration。只要 MCP host process 仍在运行，它就会每 15 秒续订一次经过认证的 owner lease，并在 owner 丢失后重新创建；所有 host process 都退出后，owner 仍会在 30 分钟没有认证活动时关闭。
 
 旧命令 `meanthis bridge install --codex --json` 继续兼容。对于其他宿主，MeanThis 只生成官方 command 或 JSON，不会修改宿主：
 
@@ -42,7 +42,7 @@ meanthis bridge config --host vscode --json
 meanthis bridge config --host cursor --json
 ```
 
-应用生成的 artifact 后运行 `meanthis bridge start --json`，这样 extension 可在 host 第一次调用 MCP tool 前连接。
+应用生成的 artifact 后运行 `meanthis bridge start --json`，这样 extension 可在 host 第一次调用 MCP tool 前连接。Host 启动 MCP server 后，同一 lease 机制会让 owner 保持可用。
 
 | 宿主 | 生成的 setup | 自动验证 |
 | --- | --- | --- |

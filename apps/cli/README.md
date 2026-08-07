@@ -32,7 +32,7 @@ Codex is the first automated adapter because its CLI supports structured registr
 meanthis bridge install --host codex --json
 ```
 
-This command also starts and verifies the detached local owner. It safely migrates an exact legacy `ui-attach` registration that points to the same installation and never overwrites a conflicting registration.
+This command also starts and verifies the detached local owner. It safely migrates an exact legacy `ui-attach` registration that points to the same installation and never overwrites a conflicting registration. While an MCP host process is running, it renews an authenticated owner lease every 15 seconds and recreates a lost owner. After every host process exits, the owner still closes after 30 minutes without authenticated activity.
 
 The older `meanthis bridge install --codex --json` command remains compatible. For other hosts, MeanThis generates the official command or JSON without modifying the host:
 
@@ -42,7 +42,7 @@ meanthis bridge config --host vscode --json
 meanthis bridge config --host cursor --json
 ```
 
-After applying a generated artifact, run `meanthis bridge start --json` so the extension can connect before the host first invokes an MCP tool.
+After applying a generated artifact, run `meanthis bridge start --json` so the extension can connect before the host first invokes an MCP tool. Once that host starts the MCP server, the same lease behavior keeps the owner available.
 
 | Host | Generated setup | Automatic verification |
 | --- | --- | --- |
