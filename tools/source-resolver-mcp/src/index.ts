@@ -8,7 +8,8 @@ import {
 import { fileURLToPath } from "node:url";
 import { z } from "zod/v4";
 
-export const UI_ATTACH_SOURCE_RESOLVER_TOOL_NAME = "ui_attach_resolve_source" as const;
+export const MEANTHIS_SOURCE_RESOLVER_TOOL_NAME = "meanthis_resolve_source" as const;
+export const UI_ATTACH_SOURCE_RESOLVER_TOOL_NAME = MEANTHIS_SOURCE_RESOLVER_TOOL_NAME;
 
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -29,7 +30,7 @@ export function registerSourceResolverMcpTool(
   options: SourceResolverMcpServerOptions = {},
 ): void {
   server.registerTool(
-    UI_ATTACH_SOURCE_RESOLVER_TOOL_NAME,
+    MEANTHIS_SOURCE_RESOLVER_TOOL_NAME,
     {
       title: "Resolve one MeanThis source anchor",
       description:

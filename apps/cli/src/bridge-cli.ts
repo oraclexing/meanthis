@@ -10,8 +10,16 @@ import {
   UI_ATTACH_LOCAL_BRIDGE_SCHEMA_VERSION,
 } from "@meanthis/schema";
 import { loadOrCreateLocalBridgeAgentToken } from "./local-bridge-agent-token.js";
-import { loadLocalBridgeOwnerIdentity } from "./local-bridge-owner.js";
-import { approveHttpLocalBridgeConnectionRequest } from "./local-bridge-mcp.js";
+import {
+  ensureLocalBridgeOwner,
+  loadLocalBridgeOwnerIdentity,
+  spawnDetachedLocalBridgeOwner,
+  waitForLocalBridgeOwner,
+} from "./local-bridge-owner.js";
+import {
+  approveHttpLocalBridgeConnectionRequest,
+  createHttpLocalBridgeReader,
+} from "./local-bridge-mcp.js";
 import type { LocalBridgeConnectionApproval } from "./local-bridge.js";
 import {
   createMeanThisMcpDescriptor,
@@ -21,10 +29,11 @@ import {
 } from "./mcp-host-config.js";
 
 const REGISTRATION_NAME = MEANTHIS_MCP_REGISTRATION_NAME;
+const LEGACY_REGISTRATION_NAME = "ui-attach";
 const PROCESS_TIMEOUT_MS = 10_000;
 const MAX_PROCESS_OUTPUT_BYTES = 1_048_576;
 
-type BridgeCommand = "approve" | "config" | "doctor" | "install" | "uninstall";
+type BridgeCommand = "approve" | "config" | "doctor" | "install" | "start" | "uninstall";
 type RegistrationStatus = "current" | "drifted" | "missing" | "unavailable" | "error";
 export type LoopbackProbeStatus = "ready" | "not_running" | "unexpected";
 
@@ -47,6 +56,7 @@ export interface BridgeCliDependencies {
   probeLoopback(): Promise<LoopbackProbeStatus>;
   backupCodexConfig(): Promise<CodexConfigBackup>;
   runCodex(args: string[]): Promise<CodexProcessResult>;
+  ensureOwner(): Promise<void>;
   approveConnectionRequest(
     requestId: string,
     approvalMode: LocalBridgeApprovalMode,
@@ -119,6 +129,9 @@ export async function runBridgeCli(
   if (parsed.command === "doctor") {
     return runDoctor(io, dependencies);
   }
+  if (parsed.command === "start") {
+    return runStart(io, dependencies);
+  }
   if (parsed.command === "approve") {
     return runApprove(
       io,
@@ -145,13 +158,15 @@ export function renderBridgeHelp(): string {
     "  meanthis bridge config --host <codex|claude-code|vscode|cursor> --json",
     "  meanthis bridge doctor --json",
     "  meanthis bridge install --host codex [--dry-run] --json",
+    "  meanthis bridge start --json",
     "  meanthis bridge uninstall --host codex [--dry-run] --json",
     "",
     "Commands:",
     "  approve    Approve one browser-created connection request through the authenticated owner.",
     "  config     Generate a host command or JSON configuration from one shared stdio descriptor.",
     "  doctor     Check the built MCP entry, Codex registration, and loopback runtime.",
-    "  install    Add the exact ui-attach stdio MCP registration through Codex CLI.",
+    "  install    Add the exact meanthis stdio MCP registration and start its local owner.",
+    "  start      Start or reuse the exact-build local owner without changing host configuration.",
     "  uninstall  Remove only the exact registration managed by this checkout.",
     "",
     "All command results are stable JSON. Connection secrets, tokens, and page content are never printed.",
@@ -186,10 +201,10 @@ function parseBridgeArguments(args: string[]): ParsedBridgeArguments {
       throw new Error("Invalid config option.");
     }
     host = parsed.values.host;
-  } else if (command === "doctor") {
+  } else if (command === "doctor" || command === "start") {
     if ((parsed.values.host !== undefined && parsed.values.host !== "codex")
       || optionNames.some((name) => !["host", "json"].includes(name))) {
-      throw new Error("Invalid doctor option.");
+      throw new Error(`Invalid ${command} option.`);
     }
     host = "codex";
   } else if (command === "approve") {
@@ -234,6 +249,7 @@ function isBridgeCommand(value: string): value is BridgeCommand {
     || value === "config"
     || value === "doctor"
     || value === "install"
+    || value === "start"
     || value === "uninstall";
 }
 
@@ -293,10 +309,11 @@ async function runApprove(
 }
 
 async function runDoctor(io: BridgeCliIo, dependencies: BridgeCliDependencies): Promise<number> {
-  const [cliBuilt, loopback, registration] = await Promise.all([
+  const [cliBuilt, loopback, registration, legacyRegistration] = await Promise.all([
     dependencies.pathExists(dependencies.entryPath),
     dependencies.probeLoopback(),
-    readRegistration(dependencies),
+    readRegistration(dependencies, REGISTRATION_NAME),
+    readRegistration(dependencies, LEGACY_REGISTRATION_NAME),
   ]);
   const codexAvailable = registration.status !== "unavailable";
   const registrationReady = cliBuilt && registration.status === "current";
@@ -308,6 +325,7 @@ async function runDoctor(io: BridgeCliIo, dependencies: BridgeCliDependencies): 
       registrationReady,
       runtimeActive: loopback === "ready",
       registrationName: REGISTRATION_NAME,
+      legacyRegistrationName: LEGACY_REGISTRATION_NAME,
       command: expectedCommand(dependencies),
       checks: {
         cliBuilt: {
@@ -321,21 +339,49 @@ async function runDoctor(io: BridgeCliIo, dependencies: BridgeCliDependencies): 
         registration: {
           status: registration.status,
           next: registration.status === "missing"
-            ? "Run meanthis bridge install --codex --json."
+            ? "Run meanthis bridge install --host codex --json."
             : registration.status === "drifted"
-              ? "Resolve the existing ui-attach MCP registration before installing this checkout."
+              ? "Resolve the existing meanthis MCP registration before installing this checkout."
+              : null,
+        },
+        legacyRegistration: {
+          status: legacyRegistration.status,
+          next: legacyRegistration.status === "current"
+            ? "Run meanthis bridge install --host codex --json to migrate the legacy ui-attach registration."
+            : legacyRegistration.status === "drifted"
+              ? "Resolve the existing legacy ui-attach MCP registration manually."
               : null,
         },
         loopback: {
           status: loopback,
           origin: UI_ATTACH_LOCAL_BRIDGE_ORIGIN,
           next: loopback === "not_running"
-            ? "A fresh Codex task starts the registered MCP process; then create a request in the extension."
+            ? "Run meanthis bridge install --host codex --json to start and verify the local owner."
             : loopback === "unexpected"
               ? "Another process is using the MeanThis loopback address."
               : null,
         },
       },
+    },
+  });
+}
+
+async function runStart(io: BridgeCliIo, dependencies: BridgeCliDependencies): Promise<number> {
+  if (!await dependencies.pathExists(dependencies.entryPath)) {
+    return writeError(io, 5, "CLI_NOT_BUILT", "Build MeanThis before starting its local bridge.");
+  }
+  try {
+    await dependencies.ensureOwner();
+  } catch {
+    return writeError(io, 5, "BRIDGE_START_FAILED", "The MeanThis local bridge owner did not start.");
+  }
+  return writeJson(io, {
+    schemaVersion: UI_ATTACH_LOCAL_BRIDGE_SCHEMA_VERSION,
+    kind: "ui-attach.bridge-start",
+    ok: true,
+    data: {
+      runtimeActive: true,
+      origin: UI_ATTACH_LOCAL_BRIDGE_ORIGIN,
     },
   });
 }
@@ -346,49 +392,89 @@ async function runInstall(
   dryRun: boolean,
 ): Promise<number> {
   if (!await dependencies.pathExists(dependencies.entryPath)) {
-    return writeError(io, 5, "CLI_NOT_BUILT", "Build ui-attach before installing its MCP bridge.");
+    return writeError(io, 5, "CLI_NOT_BUILT", "Build MeanThis before installing its MCP bridge.");
   }
-  const registration = await readRegistration(dependencies);
-  if (registration.status === "unavailable") {
+  const [registration, legacyRegistration] = await Promise.all([
+    readRegistration(dependencies, REGISTRATION_NAME),
+    readRegistration(dependencies, LEGACY_REGISTRATION_NAME),
+  ]);
+  if (registration.status === "unavailable" || legacyRegistration.status === "unavailable") {
     return writeError(io, 5, "CODEX_CLI_UNAVAILABLE", "Codex CLI is not available.");
   }
-  if (registration.status === "error") {
-    return writeError(io, 5, "REGISTRATION_READ_FAILED", "Unable to read the ui-attach MCP registration.");
+  if (registration.status === "error" || legacyRegistration.status === "error") {
+    return writeError(io, 5, "REGISTRATION_READ_FAILED", "Unable to read the MeanThis MCP registrations.");
   }
-  if (registration.status === "drifted") {
+  if (registration.status === "drifted" || legacyRegistration.status === "drifted") {
     return writeError(
       io,
       5,
       "REGISTRATION_CONFLICT",
-      "A different ui-attach MCP registration already exists.",
+      "A different MeanThis or legacy ui-attach MCP registration already exists.",
     );
   }
-  if (registration.status === "current") {
-    return writeSetupResult(io, "install", "none", false, dryRun, dependencies, null);
-  }
+  const shouldAdd = registration.status === "missing";
+  const shouldRemoveLegacy = legacyRegistration.status === "current";
+  const action = shouldAdd && shouldRemoveLegacy
+    ? "migrate"
+    : shouldAdd
+      ? "add"
+      : shouldRemoveLegacy
+        ? "remove_legacy"
+        : "none";
   if (dryRun) {
-    return writeSetupResult(io, "install", "add", false, true, dependencies, null);
+    return writeSetupResult(io, "install", action, false, true, dependencies, null);
   }
 
-  const backup = await createConfigBackup(io, dependencies);
-  if (typeof backup === "number") return backup;
+  let backup: CodexConfigBackup | null = null;
+  if (shouldAdd || shouldRemoveLegacy) {
+    const createdBackup = await createConfigBackup(io, dependencies);
+    if (typeof createdBackup === "number") return createdBackup;
+    backup = createdBackup;
+  }
   const command = expectedCommand(dependencies);
-  const added = await dependencies.runCodex([
-    "mcp",
-    "add",
-    REGISTRATION_NAME,
-    "--",
-    command.executable,
-    ...command.args,
-  ]);
-  if (!added.started || added.exitCode !== 0) {
-    return writeError(io, 5, "REGISTRATION_WRITE_FAILED", "Unable to add the ui-attach MCP registration.");
+  if (shouldAdd) {
+    const added = await dependencies.runCodex([
+      "mcp",
+      "add",
+      REGISTRATION_NAME,
+      "--",
+      command.executable,
+      ...command.args,
+    ]);
+    if (!added.started || added.exitCode !== 0) {
+      return writeError(io, 5, "REGISTRATION_WRITE_FAILED", "Unable to add the meanthis MCP registration.");
+    }
+    const verified = await readRegistration(dependencies, REGISTRATION_NAME);
+    if (verified.status !== "current") {
+      return writeError(io, 5, "REGISTRATION_VERIFY_FAILED", "The meanthis MCP registration did not verify.");
+    }
   }
-  const verified = await readRegistration(dependencies);
-  if (verified.status !== "current") {
-    return writeError(io, 5, "REGISTRATION_VERIFY_FAILED", "The ui-attach MCP registration did not verify.");
+  if (shouldRemoveLegacy) {
+    const removed = await dependencies.runCodex(["mcp", "remove", LEGACY_REGISTRATION_NAME]);
+    if (!removed.started || removed.exitCode !== 0) {
+      return writeError(io, 5, "REGISTRATION_WRITE_FAILED", "Unable to remove the legacy ui-attach MCP registration.");
+    }
+    const verified = await readRegistration(dependencies, LEGACY_REGISTRATION_NAME);
+    if (verified.status !== "missing") {
+      return writeError(io, 5, "REGISTRATION_VERIFY_FAILED", "The legacy ui-attach MCP removal did not verify.");
+    }
   }
-  return writeSetupResult(io, "install", "add", true, false, dependencies, backup);
+  try {
+    await dependencies.ensureOwner();
+  } catch {
+    return writeError(io, 5, "BRIDGE_START_FAILED", "The MeanThis local bridge owner did not start.");
+  }
+  return writeSetupResult(
+    io,
+    "install",
+    action,
+    shouldAdd || shouldRemoveLegacy,
+    false,
+    dependencies,
+    backup,
+    true,
+    shouldRemoveLegacy,
+  );
 }
 
 async function runUninstall(
@@ -396,7 +482,7 @@ async function runUninstall(
   dependencies: BridgeCliDependencies,
   dryRun: boolean,
 ): Promise<number> {
-  const registration = await readRegistration(dependencies);
+  const registration = await readRegistration(dependencies, REGISTRATION_NAME);
   if (registration.status === "unavailable") {
     return writeError(io, 5, "CODEX_CLI_UNAVAILABLE", "Codex CLI is not available.");
   }
@@ -422,11 +508,11 @@ async function runUninstall(
   if (typeof backup === "number") return backup;
   const removed = await dependencies.runCodex(["mcp", "remove", REGISTRATION_NAME]);
   if (!removed.started || removed.exitCode !== 0) {
-    return writeError(io, 5, "REGISTRATION_WRITE_FAILED", "Unable to remove the ui-attach MCP registration.");
+    return writeError(io, 5, "REGISTRATION_WRITE_FAILED", "Unable to remove the meanthis MCP registration.");
   }
-  const verified = await readRegistration(dependencies);
+  const verified = await readRegistration(dependencies, REGISTRATION_NAME);
   if (verified.status !== "missing") {
-    return writeError(io, 5, "REGISTRATION_VERIFY_FAILED", "The ui-attach MCP removal did not verify.");
+    return writeError(io, 5, "REGISTRATION_VERIFY_FAILED", "The meanthis MCP removal did not verify.");
   }
   return writeSetupResult(io, "uninstall", "remove", true, false, dependencies, backup);
 }
@@ -447,18 +533,27 @@ async function createConfigBackup(
   }
 }
 
-async function readRegistration(dependencies: BridgeCliDependencies): Promise<RegistrationReadback> {
-  const result = await dependencies.runCodex(["mcp", "get", REGISTRATION_NAME, "--json"]);
+async function readRegistration(
+  dependencies: BridgeCliDependencies,
+  registrationName: string,
+): Promise<RegistrationReadback> {
+  const result = await dependencies.runCodex(["mcp", "get", registrationName, "--json"]);
   if (!result.started) return { status: "unavailable", registration: null };
   if (result.exitCode !== 0) {
-    return /No MCP server named ['"]ui-attach['"] found\.?/i.test(result.stderr)
+    const missingPattern = new RegExp(
+      `No MCP server named ['"]${escapeRegExp(registrationName)}['"] found\\.?`,
+      "i",
+    );
+    return missingPattern.test(result.stderr)
       ? { status: "missing", registration: null }
       : { status: "error", registration: null };
   }
   const registration = parseRegistration(result.stdout);
   if (!registration) return { status: "error", registration: null };
   return {
-    status: isExpectedRegistration(registration, dependencies) ? "current" : "drifted",
+    status: isExpectedRegistration(registration, dependencies, registrationName)
+      ? "current"
+      : "drifted",
     registration,
   };
 }
@@ -511,10 +606,11 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 function isExpectedRegistration(
   registration: CodexRegistration,
   dependencies: BridgeCliDependencies,
+  registrationName: string,
 ): boolean {
   const expected = expectedCommand(dependencies);
   return (
-    registration.name === REGISTRATION_NAME &&
+    registration.name === registrationName &&
     registration.enabled &&
     samePath(registration.transport.command, expected.executable) &&
     registration.transport.args.length === expected.args.length &&
@@ -546,14 +642,20 @@ function samePath(left: string, right: string): boolean {
     : normalizedLeft === normalizedRight;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function writeSetupResult(
   io: BridgeCliIo,
   command: "install" | "uninstall",
-  action: "add" | "remove" | "none",
+  action: "add" | "migrate" | "remove_legacy" | "remove" | "none",
   changed: boolean,
   dryRun: boolean,
   dependencies: BridgeCliDependencies,
   configBackup: CodexConfigBackup | null,
+  runtimeActive = false,
+  removedLegacyRegistration = false,
 ): number {
   return writeJson(io, {
     schemaVersion: UI_ATTACH_LOCAL_BRIDGE_SCHEMA_VERSION,
@@ -564,6 +666,8 @@ function writeSetupResult(
       changed,
       dryRun,
       configBackup,
+      runtimeActive,
+      removedLegacyRegistration,
       registrationName: REGISTRATION_NAME,
       command: expectedCommand(dependencies),
     },
@@ -598,6 +702,20 @@ function createDefaultDependencies(): BridgeCliDependencies {
     pathExists,
     probeLoopback,
     backupCodexConfig,
+    async ensureOwner() {
+      const agentToken = await loadOrCreateLocalBridgeAgentToken();
+      const expectedOwnerIdentity = loadLocalBridgeOwnerIdentity();
+      const startupReader = createHttpLocalBridgeReader(
+        UI_ATTACH_LOCAL_BRIDGE_ORIGIN,
+        agentToken,
+        { expectedOwnerIdentity, requestTimeoutMs: 250 },
+      );
+      await ensureLocalBridgeOwner({
+        probe: async () => { await startupReader.getStatus(); },
+        spawnOwner: spawnDetachedLocalBridgeOwner,
+        wait: waitForLocalBridgeOwner,
+      });
+    },
     async approveConnectionRequest(requestId, approvalMode, approvalKey) {
       const agentToken = await loadOrCreateLocalBridgeAgentToken();
       const expectedOwnerIdentity = loadLocalBridgeOwnerIdentity();
@@ -628,7 +746,7 @@ async function backupCodexConfig(): Promise<CodexConfigBackup> {
   const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, "");
   const destination = join(
     codexHome,
-    `config.toml.bak-ui-attach-${timestamp}-${process.pid}`,
+    `config.toml.bak-meanthis-${timestamp}-${process.pid}`,
   );
   await copyFile(source, destination);
   return { status: "created", path: destination };

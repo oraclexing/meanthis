@@ -88,6 +88,12 @@ npm run demo
 
 Demo 不会替代原生扩展 side panel 或 saved-capture 流程。
 
+## 让 Agent 帮你安装
+
+你可以把仓库 URL 交给 coding Agent，并要求它安装 MeanThis。确定性双语安装契约见 [AGENT_INSTALL_zh.md](./AGENT_INSTALL_zh.md)。其中说明了 Agent 应如何 clone 并验证源码、构建和注册 host-neutral MCP companion、启动本地 bridge owner，以及验证三个只读的 `meanthis_*` tools。
+
+Agent 可以准备扩展文件并打开相应浏览器页面，但 Chrome 仍须把扩展安装或权限步骤显示给用户确认。MeanThis 不要求单独安装 Skill。在首个 npm 与 Chrome Web Store release 发布前，仓库 checkout 是权威安装来源。
+
 ## 可选、宿主无关的 MCP companion
 
 Public repository 中的 CLI workspace 提供默认关闭、只读的本地 companion。`meanthis mcp` 是同一套标准 stdio MCP server，并不只属于 Codex；不同宿主的 adapter 只负责描述怎样启动同一个 executable。
@@ -95,16 +101,17 @@ Public repository 中的 CLI workspace 提供默认关闭、只读的本地 comp
 从源码 checkout 中，Codex adapter 可以自动安装并精确读回 registration：
 
 ```bash
-npm run setup:codex-bridge
+npm run setup:bridge:codex
 ```
 
 其他受支持宿主只需构建一次，然后生成对应 command 或 JSON config；MeanThis 不会修改这些宿主：
 
 ```bash
-npm run build
-node apps/cli/dist/index.js bridge config --host claude-code --json
-node apps/cli/dist/index.js bridge config --host vscode --json
-node apps/cli/dist/index.js bridge config --host cursor --json
+npm run build:bridge
+npm link --workspace @meanthis/cli
+meanthis bridge config --host claude-code --json
+meanthis bridge config --host vscode --json
+meanthis bridge config --host cursor --json
 ```
 
 | 宿主 | v0.1 setup 边界 |

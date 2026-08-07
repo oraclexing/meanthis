@@ -131,7 +131,7 @@ describe("standalone source resolver Codex registration manager", () => {
 
   test.each([
     { enabled_tools: ["another_tool"] },
-    { disabled_tools: ["ui_attach_resolve_source"] },
+    { disabled_tools: ["meanthis_resolve_source"] },
   ])("treats incompatible tool policy as registration drift", async (policy) => {
     const harness = createHarness({
       registration: { ...createRegistration(ENTRY_PATH), ...policy },

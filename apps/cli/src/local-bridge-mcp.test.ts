@@ -187,9 +187,9 @@ describe("local agent bridge MCP read surface", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
-        "ui_attach_list_captures",
-        "ui_attach_read_capture",
-        "ui_attach_resolve_source",
+        "meanthis_list_captures",
+        "meanthis_read_capture",
+        "meanthis_resolve_source",
       ]);
     } finally {
       await client.close();
@@ -239,11 +239,11 @@ describe("local agent bridge MCP read surface", () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const list = await client.callTool({ name: "ui_attach_list_captures", arguments: {} });
+      const list = await client.callTool({ name: "meanthis_list_captures", arguments: {} });
       expect(JSON.parse(readText(list))).toMatchObject({ captures: [] });
 
       const read = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-1",
@@ -256,7 +256,7 @@ describe("local agent bridge MCP read surface", () => {
 
       throwReads = true;
       const unavailable = await client.callTool({
-        name: "ui_attach_list_captures",
+        name: "meanthis_list_captures",
         arguments: {},
       });
       expect(unavailable.isError).toBe(true);
@@ -280,13 +280,13 @@ describe("local agent bridge MCP read surface", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
-        "ui_attach_list_captures",
-        "ui_attach_read_capture",
+        "meanthis_list_captures",
+        "meanthis_read_capture",
         "ui_attach_bridge_status",
         "ui_attach_list_instances",
         "ui_attach_read_instance",
         "ui_attach_verify_page_completion",
-        "ui_attach_resolve_source",
+        "meanthis_resolve_source",
       ]);
       for (const tool of tools.tools) {
         expect(tool.annotations).toMatchObject({
@@ -298,7 +298,7 @@ describe("local agent bridge MCP read surface", () => {
       }
 
       const unavailableSource = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: {
           sourceAnchor: {
             schemaVersion: "0.1.0",
@@ -354,7 +354,7 @@ describe("local agent bridge MCP read surface", () => {
       expect(readText(list)).not.toContain("Agent-safe handoff");
 
       const captures = await client.callTool({
-        name: "ui_attach_list_captures",
+        name: "meanthis_list_captures",
         arguments: {},
       });
       const captureList = JSON.parse(readText(captures));
@@ -372,7 +372,7 @@ describe("local agent bridge MCP read surface", () => {
       expect(readText(captures)).not.toContain("Shorten the label");
 
       const summary = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-1",
@@ -395,7 +395,7 @@ describe("local agent bridge MCP read surface", () => {
       });
 
       const changed = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-1",
@@ -407,7 +407,7 @@ describe("local agent bridge MCP read surface", () => {
       expect(readText(changed)).toContain("CAPTURE_CHANGED");
 
       const context = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-1",
@@ -429,7 +429,7 @@ describe("local agent bridge MCP read surface", () => {
       });
 
       const handoff = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-1",
@@ -444,7 +444,7 @@ describe("local agent bridge MCP read surface", () => {
       });
 
       const missingCapture = await client.callTool({
-        name: "ui_attach_read_capture",
+        name: "meanthis_read_capture",
         arguments: {
           instanceId: paired.value.instanceId,
           captureId: "session-2",
@@ -759,7 +759,7 @@ describe("local agent bridge MCP read surface", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const result = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: {
           sourceAnchor: {
             schemaVersion: "0.1.0",
@@ -788,7 +788,7 @@ describe("local agent bridge MCP read surface", () => {
       expect(readText(result)).not.toContain(workspaceRoot);
 
       const rejectedRootOverride = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: {
           sourceAnchor: {
             schemaVersion: "0.1.0",
@@ -846,7 +846,7 @@ describe("local agent bridge MCP read surface", () => {
     ]);
     try {
       const result = await rootsUnavailableClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: anchor },
       });
       expect(JSON.parse(readText(result))).toMatchObject({
@@ -875,7 +875,7 @@ describe("local agent bridge MCP read surface", () => {
     ]);
     try {
       const result = await declaredClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: anchor },
       });
       expect(JSON.parse(readText(result))).toMatchObject({

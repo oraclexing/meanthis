@@ -4,13 +4,13 @@
 
 > 状态：纳入九个 package release set 的 public-package candidate。它已经过机械 pack 验证，但尚未发布。
 
-这个 package 是 MeanThis Source Mapping v1 的最小只读 MCP adapter。它的 stdio server 只暴露一个 tool：`ui_attach_resolve_source`，并把校验委托给 `@meanthis/source-map-core`。
+这个 package 是 MeanThis Source Mapping v1 的最小只读 MCP adapter。它的 stdio server 只暴露一个 tool：`meanthis_resolve_source`，并把校验委托给 `@meanthis/source-map-core`。
 
 它不会启动或连接 MeanThis browser bridge，不会读取 browser credential、创建 approval request、持有 loopback state，也不暴露 click、type、navigate、script、file-write 或其他 browser-control capability。当 coding agent 只需要把**复制给 Agent**中的 opaque source anchor 转换成经过本地校验的 repository-relative source location 时，应使用这条路径。
 
 ## Tool 契约
 
-把 handoff 的 `Source Anchor Tool Input` block 中完整 object 作为 `ui_attach_resolve_source` 的全部输入，不要添加 `resolverInput` 或其他 wrapper。Adapter 接受一个 opaque `sourceAnchor`，以及最多五个 bounded heuristic `candidates`。
+把 handoff 的 `Source Anchor Tool Input` block 中完整 object 作为 `meanthis_resolve_source` 的全部输入，不要添加 `resolverInput` 或其他 wrapper。Adapter 接受一个 opaque `sourceAnchor`，以及最多五个 bounded heuristic `candidates`。
 
 Standalone server 优先使用 MCP client 声明的 `file://` workspace roots。如果 client 没有实现 roots capability，则只能使用该 client 传给 MCP process 的 launch directory。已声明 roots 始终优先，tool input 不能覆盖 workspace path。调用 `createSourceResolverMcpServer()` 的 library host 也可以显式注入可信的 `listWorkspaceRoots` provider；该 host-owned seam 优先于 client roots，standalone CLI 不会使用它。
 
@@ -24,7 +24,7 @@ Standalone server 优先使用 MCP client 声明的 `file://` workspace roots。
 npm run setup:codex-source-resolver
 ```
 
-它会构建 minimal resolver workspace，把当前 Node executable 与 built entry 解析成 absolute paths，在真实 registration change 前备份 active Codex config，通过 Codex 自己的 `mcp add` 写入配置，再验证 resulting readback。精确 registration 已存在时，重复执行是 no-op。同名 registration 的 command、entry、environment、working directory 若不同，或者 allow-list 遗漏 `ui_attach_resolve_source`、deny-list 包含该 tool，就会 fail closed，绝不会自动覆盖。
+它会构建 minimal resolver workspace，把当前 Node executable 与 built entry 解析成 absolute paths，在真实 registration change 前备份 active Codex config，通过 Codex 自己的 `mcp add` 写入配置，再验证 resulting readback。精确 registration 已存在时，重复执行是 no-op。同名 registration 的 command、entry、environment、working directory 若不同，或者 allow-list 遗漏 `meanthis_resolve_source`、deny-list 包含该 tool，就会 fail closed，绝不会自动覆盖。
 
 可用下面两条命令只读检查当前状态，或预览 install action：
 
@@ -52,7 +52,7 @@ codex mcp get meanthis-source-resolver --json
 
 ## 完整 bridge 兼容性
 
-现有 `npm run setup:codex-bridge` 路径会注册 public companion 的三工具 `ui-attach` 产品 MCP server，其中包含 `ui_attach_resolve_source` 与渐进式 shared-capture read；maintainer 可用 `meanthis mcp --compatibility` 额外启用四个 legacy diagnostics。只需要 source verification 时选择 standalone resolver；只有还需要另一条经显式批准的 browser-capture workflow 时，才选择完整 bridge。
+`npm run setup:bridge:codex` 路径会注册 public companion 的三工具 `meanthis` 产品 MCP server，其中包含 `meanthis_resolve_source` 与渐进式 shared-capture read；`setup:codex-bridge` 继续作为 compatibility alias。Maintainer 可用 `meanthis mcp --compatibility` 额外启用四个 legacy diagnostics。只需要 source verification 时选择 standalone resolver；只有还需要另一条经显式批准的 browser-capture workflow 时，才选择完整 bridge。
 
 两条 setup 路径都不会发布 package。Resolver 与 companion 已进入九个 package 的 public release candidate，但显式 publication 发生前仍不能从 registry 安装。
 

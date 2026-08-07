@@ -38,7 +38,7 @@ async function verifyCli() {
       && cursorConfigOutput.data?.setup?.host === "cursor"
       && cursorConfigOutput.data?.setup?.installation === "generated_only"
       && cursorConfigOutput.data?.setup?.verification === "manual_required"
-      && cursorConfigOutput.data?.setup?.config?.mcpServers?.["ui-attach"]?.command
+      && cursorConfigOutput.data?.setup?.config?.mcpServers?.meanthis?.command
         === process.execPath,
     "Cursor configuration must derive from the shared stdio descriptor.",
   );

@@ -4,13 +4,13 @@ English | [中文](./README_zh.md)
 
 > Status: public-package candidate included in the nine-package release set. It is mechanically pack-verified but has not been published.
 
-This package is the minimal read-only MCP adapter for MeanThis Source Mapping v1. Its stdio server exposes exactly one tool, `ui_attach_resolve_source`, and delegates verification to `@meanthis/source-map-core`.
+This package is the minimal read-only MCP adapter for MeanThis Source Mapping v1. Its stdio server exposes exactly one tool, `meanthis_resolve_source`, and delegates verification to `@meanthis/source-map-core`.
 
 It does not start or contact the MeanThis browser bridge, read a browser credential, create an approval request, own loopback state, or expose click, type, navigate, script, file-write, or other browser-control capabilities. Use it when a coding agent needs only to turn an opaque source anchor from **Copy for Agent** into a locally verified repository-relative source location.
 
 ## Tool contract
 
-Pass the complete object from the handoff's `Source Anchor Tool Input` block as the entire `ui_attach_resolve_source` input. Do not add a `resolverInput` or other wrapper. The adapter accepts one opaque `sourceAnchor` and at most five bounded heuristic `candidates`.
+Pass the complete object from the handoff's `Source Anchor Tool Input` block as the entire `meanthis_resolve_source` input. Do not add a `resolverInput` or other wrapper. The adapter accepts one opaque `sourceAnchor` and at most five bounded heuristic `candidates`.
 
 The standalone server prefers `file://` workspace roots declared by the MCP client. If the client does not implement the roots capability, it may use only the MCP process launch directory inherited from that client. Declared roots always take precedence, and tool input cannot override a workspace path. Library hosts that call `createSourceResolverMcpServer()` may instead inject a trusted `listWorkspaceRoots` provider; that host-owned seam takes precedence over client roots and is not used by the standalone CLI.
 
@@ -24,7 +24,7 @@ Until the first registry publication, use this public-package candidate from the
 npm run setup:codex-source-resolver
 ```
 
-It builds the minimal resolver workspace, resolves the current Node executable and built entry to absolute paths, backs up the active Codex config before a real registration change, calls Codex's own `mcp add`, and verifies the resulting readback. Repeating it is a no-op when the exact registration already exists. A same-name registration with a different command, entry, environment, working directory, an allow-list that omits `ui_attach_resolve_source`, or a deny-list that includes it fails closed and is never overwritten.
+It builds the minimal resolver workspace, resolves the current Node executable and built entry to absolute paths, backs up the active Codex config before a real registration change, calls Codex's own `mcp add`, and verifies the resulting readback. Repeating it is a no-op when the exact registration already exists. A same-name registration with a different command, entry, environment, working directory, an allow-list that omits `meanthis_resolve_source`, or a deny-list that includes it fails closed and is never overwritten.
 
 Inspect the current state without changing config, or preview an install action:
 
@@ -52,7 +52,7 @@ The command runs a stdio server and intentionally has no interactive browser set
 
 ## Full bridge compatibility
 
-The existing `npm run setup:codex-bridge` path registers the public companion's three-tool `ui-attach` product MCP server, including `ui_attach_resolve_source` alongside progressive shared-capture reads. Maintainers can opt into four additional legacy diagnostics with `meanthis mcp --compatibility`. Choose the standalone resolver when source verification is the only required capability; choose the full bridge only when the separate, explicitly approved browser-capture workflow is also needed.
+The `npm run setup:bridge:codex` path registers the public companion's three-tool `meanthis` product MCP server, including `meanthis_resolve_source` alongside progressive shared-capture reads. `setup:codex-bridge` remains a compatibility alias. Maintainers can opt into four additional legacy diagnostics with `meanthis mcp --compatibility`. Choose the standalone resolver when source verification is the only required capability; choose the full bridge only when the separate, explicitly approved browser-capture workflow is also needed.
 
 Neither setup path publishes a package. The resolver and companion are already part of the nine-package public release candidate and remain unavailable from the registry until an explicit publication occurs.
 

@@ -403,7 +403,7 @@ describe("prompt serializers", () => {
 
     for (const output of [exactHandoff, compactHandoff]) {
       expect(output).toContain("## Source Resolution");
-      expect(output).toContain("ui_attach_resolve_source");
+      expect(output).toContain("meanthis_resolve_source");
       expect(output).toContain("entire tool arguments object");
       expect(output).toContain("exactly once");
       expect(output).toContain("A missing tool call is not an `unavailable` result");
@@ -425,7 +425,7 @@ describe("prompt serializers", () => {
       serializeAttachmentCompactHandoff(attachment),
     ]) {
       expect(output).not.toContain("## Source Resolution");
-      expect(output).not.toContain("ui_attach_resolve_source");
+      expect(output).not.toContain("meanthis_resolve_source");
     }
   });
 

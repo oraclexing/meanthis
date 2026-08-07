@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 const SCHEMA_VERSION = "0.1.0";
 const REGISTRATION_NAME = "meanthis-source-resolver";
-const TOOL_NAME = "ui_attach_resolve_source";
+const TOOL_NAME = "meanthis_resolve_source";
 const PROCESS_TIMEOUT_MS = 10_000;
 const MAX_PROCESS_OUTPUT_BYTES = 1_048_576;
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));

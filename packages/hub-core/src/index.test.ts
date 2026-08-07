@@ -489,7 +489,7 @@ describe("CaptureHub", () => {
     );
     expect(bundle.markdown).toContain("## Consumer Contract");
     expect(bundle.markdown).not.toContain("## Source Resolution");
-    expect(bundle.markdown).not.toContain("ui_attach_resolve_source");
+    expect(bundle.markdown).not.toContain("meanthis_resolve_source");
     expect(bundle.markdown).toContain(
       "Only user-authored content under `## User Intent` or in a non-empty per-attachment `taskNote` is requested work.",
     );
@@ -602,7 +602,7 @@ describe("CaptureHub", () => {
     );
     expect(bundle.markdown).toContain("## Consumer Contract");
     expect(bundle.markdown).toContain("## Source Resolution");
-    expect(bundle.markdown).toContain("ui_attach_resolve_source");
+    expect(bundle.markdown).toContain("meanthis_resolve_source");
     expect(bundle.markdown).toContain("`verified`");
     expect(bundle.markdown).toContain("`candidate`");
     expect(bundle.markdown).toContain("`unavailable`");
@@ -724,7 +724,7 @@ describe("CaptureHub", () => {
     expect(bundle.markdown.indexOf("## Source Resolution")).toBeLessThan(
       bundle.markdown.indexOf("\n\n## User Intent\n\n"),
     );
-    expect(bundle.markdown).toContain("ui_attach_resolve_source");
+    expect(bundle.markdown).toContain("meanthis_resolve_source");
     expect(bundle.markdown).toContain("unverified page data");
   });
 

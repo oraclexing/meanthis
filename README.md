@@ -88,6 +88,12 @@ npm run demo
 
 The demo does not replace the native extension side panel or its saved-capture flow.
 
+## Install with an Agent
+
+You can give a coding Agent the repository URL and ask it to install MeanThis. The deterministic, bilingual setup contract is [AGENT_INSTALL.md](./AGENT_INSTALL.md). It tells the Agent how to clone and verify the source, build and register the host-neutral MCP companion, start the local bridge owner, and verify the three read-only `meanthis_*` tools.
+
+The Agent can prepare the extension files and open the relevant browser page, but Chrome must still show the extension installation or permission step to the user for confirmation. MeanThis does not require a separate Skill. Before the first npm and Chrome Web Store releases, the repository checkout is the authoritative installation source.
+
 ## Optional host-neutral MCP companion
 
 The CLI workspace in this public repository provides a default-off, read-only local companion. `meanthis mcp` is one standard stdio MCP server; it is not tied to Codex. Host adapters only describe how each client starts that same executable.
@@ -95,16 +101,17 @@ The CLI workspace in this public repository provides a default-off, read-only lo
 From a source checkout, the Codex adapter can install and read back the exact registration automatically:
 
 ```bash
-npm run setup:codex-bridge
+npm run setup:bridge:codex
 ```
 
 For other supported hosts, build once and generate their command or JSON configuration without changing the host:
 
 ```bash
-npm run build
-node apps/cli/dist/index.js bridge config --host claude-code --json
-node apps/cli/dist/index.js bridge config --host vscode --json
-node apps/cli/dist/index.js bridge config --host cursor --json
+npm run build:bridge
+npm link --workspace @meanthis/cli
+meanthis bridge config --host claude-code --json
+meanthis bridge config --host vscode --json
+meanthis bridge config --host cursor --json
 ```
 
 | Host | v0.1 setup boundary |

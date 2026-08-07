@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-export const MEANTHIS_MCP_REGISTRATION_NAME = "ui-attach";
+export const MEANTHIS_MCP_REGISTRATION_NAME = "meanthis";
 
 export type MeanThisMcpHost = "codex" | "claude-code" | "vscode" | "cursor";
 

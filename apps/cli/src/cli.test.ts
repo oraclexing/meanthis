@@ -15,7 +15,7 @@ const agentSafeFixture = readFileSync(
   "utf8",
 );
 
-describe("ui-attach CLI", () => {
+describe("MeanThis CLI", () => {
   test("writes an agent-safe summary envelope without full payloads", async () => {
     const io = createTestIo({ "session.json": twoAttachmentFixture });
     const exitCode = await runCli(["summary", "--input", "session.json"], io);

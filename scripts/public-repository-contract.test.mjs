@@ -11,34 +11,49 @@ describe("public repository contract", () => {
     const [
       english,
       chinese,
+      agentInstall,
+      agentInstallChinese,
       privacy,
       privacyChinese,
       releasing,
       releasingChinese,
       config,
       releaseWorkflow,
+      rootManifest,
     ] = await Promise.all([
       readFile(join(root, "README.md"), "utf8"),
       readFile(join(root, "README_zh.md"), "utf8"),
+      readFile(join(root, "AGENT_INSTALL.md"), "utf8"),
+      readFile(join(root, "AGENT_INSTALL_zh.md"), "utf8"),
       readFile(join(root, "PRIVACY.md"), "utf8"),
       readFile(join(root, "PRIVACY_zh.md"), "utf8"),
       readFile(join(root, "RELEASING.md"), "utf8"),
       readFile(join(root, "RELEASING_zh.md"), "utf8"),
       readFile(join(root, "_config.yml"), "utf8"),
       readFile(join(root, ".github", "workflows", "release.yml"), "utf8"),
+      readFile(join(root, "package.json"), "utf8").then(JSON.parse),
     ]);
     for (const heading of [
       "## Why MeanThis",
       "## Three-step workflow",
       "## What the Agent receives",
+      "## Install with an Agent",
       "## Privacy and security",
     ]) expect(english).toContain(heading);
     for (const heading of [
       "## 为什么使用 MeanThis",
       "## 三步工作流",
       "## Agent 会收到什么",
+      "## 让 Agent 帮你安装",
       "## 隐私与安全",
     ]) expect(chinese).toContain(heading);
+    expect(english).toContain("./AGENT_INSTALL.md");
+    expect(chinese).toContain("./AGENT_INSTALL_zh.md");
+    expect(agentInstall).toContain("meanthis bridge doctor --json");
+    expect(agentInstallChinese).toContain("meanthis bridge doctor --json");
+    expect(rootManifest.scripts["setup:bridge:codex"])
+      .toContain("meanthis bridge install --host codex --json");
+    expect(rootManifest.scripts["start:bridge"]).toBe("meanthis bridge start --json");
     expect(privacy).toContain("permalink: /privacy/");
     expect(privacyChinese).toContain("permalink: /zh/privacy/");
     expect(privacy).toContain("Chrome Web Store User Data Policy");

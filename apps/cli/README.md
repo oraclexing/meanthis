@@ -12,7 +12,7 @@ Requires Node.js `^22.12.0` or `^24.0.0`.
 
 ```sh
 npm ci
-npm run build
+npm run build:bridge
 npm link --workspace @meanthis/cli
 ```
 
@@ -24,13 +24,15 @@ npm install --global @meanthis/cli
 
 ## One MCP server, multiple hosts
 
-`meanthis mcp` starts the same standard stdio MCP server in every client. The registration name `ui-attach` is retained as a protocol compatibility identifier; it does not mean the server is Codex-only.
+`meanthis mcp` starts the same standard stdio MCP server in every client. Its public registration name is `meanthis`; lower-level `ui-attach.*` schema kinds remain stable compatibility identifiers and do not make the server Codex-only.
 
 Codex is the first automated adapter because its CLI supports structured registration readback and exact removal:
 
 ```sh
 meanthis bridge install --host codex --json
 ```
+
+This command also starts and verifies the detached local owner. It safely migrates an exact legacy `ui-attach` registration that points to the same installation and never overwrites a conflicting registration.
 
 The older `meanthis bridge install --codex --json` command remains compatible. For other hosts, MeanThis generates the official command or JSON without modifying the host:
 
@@ -39,6 +41,8 @@ meanthis bridge config --host claude-code --json
 meanthis bridge config --host vscode --json
 meanthis bridge config --host cursor --json
 ```
+
+After applying a generated artifact, run `meanthis bridge start --json` so the extension can connect before the host first invokes an MCP tool.
 
 | Host | Generated setup | Automatic verification |
 | --- | --- | --- |
@@ -55,9 +59,9 @@ Then restart the agent client, open the MeanThis side panel, expand **Local agen
 
 `meanthis mcp` exposes exactly three read-only tools:
 
-- `ui_attach_list_captures` lists bounded metadata for captures explicitly shared by the connected browser session.
-- `ui_attach_read_capture` reads one exact capture revision with progressive detail.
-- `ui_attach_resolve_source` resolves an opaque source anchor against trusted local sidecars under MCP workspace roots.
+- `meanthis_list_captures` lists bounded metadata for captures explicitly shared by the connected browser session.
+- `meanthis_read_capture` reads one exact capture revision with progressive detail.
+- `meanthis_resolve_source` resolves an opaque source anchor against trusted local sidecars under MCP workspace roots.
 
 Maintainer-only legacy diagnostics require the explicit `meanthis mcp --compatibility` flag and are not part of the recommended product flow.
 

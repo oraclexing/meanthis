@@ -38,7 +38,7 @@ describe("minimal source resolver MCP", () => {
       const tools = await client.listTools();
       expect(tools.tools).toHaveLength(1);
       expect(tools.tools[0]).toMatchObject({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -52,7 +52,7 @@ describe("minimal source resolver MCP", () => {
       });
 
       const unavailable = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(unavailable.isError).not.toBe(true);
@@ -69,7 +69,7 @@ describe("minimal source resolver MCP", () => {
         { sourceAnchor: SOURCE_ANCHOR, workspaceRoot: "C:/untrusted" },
       ]) {
         const result = await client.callTool({
-          name: "ui_attach_resolve_source",
+          name: "meanthis_resolve_source",
           arguments: invalid,
         });
         expect(result.isError).toBe(true);
@@ -89,7 +89,7 @@ describe("minimal source resolver MCP", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const result = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(result.isError, readText(result)).not.toBe(true);
@@ -127,7 +127,7 @@ describe("minimal source resolver MCP", () => {
     ]);
     try {
       const result = await fallbackClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(JSON.parse(readText(result))).toMatchObject({ status: "verified" });
@@ -145,7 +145,7 @@ describe("minimal source resolver MCP", () => {
     ]);
     try {
       const result = await explicitClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(JSON.parse(readText(result))).toMatchObject({
@@ -172,7 +172,7 @@ describe("minimal source resolver MCP", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const result = await client.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(result.isError).not.toBe(true);
@@ -201,7 +201,7 @@ describe("minimal source resolver MCP", () => {
     ]);
     try {
       const result = await ambiguousClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(JSON.parse(readText(result))).toMatchObject({
@@ -220,7 +220,7 @@ describe("minimal source resolver MCP", () => {
     await Promise.all([staleServer.connect(staleServerTransport), staleClient.connect(staleClientTransport)]);
     try {
       const result = await staleClient.callTool({
-        name: "ui_attach_resolve_source",
+        name: "meanthis_resolve_source",
         arguments: { sourceAnchor: SOURCE_ANCHOR },
       });
       expect(JSON.parse(readText(result))).toMatchObject({

@@ -12,7 +12,7 @@
 
 ```sh
 npm ci
-npm run build
+npm run build:bridge
 npm link --workspace @meanthis/cli
 ```
 
@@ -24,13 +24,15 @@ npm install --global @meanthis/cli
 
 ## 同一个 MCP server，多个宿主
 
-`meanthis mcp` 在所有 client 中启动的是同一套标准 stdio MCP server。Registration name `ui-attach` 作为协议兼容标识保留，并不表示 server 只支持 Codex。
+`meanthis mcp` 在所有 client 中启动的是同一套标准 stdio MCP server。公开 registration name 是 `meanthis`；底层 `ui-attach.*` schema kind 继续作为稳定兼容标识，这并不表示 server 只支持 Codex。
 
 Codex 是第一个自动化 adapter，因为它的 CLI 支持结构化 registration 读回与精确移除：
 
 ```sh
 meanthis bridge install --host codex --json
 ```
+
+该命令还会启动并验证 detached local owner。它会安全迁移指向同一安装的精确 legacy `ui-attach` registration，绝不会覆盖冲突 registration。
 
 旧命令 `meanthis bridge install --codex --json` 继续兼容。对于其他宿主，MeanThis 只生成官方 command 或 JSON，不会修改宿主：
 
@@ -39,6 +41,8 @@ meanthis bridge config --host claude-code --json
 meanthis bridge config --host vscode --json
 meanthis bridge config --host cursor --json
 ```
+
+应用生成的 artifact 后运行 `meanthis bridge start --json`，这样 extension 可在 host 第一次调用 MCP tool 前连接。
 
 | 宿主 | 生成的 setup | 自动验证 |
 | --- | --- | --- |
@@ -55,9 +59,9 @@ JSON output 同时包含共享的 absolute-path stdio descriptor 与 host-specif
 
 `meanthis mcp` 精确暴露三个只读工具：
 
-- `ui_attach_list_captures` 列出当前已连接浏览器会话明确共享的 capture 的有界 metadata。
-- `ui_attach_read_capture` 按渐进式详细程度读取一个精确 capture revision。
-- `ui_attach_resolve_source` 在 MCP workspace roots 下，依据可信本地 sidecar 解析 opaque source anchor。
+- `meanthis_list_captures` 列出当前已连接浏览器会话明确共享的 capture 的有界 metadata。
+- `meanthis_read_capture` 按渐进式详细程度读取一个精确 capture revision。
+- `meanthis_resolve_source` 在 MCP workspace roots 下，依据可信本地 sidecar 解析 opaque source anchor。
 
 维护者使用的旧 diagnostics 只有在显式运行 `meanthis mcp --compatibility` 时才会出现，不属于推荐的产品流程。
 

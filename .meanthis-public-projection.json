@@ -11,6 +11,8 @@
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     ".gitignore",
+    "AGENT_INSTALL.md",
+    "AGENT_INSTALL_zh.md",
     "CHANGELOG.md",
     "CHANGELOG_zh.md",
     "CONTRIBUTING.md",
@@ -294,5 +296,5 @@
     "tsconfig.base.json",
     "vitest.config.ts"
   ],
-  "contentSha256": "b3e26468ee6d89f19813892813db4a940e57c1efe5c2e3a9bb31ae9575b73fa7"
+  "contentSha256": "1e8794e8a0f22a30cf8a342573387a501bef66e1abaa2d04f5a1d1b0635a0845"
 }

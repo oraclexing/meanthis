@@ -68,9 +68,25 @@ describe("meanthis bridge CLI", () => {
         },
       },
     });
-    expect(harness.runCodex).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).toHaveBeenCalledTimes(2);
+    expect(harness.runCodex).toHaveBeenCalledWith(["mcp", "get", "meanthis", "--json"]);
     expect(harness.runCodex).toHaveBeenCalledWith(["mcp", "get", "ui-attach", "--json"]);
     expect(harness.io.stdout).not.toContain("token");
+  });
+
+  test("starts the host-neutral local owner without changing MCP registration", async () => {
+    const harness = createHarness();
+
+    const exitCode = await runBridgeCli(["start", "--json"], harness.io, harness.dependencies);
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(harness.io.stdout)).toMatchObject({
+      kind: "ui-attach.bridge-start",
+      ok: true,
+      data: { runtimeActive: true, origin: "http://127.0.0.1:38471" },
+    });
+    expect(harness.ensureOwner).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).not.toHaveBeenCalled();
   });
 
   test("previews an exact Codex registration without writing it", async () => {
@@ -91,11 +107,11 @@ describe("meanthis bridge CLI", () => {
         changed: false,
         dryRun: true,
         configBackup: null,
-        registrationName: "ui-attach",
+        registrationName: "meanthis",
         command: { executable: NODE_PATH, args: [ENTRY_PATH, "mcp"] },
       },
     });
-    expect(harness.runCodex).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).toHaveBeenCalledTimes(2);
   });
 
   test("generates a host configuration from the shared MCP descriptor", async () => {
@@ -114,7 +130,7 @@ describe("meanthis bridge CLI", () => {
       ok: true,
       data: {
         descriptor: {
-          name: "ui-attach",
+          name: "meanthis",
           transport: {
             type: "stdio",
             command: NODE_PATH,
@@ -131,7 +147,7 @@ describe("meanthis bridge CLI", () => {
           command: null,
           config: {
             mcpServers: {
-              "ui-attach": {
+              "meanthis": {
                 command: NODE_PATH,
                 args: [ENTRY_PATH, "mcp"],
               },
@@ -211,13 +227,14 @@ describe("meanthis bridge CLI", () => {
     expect(harness.runCodex).toHaveBeenCalledWith([
       "mcp",
       "add",
-      "ui-attach",
+      "meanthis",
       "--",
       NODE_PATH,
       ENTRY_PATH,
       "mcp",
     ]);
     expect(harness.backupCodexConfig).toHaveBeenCalledTimes(1);
+    expect(harness.ensureOwner).toHaveBeenCalledTimes(1);
     expect(JSON.parse(harness.io.stdout)).toMatchObject({
       data: {
         action: "add",
@@ -225,7 +242,7 @@ describe("meanthis bridge CLI", () => {
         dryRun: false,
         configBackup: {
           status: "created",
-          path: "C:\\Users\\fixture-user\\.codex\\config.toml.bak-ui-attach-test",
+          path: "C:\\Users\\fixture-user\\.codex\\config.toml.bak-meanthis-test",
         },
       },
     });
@@ -242,13 +259,48 @@ describe("meanthis bridge CLI", () => {
       data: { action: "none", changed: false, dryRun: false, configBackup: null },
     });
     expect(harness.backupCodexConfig).not.toHaveBeenCalled();
-    expect(harness.runCodex).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).toHaveBeenCalledTimes(2);
     expect(harness.runCodex).not.toHaveBeenCalledWith(expect.arrayContaining(["add"]));
+    expect(harness.ensureOwner).toHaveBeenCalledTimes(2);
+  });
+
+  test("migrates the exact legacy registration and starts the local owner", async () => {
+    const harness = createHarness({
+      legacyRegistration: createRegistration("ui-attach", ENTRY_PATH),
+    });
+
+    expect(await runBridgeCli(
+      ["install", "--host", "codex", "--json"],
+      harness.io,
+      harness.dependencies,
+    )).toBe(0);
+
+    expect(harness.runCodex).toHaveBeenCalledWith([
+      "mcp",
+      "add",
+      "meanthis",
+      "--",
+      NODE_PATH,
+      ENTRY_PATH,
+      "mcp",
+    ]);
+    expect(harness.runCodex).toHaveBeenCalledWith(["mcp", "remove", "ui-attach"]);
+    expect(harness.backupCodexConfig).toHaveBeenCalledTimes(1);
+    expect(harness.ensureOwner).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(harness.io.stdout)).toMatchObject({
+      data: {
+        action: "migrate",
+        changed: true,
+        runtimeActive: true,
+        registrationName: "meanthis",
+        removedLegacyRegistration: true,
+      },
+    });
   });
 
   test("fails closed on a conflicting registration", async () => {
     const harness = createHarness({
-      registration: createRegistration("C:\\other\\ui-attach\\dist\\index.js"),
+      registration: createRegistration("meanthis", "C:\\other\\ui-attach\\dist\\index.js"),
     });
 
     const exitCode = await runBridgeCli(
@@ -264,19 +316,19 @@ describe("meanthis bridge CLI", () => {
       ok: false,
       error: { code: "REGISTRATION_CONFLICT" },
     });
-    expect(harness.runCodex).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).toHaveBeenCalledTimes(2);
     expect(harness.io.stderr).not.toContain("C:\\other");
   });
 
   test("removes only the exact managed registration", async () => {
-    const harness = createHarness({ registration: createRegistration(ENTRY_PATH) });
+    const harness = createHarness({ registration: createRegistration("meanthis", ENTRY_PATH) });
 
     expect(await runBridgeCli(
       ["uninstall", "--codex", "--json"],
       harness.io,
       harness.dependencies,
     )).toBe(0);
-    expect(harness.runCodex).toHaveBeenCalledWith(["mcp", "remove", "ui-attach"]);
+    expect(harness.runCodex).toHaveBeenCalledWith(["mcp", "remove", "meanthis"]);
     expect(harness.backupCodexConfig).toHaveBeenCalledTimes(1);
     expect(JSON.parse(harness.io.stdout)).toMatchObject({
       kind: "ui-attach.bridge-uninstall",
@@ -302,8 +354,27 @@ describe("meanthis bridge CLI", () => {
     expect(JSON.parse(harness.io.stderr)).toMatchObject({
       error: { code: "CONFIG_BACKUP_FAILED" },
     });
-    expect(harness.runCodex).toHaveBeenCalledTimes(1);
+    expect(harness.runCodex).toHaveBeenCalledTimes(2);
     expect(harness.runCodex).not.toHaveBeenCalledWith(expect.arrayContaining(["add"]));
+  });
+
+  test("reports owner startup failure even when registration is already current", async () => {
+    const harness = createHarness({
+      registration: createRegistration("meanthis", ENTRY_PATH),
+      ownerError: true,
+    });
+
+    expect(await runBridgeCli(
+      ["install", "--host", "codex", "--json"],
+      harness.io,
+      harness.dependencies,
+    )).toBe(5);
+
+    expect(JSON.parse(harness.io.stderr)).toMatchObject({
+      error: { code: "BRIDGE_START_FAILED" },
+    });
+    expect(harness.backupCodexConfig).not.toHaveBeenCalled();
+    expect(harness.ensureOwner).toHaveBeenCalledTimes(1);
   });
 
   test("rejects incomplete or unsafe command arguments", async () => {
@@ -319,24 +390,37 @@ describe("meanthis bridge CLI", () => {
 
 interface HarnessOptions {
   registration?: ReturnType<typeof createRegistration> | null;
+  legacyRegistration?: ReturnType<typeof createRegistration> | null;
   health?: "ready" | "not_running" | "unexpected";
   backupError?: boolean;
+  ownerError?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
   let registration = options.registration ?? null;
+  let legacyRegistration = options.legacyRegistration ?? null;
   const io = createTestIo();
   const backupCodexConfig = vi.fn(async () => {
     if (options.backupError) throw new Error("backup failed");
     return {
       status: "created" as const,
-      path: "C:\\Users\\fixture-user\\.codex\\config.toml.bak-ui-attach-test",
+      path: "C:\\Users\\fixture-user\\.codex\\config.toml.bak-meanthis-test",
     };
   });
   const runCodex = vi.fn(async (args: string[]): Promise<CodexProcessResult> => {
-    if (args.join(" ") === "mcp get ui-attach --json") {
+    if (args.join(" ") === "mcp get meanthis --json") {
       return registration
         ? { started: true, exitCode: 0, stdout: `${JSON.stringify(registration)}\n`, stderr: "" }
+        : {
+            started: true,
+            exitCode: 1,
+            stdout: "",
+            stderr: "Error: No MCP server named 'meanthis' found.\n",
+          };
+    }
+    if (args.join(" ") === "mcp get ui-attach --json") {
+      return legacyRegistration
+        ? { started: true, exitCode: 0, stdout: `${JSON.stringify(legacyRegistration)}\n`, stderr: "" }
         : {
             started: true,
             exitCode: 1,
@@ -344,12 +428,16 @@ function createHarness(options: HarnessOptions = {}) {
             stderr: "Error: No MCP server named 'ui-attach' found.\n",
           };
     }
-    if (args.slice(0, 3).join(" ") === "mcp add ui-attach") {
-      registration = createRegistration(ENTRY_PATH);
-      return { started: true, exitCode: 0, stdout: "Added global MCP server 'ui-attach'.\n", stderr: "" };
+    if (args.slice(0, 3).join(" ") === "mcp add meanthis") {
+      registration = createRegistration("meanthis", ENTRY_PATH);
+      return { started: true, exitCode: 0, stdout: "Added global MCP server 'meanthis'.\n", stderr: "" };
+    }
+    if (args.join(" ") === "mcp remove meanthis") {
+      registration = null;
+      return { started: true, exitCode: 0, stdout: "Removed global MCP server 'meanthis'.\n", stderr: "" };
     }
     if (args.join(" ") === "mcp remove ui-attach") {
-      registration = null;
+      legacyRegistration = null;
       return { started: true, exitCode: 0, stdout: "Removed global MCP server 'ui-attach'.\n", stderr: "" };
     }
     return { started: true, exitCode: 1, stdout: "", stderr: "Unexpected command.\n" };
@@ -359,6 +447,9 @@ function createHarness(options: HarnessOptions = {}) {
     approvalMode: "ask" as const,
     expiresAt: "2026-07-17T04:32:00.000Z",
   }));
+  const ensureOwner = vi.fn(async () => {
+    if (options.ownerError) throw new Error("owner unavailable");
+  });
   const dependencies: BridgeCliDependencies = {
     nodePath: NODE_PATH,
     entryPath: ENTRY_PATH,
@@ -366,14 +457,15 @@ function createHarness(options: HarnessOptions = {}) {
     probeLoopback: vi.fn(async () => options.health ?? "not_running"),
     backupCodexConfig,
     runCodex,
+    ensureOwner,
     approveConnectionRequest,
   };
-  return { approveConnectionRequest, backupCodexConfig, dependencies, io, runCodex };
+  return { approveConnectionRequest, backupCodexConfig, dependencies, ensureOwner, io, runCodex };
 }
 
-function createRegistration(entryPath: string) {
+function createRegistration(name: "meanthis" | "ui-attach", entryPath: string) {
   return {
-    name: "ui-attach",
+    name,
     enabled: true,
     disabled_reason: null,
     transport: {

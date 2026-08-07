@@ -11,7 +11,7 @@ const ENTRY_PATH = resolve("fixtures", "MeanThis 路径 & (test)", "dist", "inde
 describe("MeanThis MCP host configuration", () => {
   test("creates one host-neutral stdio descriptor", () => {
     expect(createMeanThisMcpDescriptor(NODE_PATH, ENTRY_PATH)).toEqual({
-      name: "ui-attach",
+      name: "meanthis",
       transport: {
         type: "stdio",
         command: NODE_PATH,
@@ -35,7 +35,7 @@ describe("MeanThis MCP host configuration", () => {
         args: [
           "mcp",
           "add",
-          "ui-attach",
+          "meanthis",
           "--",
           NODE_PATH,
           ENTRY_PATH,
@@ -60,7 +60,7 @@ describe("MeanThis MCP host configuration", () => {
           "stdio",
           "--scope",
           "user",
-          "ui-attach",
+          "meanthis",
           "--",
           NODE_PATH,
           ENTRY_PATH,
@@ -75,7 +75,7 @@ describe("MeanThis MCP host configuration", () => {
   test("renders VS Code and Cursor configuration without shell quoting", () => {
     const descriptor = createMeanThisMcpDescriptor(NODE_PATH, ENTRY_PATH);
     const vscodeServer = {
-      name: "ui-attach",
+      name: "meanthis",
       type: "stdio",
       command: NODE_PATH,
       args: [ENTRY_PATH, "mcp"],
@@ -102,7 +102,7 @@ describe("MeanThis MCP host configuration", () => {
       command: null,
       config: {
         mcpServers: {
-          "ui-attach": {
+          "meanthis": {
             command: NODE_PATH,
             args: [ENTRY_PATH, "mcp"],
           },
