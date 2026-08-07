@@ -149,12 +149,28 @@ describe("extractElementAttachment", () => {
 
   it("does not mark selected DOM text truncated when the node budget is exactly exhausted", () => {
     const button = document.createElement("button");
-    for (let index = 0; index < 9_999; index += 1) {
-      button.append(document.createElement("span"));
-    }
-    button.append(document.createTextNode("x"));
+    const elementNode = document.createElement("span");
+    const textNode = document.createTextNode("x");
+    let walkerReads = 0;
+    const createTreeWalkerSpy = vi
+      .spyOn(document, "createTreeWalker")
+      .mockImplementation(() => {
+        return {
+          nextNode: () => {
+            walkerReads += 1;
+            if (walkerReads < 10_000) return elementNode;
+            if (walkerReads === 10_000) return textNode;
+            return null;
+          },
+        } as TreeWalker;
+      });
 
-    expect(extractElementAttachment(button).element.text).toBe("x");
+    try {
+      expect(extractElementAttachment(button).element.text).toBe("x");
+      expect(walkerReads).toBe(10_001);
+    } finally {
+      createTreeWalkerSpy.mockRestore();
+    }
   });
 
   it("keeps stable data-testid and id seeds ahead of the bounded text seed", () => {
