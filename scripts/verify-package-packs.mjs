@@ -203,16 +203,7 @@ export async function verifyInstalledConsumer(consumerDir, packages, tarballs) {
   );
   run(
     process.execPath,
-    [
-      npmCliPath,
-      "install",
-      "--offline",
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
-      "--package-lock=false",
-      ...tarballs,
-    ],
+    [npmCliPath, ...createConsumerInstallArguments(tarballs)],
     consumerDir,
   );
 
@@ -331,6 +322,18 @@ void policyDecision;
     [join(rootDir, "node_modules", "typescript", "bin", "tsc"), "--project", consumerDir],
     consumerDir,
   );
+}
+
+export function createConsumerInstallArguments(tarballs) {
+  return [
+    "install",
+    "--prefer-offline",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--package-lock=false",
+    ...tarballs,
+  ];
 }
 
 export async function packPublicPackages(outputDirectory) {

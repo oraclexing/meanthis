@@ -9,7 +9,10 @@ import {
   assertSelfContainedSourceMap,
   toLocalPackageSpec,
 } from "./package-pack-spec.mjs";
-import { discoverPublicPackages } from "./verify-package-packs.mjs";
+import {
+  createConsumerInstallArguments,
+  discoverPublicPackages,
+} from "./verify-package-packs.mjs";
 
 describe("toLocalPackageSpec", () => {
   test("marks workspace package directories as local npm specs", () => {
@@ -40,6 +43,16 @@ describe("discoverPublicPackages", () => {
       "dist/mcp-host-config.js",
       "dist/mcp-host-config.js.map",
     ]));
+  });
+});
+
+describe("createConsumerInstallArguments", () => {
+  test("allows a clean consumer to resolve uncached external dependencies", () => {
+    const argumentsList = createConsumerInstallArguments(["meanthis-schema-0.1.0.tgz"]);
+
+    expect(argumentsList).toContain("--prefer-offline");
+    expect(argumentsList).not.toContain("--offline");
+    expect(argumentsList.at(-1)).toBe("meanthis-schema-0.1.0.tgz");
   });
 });
 
