@@ -251,7 +251,7 @@ async function startWindowsLauncherObserver(options: {
     "    descendants = @($descendants)",
     "    observerConsoleHelpers = @($processes | Where-Object { ($_.Name -eq 'WindowsTerminal.exe' -or $_.Name -eq 'OpenConsole.exe') -and $_.ParentProcessId -eq $PID } | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; pid = [int]$_.ProcessId; parentPid = [int]$_.ParentProcessId } })",
     "  })",
-    "  if (Test-Path -LiteralPath $stopPath) { break }",
+    "  if ((Test-Path -LiteralPath $stopPath) -and $launchers.Count -eq 0 -and $descendants.Count -eq 0) { break }",
     "  Start-Sleep -Milliseconds 20",
     "} while ([DateTime]::UtcNow -lt $deadline)",
     "$final = if ($samples.Count -gt 0) { $samples[$samples.Count - 1] } else { [pscustomobject]@{ launchers = @(); descendants = @(); observerConsoleHelpers = @() } }",
