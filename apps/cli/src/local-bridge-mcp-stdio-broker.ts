@@ -65,9 +65,12 @@ const MEANTHIS_MCP_STDIO_BROKER_MAX_BUFFERED_FRAME_BYTES =
   MEANTHIS_MCP_STDIO_BROKER_MAX_FRAME_BYTES + 1;
 const MEANTHIS_MCP_STDIO_BROKER_INITIAL_FRAME_BUFFER_BYTES = 8 * 1024;
 const MEANTHIS_MCP_STDIO_BROKER_RETAINED_FRAME_BUFFER_BYTES = 64 * 1024;
-const MEANTHIS_MCP_STDIO_WRITER_WORKER_SOURCE = `
+export const MEANTHIS_MCP_STDIO_WRITER_WORKER_SOURCE = `
 const { writeSync } = require("node:fs");
 const { parentPort } = require("node:worker_threads");
+const { performance } = require("node:perf_hooks");
+const retryWait = new Int32Array(new SharedArrayBuffer(4));
+const MAX_NO_PROGRESS_MS = 30_000;
 
 function hasExactKeys(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -84,10 +87,23 @@ parentPort.on("message", (message) => {
   ) throw new Error("invalid writer frame");
   const bytes = Buffer.from(message.frame, "utf8");
   let offset = 0;
+  let lastProgressAt = performance.now();
   while (offset < bytes.length) {
-    const written = writeSync(1, bytes, offset, bytes.length - offset);
-    if (!Number.isSafeInteger(written) || written < 1) throw new Error("writer stalled");
+    const remaining = bytes.length - offset;
+    let written;
+    try {
+      written = writeSync(1, bytes, offset, remaining);
+    } catch (error) {
+      if (!["EAGAIN", "EWOULDBLOCK", "EINTR"].includes(error?.code)) throw error;
+      if (performance.now() - lastProgressAt >= MAX_NO_PROGRESS_MS) throw new Error("writer stalled");
+      // POSIX pipes can be nonblocking. Wait only in this dedicated, terminable
+      // worker, retaining the exact byte offset until the pipe accepts more.
+      Atomics.wait(retryWait, 0, 0, 5);
+      continue;
+    }
+    if (!Number.isSafeInteger(written) || written < 1 || written > remaining) throw new Error("writer stalled");
     offset += written;
+    lastProgressAt = performance.now();
   }
   parentPort.postMessage({ kind: "ack", id: message.id });
 });

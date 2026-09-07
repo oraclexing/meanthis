@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PassThrough, type Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 import { describe, expect, test, vi } from "vitest";
 import {
   MEANTHIS_MCP_HTTP_HEALTH_NONCE_HEADER,
@@ -37,6 +38,7 @@ import { createLocalBridgeState } from "./local-bridge.js";
 import {
   MEANTHIS_MCP_STDIO_BROKER_MAX_FRAME_BYTES,
   MEANTHIS_MCP_STDIO_BROKER_URL,
+  MEANTHIS_MCP_STDIO_WRITER_WORKER_SOURCE,
   type LocalBridgeMcpStdioBrokerOptions,
   isLocalBridgeMcpStdioBrokerDirectEntry,
   runLocalBridgeMcpStdioBrokerDirectEntry,
@@ -430,6 +432,94 @@ async function waitForChildExit(
 }
 
 describe("MeanThis thin stdio MCP broker", () => {
+  function createWriterWorkerHarness(write: (bytes: Buffer, offset: number, length: number) => number) {
+    const parentPort = new EventEmitter() as EventEmitter & { postMessage: ReturnType<typeof vi.fn> };
+    parentPort.postMessage = vi.fn();
+    let now = 0;
+    const wait = vi.fn((_array: Int32Array, _index: number, _value: number, timeout: number) => {
+      now += timeout;
+      return "timed-out";
+    });
+    runInNewContext(MEANTHIS_MCP_STDIO_WRITER_WORKER_SOURCE, {
+      Buffer, Int32Array, SharedArrayBuffer,
+      Atomics: { wait },
+      require: (specifier: string) => {
+        if (specifier === "node:fs") return {
+          writeSync: (fd: number, bytes: Buffer, offset: number, length: number) => {
+            expect(fd).toBe(1);
+            return write(bytes, offset, length);
+          },
+        };
+        if (specifier === "node:worker_threads") return { parentPort };
+        if (specifier === "node:perf_hooks") return { performance: { now: () => now } };
+        throw new Error(`Unexpected worker import: ${specifier}`);
+      },
+    });
+    expect(parentPort.postMessage.mock.calls).toEqual([[{ kind: "ready" }]]);
+    parentPort.postMessage.mockClear();
+    return { parentPort, wait, advance: (milliseconds: number) => { now += milliseconds; } };
+  }
+
+  test.each(["EAGAIN", "EWOULDBLOCK", "EINTR"])(
+    "retries worker %s without repeating or truncating a partial UTF-8 frame",
+    (code) => {
+      const frame = `${JSON.stringify({ id: 7, result: "你好🙂" })}\n`;
+      const chunks: Buffer[] = [];
+      let attempts = 0;
+      const worker = createWriterWorkerHarness((bytes, offset, length) => {
+        attempts += 1;
+        if (attempts === 2) throw Object.assign(new Error("temporary"), { code });
+        expect(offset).toBe(attempts === 1 ? 0 : 2);
+        const written = attempts === 1 ? 2 : length;
+        chunks.push(Buffer.from(bytes.subarray(offset, offset + written)));
+        return written;
+      });
+      worker.parentPort.emit("message", { kind: "frame", id: 7, frame });
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from(frame));
+      expect(worker.wait).toHaveBeenCalledTimes(1);
+      expect(worker.parentPort.postMessage.mock.calls).toEqual([[{ kind: "ack", id: 7 }]]);
+    },
+  );
+
+  test("bounds worker retries when the output makes no progress", () => {
+    let attempts = 0;
+    const worker = createWriterWorkerHarness(() => {
+      attempts += 1;
+      throw Object.assign(new Error("temporary"), { code: "EAGAIN" });
+    });
+    expect(() => worker.parentPort.emit("message", { kind: "frame", id: 1, frame: "x\n" }))
+      .toThrow("writer stalled");
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(6_001);
+    expect(worker.wait).toHaveBeenCalled();
+    expect(worker.parentPort.postMessage).not.toHaveBeenCalled();
+  });
+
+  test("resets the worker no-progress deadline only after a positive write", () => {
+    let attempts = 0;
+    const worker = createWriterWorkerHarness(() => {
+      attempts += 1;
+      if (attempts % 2 === 1) {
+        worker.advance(20_000);
+        throw Object.assign(new Error("temporary"), { code: "EINTR" });
+      }
+      return 1;
+    });
+    worker.parentPort.emit("message", { kind: "frame", id: 2, frame: "ab" });
+    expect(attempts).toBe(4);
+    expect(worker.parentPort.postMessage.mock.calls).toEqual([[{ kind: "ack", id: 2 }]]);
+  });
+
+  test.each(["EPIPE", 0, -1, 3, 0.5])("fails the worker without acknowledgement for %s", (failure) => {
+    const worker = createWriterWorkerHarness(() => {
+      if (typeof failure === "string") throw Object.assign(new Error("closed pipe"), { code: failure });
+      return failure;
+    });
+    expect(() => worker.parentPort.emit("message", { kind: "frame", id: 1, frame: "x\n" })).toThrow();
+    expect(worker.wait).not.toHaveBeenCalled();
+    expect(worker.parentPort.postMessage).not.toHaveBeenCalled();
+  });
+
   test("ensures the shared owners before verifying and connecting to the daemon", async () => {
     const order: string[] = [];
     const downstream = new FakeTransport();
@@ -2904,11 +2994,12 @@ describe("MeanThis thin stdio MCP broker", () => {
 
   test.each([
     ["readable", "EOF", false],
+    ["unread", "EOF", false],
+    ["unread", "broker SIGTERM lifecycle", false],
     ["unread", "EOF", true],
-    ["unread", "broker SIGTERM lifecycle", true],
   ] as const)(
-    "lets a real direct-entry broker exit with %s stdout after %s",
-    async (stdoutMode, shutdownMode, expectForcedExit) => {
+    "lets a real direct-entry broker exit with %s stdout after %s (held worker termination: %s)",
+    async (stdoutMode, shutdownMode, holdWorkerTermination) => {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "meanthis-stdio-broker-"));
     const loaderPath = join(temporaryDirectory, "typescript-loader.mjs");
     const childPath = join(temporaryDirectory, "broker-backpressure-probe.mjs");
@@ -2962,6 +3053,19 @@ export async function load(url, context, nextLoad) {
 }
 `, "utf8");
     await writeFile(childPath, `
+import { writeSync } from "node:fs";
+import { Worker } from "node:worker_threads";
+const originalKill = process.kill.bind(process);
+process.kill = (pid, signal) => {
+  if (pid === process.pid && signal === "SIGKILL") writeSync(2, "FORCED_EXIT_REQUESTED\\n");
+  return originalKill(pid, signal);
+};
+if (${JSON.stringify(holdWorkerTermination)}) {
+  Worker.prototype.terminate = function () {
+    writeSync(2, "WRITER_TERMINATE_HELD\\n");
+    return new Promise(() => {});
+  };
+}
 const { runLocalBridgeMcpStdioBrokerDirectEntry } = await import(${JSON.stringify(brokerSourceUrl)});
 const token = Buffer.alloc(32, 7).toString("base64url");
 const responseText = "x".repeat(512 * 1024);
@@ -3018,6 +3122,16 @@ process.stderr.write("BROKER_CLOSED\\n");
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      const stderrEnded = new Promise<void>((resolveEnd) => { child!.stderr.once("end", resolveEnd); });
+      const outputChunks: Buffer[] = [];
+      const outputEnded = stdoutMode === "readable"
+        ? new Promise<void>((resolveEnd) => {
+          child!.stdout.on("data", (chunk: Buffer) => { outputChunks.push(Buffer.from(chunk)); });
+          child!.stdout.once("end", resolveEnd);
+        })
+        : undefined;
       if (stdoutMode === "unread") child.stdout.pause();
       await waitForStreamText(child.stderr, "BROKER_READY\n");
       const allResponsesWritten = stdoutMode === "readable"
@@ -3037,9 +3151,6 @@ process.stderr.write("BROKER_CLOSED\\n");
 
       const httpTerminated = waitForStreamText(child.stderr, "HTTP_TERMINATED\n");
       const httpClosed = waitForStreamText(child.stderr, "HTTP_CLOSED\n");
-      const brokerClosed = expectForcedExit
-        ? undefined
-        : waitForStreamText(child.stderr, "BROKER_CLOSED\n");
       const childExit = waitForChildExit(child, 2_000);
       if (shutdownMode === "EOF") {
         child.stdin.end();
@@ -3051,9 +3162,11 @@ process.stderr.write("BROKER_CLOSED\\n");
       }
       await httpTerminated;
       await httpClosed;
-      await brokerClosed;
       const exit = await childExit;
-      if (expectForcedExit) {
+      await stderrEnded;
+      if (holdWorkerTermination || exit.code !== 0 || exit.signal !== null) {
+        expect(stderr).toContain("FORCED_EXIT_REQUESTED\n");
+        if (holdWorkerTermination) expect(stderr).toContain("WRITER_TERMINATE_HELD\n");
         if (process.platform === "win32") {
           expect(
             (exit.code === 1 && exit.signal === null) ||
@@ -3064,6 +3177,19 @@ process.stderr.write("BROKER_CLOSED\\n");
         }
       } else {
         expect(exit).toEqual({ code: 0, signal: null });
+        expect(stderr).toContain("BROKER_CLOSED\n");
+      }
+      if (stdoutMode === "readable") {
+        expect(exit).toEqual({ code: 0, signal: null });
+        await outputEnded;
+        const output = Buffer.concat(outputChunks).toString("utf8");
+        expect(output.endsWith("\n")).toBe(true);
+        expect(output.trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(
+          Array.from({ length: 16 }, (_, index) => ({
+            jsonrpc: "2.0", id: `backpressure-${index}`,
+            result: { content: [{ type: "text", text: "x".repeat(512 * 1024) }] },
+          })),
+        );
       }
     } finally {
       if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
