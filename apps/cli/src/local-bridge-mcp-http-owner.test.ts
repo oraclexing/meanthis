@@ -37,6 +37,9 @@ import {
 const BEARER_TOKEN = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws";
 const ROTATED_BEARER_TOKEN = "DwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws";
 const AGENT_TOKEN = "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw";
+const WINDOWS_FIXTURE_SYSTEM_ROOT = process.platform === "win32"
+  ? process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows"
+  : "/windows-fixture";
 const OWNER_IDENTITY: LocalBridgeMcpHttpOwnerIdentity = {
   executablePath: "C:\\Program Files\\nodejs\\node.exe",
   entryPath: "C:\\fixtures\\meanthis\\apps\\cli\\dist\\index.js",
@@ -73,6 +76,7 @@ describe("detached MeanThis MCP HTTP owner", () => {
   test("starts a hidden detached singleton without inheriting an ambient MCP bearer", () => {
     const parentEnvironment = {
       ...process.env,
+      SystemRoot: WINDOWS_FIXTURE_SYSTEM_ROOT,
       [MEANTHIS_MCP_HTTP_TOKEN_ENV]: BEARER_TOKEN,
       mEaNtHiS_mCp_HtTp_ToKeN: AGENT_TOKEN,
       MEANTHIS_OWNER_TEST_SENTINEL: "preserved",
@@ -602,9 +606,16 @@ describe("detached MeanThis MCP HTTP owner", () => {
   });
 
   test("resolves nested runtime dependencies from their actual package parents", () => {
-    const entryPath = "C:\\strict\\cli\\dist\\index.js";
-    const entryUrl = "file:///C:/strict/cli/dist/index.js";
-    const sdkMcpUrl = "file:///C:/strict/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js";
+    // Keep the fixture path absolute according to the host running the test.
+    // A Windows-looking path is relative on POSIX, so pathToFileURL would
+    // silently bind the identity to the checkout instead of this fixture.
+    const strictRoot = process.platform === "win32" ? "C:\\strict" : "/strict";
+    const strictFixtureBaseUrl = pathToFileURL(strictRoot).href;
+    const strictFixture = (value: string) =>
+      value.replaceAll("file:///C:/strict", strictFixtureBaseUrl);
+    const entryPath = join(strictRoot, "cli", "dist", "index.js");
+    const entryUrl = pathToFileURL(entryPath).href;
+    const sdkMcpUrl = `${strictFixtureBaseUrl}/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js`;
     const resolutions = new Map<string, string>([
       [`@meanthis/hub-core|${entryUrl}`, "file:///C:/strict/hub/dist/index.js"],
       [`@meanthis/source-resolver-mcp|${entryUrl}`, "file:///C:/strict/resolver/dist/index.js"],
@@ -639,7 +650,10 @@ describe("detached MeanThis MCP HTTP owner", () => {
       [`zod-to-json-schema|file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js`, "file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/node_modules/zod-to-json-schema/dist/esm/index.js"],
       [`ajv|file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/node_modules/ajv-formats/dist/index.js`, "file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"],
       [`zod|file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/node_modules/zod-to-json-schema/dist/esm/index.js`, "file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/node_modules/zod-to-json-schema/node_modules/zod/index.js"],
-    ]);
+    ].map(([key, value]): [string, string] => [
+      strictFixture(key),
+      strictFixture(value),
+    ]));
     const calls: string[] = [];
     const resolveModule = (specifier: string, parentUrl?: string) => {
       const key = `${specifier}|${parentUrl ?? ""}`;
@@ -677,7 +691,7 @@ describe("detached MeanThis MCP HTTP owner", () => {
       resolveModule,
       resolveDependencyPackage: (packageName, parentUrl) => {
         dependencyCalls.push([packageName, parentUrl]);
-        return `file:///C:/strict/${packageScope(parentUrl)}/node_modules/${packageName}/package.json`;
+        return `${strictFixtureBaseUrl}/${packageScope(parentUrl)}/node_modules/${packageName}/package.json`;
       },
       listPackageRuntimeFiles: (entryUrl, packageName) => {
         listedPackages.push(`${packageScope(entryUrl)}:${packageName}`);
@@ -707,19 +721,19 @@ describe("detached MeanThis MCP HTTP owner", () => {
     const second = loadStrictIdentity();
     expect(second.buildHash).not.toBe(first.buildHash);
     expect(calls).toEqual(expect.arrayContaining([
-      `@meanthis/prompt|file:///C:/strict/hub/dist/index.js`,
-      `@meanthis/web-extractor|file:///C:/strict/hub/dist/index.js`,
-      `@meanthis/source-map-core|file:///C:/strict/resolver/dist/index.js`,
-      `@modelcontextprotocol/sdk/server/mcp.js|file:///C:/strict/resolver/dist/index.js`,
-      `@modelcontextprotocol/sdk/server/stdio.js|file:///C:/strict/resolver/dist/index.js`,
+      strictFixture(`@meanthis/prompt|file:///C:/strict/hub/dist/index.js`),
+      strictFixture(`@meanthis/web-extractor|file:///C:/strict/hub/dist/index.js`),
+      strictFixture(`@meanthis/source-map-core|file:///C:/strict/resolver/dist/index.js`),
+      strictFixture(`@modelcontextprotocol/sdk/server/mcp.js|file:///C:/strict/resolver/dist/index.js`),
+      strictFixture(`@modelcontextprotocol/sdk/server/stdio.js|file:///C:/strict/resolver/dist/index.js`),
     ]));
     expect(dependencyCalls).toEqual(expect.arrayContaining([
       ["@hono/node-server", sdkMcpUrl],
-      ["@hono/node-server", "file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js"],
-      ["hono", "file:///C:/strict/cli/node_modules/@hono/node-server/package.json"],
-      ["hono", "file:///C:/strict/resolver/node_modules/@hono/node-server/package.json"],
-      ["fast-uri", "file:///C:/strict/cli/node_modules/ajv/package.json"],
-      ["fast-uri", "file:///C:/strict/resolver/node_modules/ajv/package.json"],
+      ["@hono/node-server", strictFixture("file:///C:/strict/resolver/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js")],
+      ["hono", strictFixture("file:///C:/strict/cli/node_modules/@hono/node-server/package.json")],
+      ["hono", strictFixture("file:///C:/strict/resolver/node_modules/@hono/node-server/package.json")],
+      ["fast-uri", strictFixture("file:///C:/strict/cli/node_modules/ajv/package.json")],
+      ["fast-uri", strictFixture("file:///C:/strict/resolver/node_modules/ajv/package.json")],
     ]));
     expect(listedPackages.filter((value) => value === "cli:ajv")).toHaveLength(2);
     expect(listedPackages.filter((value) => value === "resolver:ajv")).toHaveLength(2);

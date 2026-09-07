@@ -19,6 +19,8 @@ export default defineConfig({
   },
   test: {
     globals: false,
+    // npm test builds packages and the CLI before testing the released entry.
+    env: { MEANTHIS_MCP_STDIO_BROKER_TEST_COMPILED: "1" },
     tags: [
       { name: "platform" },
       { name: "release" },

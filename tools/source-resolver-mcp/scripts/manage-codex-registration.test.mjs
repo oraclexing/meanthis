@@ -1,8 +1,12 @@
 import { describe, expect, test, vi } from "vitest";
 import { runSourceResolverCodexCli } from "./manage-codex-registration.mjs";
 
-const NODE_PATH = "C:\\Program Files\\nodejs\\node.exe";
-const ENTRY_PATH = "C:\\fixtures\\meanthis\\tools\\source-resolver-mcp\\dist\\cli.js";
+function fixturePath(windowsPath) {
+  return process.platform === "win32" ? windowsPath : `/${windowsPath.replaceAll("\\", "/")}`;
+}
+
+const NODE_PATH = fixturePath("C:\\Program Files\\nodejs\\node.exe");
+const ENTRY_PATH = fixturePath("C:\\fixtures\\meanthis\\tools\\source-resolver-mcp\\dist\\cli.js");
 const REGISTRATION_NAME = "meanthis-source-resolver";
 
 describe("standalone source resolver Codex registration manager", () => {

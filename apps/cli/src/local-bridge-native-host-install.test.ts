@@ -6,9 +6,17 @@ import {
   installLocalBridgeNativeHost,
 } from "./local-bridge-native-host-install";
 
-const ROOT = "C:\\MeanThisFixture\\LocalAppData";
-const NODE = "C:\\Program Files\\nodejs\\node.exe";
-const ENTRY = "D:\\MeanThis\\dist\\index.js";
+function fixturePath(windowsPath: string): string {
+  return process.platform === "win32" ? windowsPath : `/${windowsPath.replaceAll("\\", "/")}`;
+}
+
+const ROOT = fixturePath("C:\\MeanThisFixture\\LocalAppData");
+const NODE = fixturePath("C:\\Program Files\\nodejs\\node.exe");
+const ENTRY = fixturePath("D:\\MeanThis\\dist\\index.js");
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
 
 describe("local bridge native host installation", () => {
   test("creates a content-addressed launcher and pinned Chrome manifest", () => {
@@ -18,9 +26,12 @@ describe("local bridge native host installation", () => {
       entryPath: ENTRY,
     });
 
-    expect(artifacts.directory).toMatch(/^C:\\MeanThisFixture\\LocalAppData\\MeanThis\\NativeMessaging\\[a-f0-9]{64}$/);
+    expect(artifacts.directory).toMatch(new RegExp(
+      `^${escapeRegExp(join(ROOT, "MeanThis", "NativeMessaging"))}[\\\\/]` +
+      `[a-f0-9]{64}$`,
+    ));
     expect(artifacts.launcherBytes.toString("utf8")).toContain(
-      '"C:\\Program Files\\nodejs\\node.exe" "D:\\MeanThis\\dist\\index.js" native-host %*',
+      `"${NODE}" "${ENTRY}" native-host %*`,
     );
     expect(artifacts.launcherBytes.toString("utf8")).toContain('set "MEANTHIS_MCP_HTTP_TOKEN="');
     expect(artifacts.launcherBytes.toString("utf8")).toContain('set "NODE_OPTIONS="');

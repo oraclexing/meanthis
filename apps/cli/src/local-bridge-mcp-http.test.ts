@@ -2465,9 +2465,12 @@ describe("shared MeanThis Streamable HTTP MCP", () => {
       first.destroy();
       await firstClosed;
 
-      const admitted = await rawSocketRequest(http.origin, requestText);
-      expect(admitted.status).toBe(400);
-      expect(admitted.body).toContain("Mcp-Session-Id header is required.");
+      // A local close does not acknowledge the server's peer-close event.
+      // Observe released capacity through the actual server response.
+      await expect.poll(() => rawSocketRequest(http.origin, requestText)).toMatchObject({
+        status: 400,
+        body: expect.stringContaining("Mcp-Session-Id header is required."),
+      });
     } finally {
       first.destroy();
       second.destroy();

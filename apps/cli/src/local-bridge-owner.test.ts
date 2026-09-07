@@ -27,6 +27,9 @@ import {
 const AGENT_TOKEN = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws";
 const ROTATED_AGENT_TOKEN = "DwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws";
 const AGENT_TOKEN_FINGERPRINT = fingerprintLocalBridgeAgentToken(AGENT_TOKEN);
+const WINDOWS_FIXTURE_SYSTEM_ROOT = process.platform === "win32"
+  ? process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows"
+  : "/windows-fixture";
 const OWNER_IDENTITY = {
   executablePath: "C:\\Program Files\\nodejs\\node.exe",
   entryPath: "C:\\fixtures\\ui-attach\\apps\\cli\\dist\\index.js",
@@ -569,6 +572,7 @@ describe("detached local bridge owner startup", () => {
   test("starts the detached owner without inheriting an ambient MCP bearer", () => {
     const parentEnvironment = {
       ...process.env,
+      SystemRoot: WINDOWS_FIXTURE_SYSTEM_ROOT,
       [MEANTHIS_MCP_HTTP_TOKEN_ENV]: AGENT_TOKEN,
       mEaNtHiS_mCp_HtTp_ToKeN: ROTATED_AGENT_TOKEN,
       MEANTHIS_OWNER_TEST_SENTINEL: "preserved",

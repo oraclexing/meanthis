@@ -584,7 +584,8 @@ describe("local bridge MCP HTTP token", () => {
       const codexHome = await createCodexHome();
       const outside = join(codexHome, "outside");
       const directory = join(codexHome, "ui-attach");
-      await mkdir(directory);
+      // Keep the parent valid so this exercises the symlink rejection itself.
+      await mkdir(directory, { mode: 0o700 });
       await writeFile(outside, `${Buffer.alloc(32, 4).toString("base64url")}\n`, "utf8");
       await symlink(outside, getLocalBridgeMcpHttpTokenPath(codexHome));
 
@@ -599,7 +600,7 @@ describe("local bridge MCP HTTP token", () => {
 
       const secondHome = await createCodexHome();
       const linkedDirectory = join(secondHome, "linked-directory");
-      await mkdir(linkedDirectory);
+      await mkdir(linkedDirectory, { mode: 0o700 });
       await symlink(linkedDirectory, join(secondHome, "ui-attach"), "dir");
       await expect(loadOrCreateLocalBridgeMcpHttpToken({
         codexHome: secondHome,
@@ -614,7 +615,7 @@ describe("local bridge MCP HTTP token", () => {
       const thirdDirectory = join(thirdHome, "ui-attach");
       const thirdOutside = join(thirdHome, "outside");
       const outsideToken = Buffer.alloc(32, 5).toString("base64url");
-      await mkdir(thirdDirectory);
+      await mkdir(thirdDirectory, { mode: 0o700 });
       await writeFile(thirdOutside, `${outsideToken}\n`, "utf8");
       await symlink(thirdOutside, getLocalBridgeMcpHttpTokenPath(thirdHome));
 
