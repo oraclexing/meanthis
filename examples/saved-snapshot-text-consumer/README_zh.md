@@ -2,7 +2,11 @@
 
 [English](./README.md) | 中文
 
-这是用于接收扩展**机器可读 bundle** disclosure 所复制的结构化 JSON，并把一份 Agent-safe saved attachment、一份 text-consumer result 与一份独立派生的 effective control boundary 组合起来的可执行公共参考代码。核心保持 provider-neutral，不是 npm package、provider SDK、executor 或 action API。一份 example-local file/stdin connector 会向 host process 暴露同一 acceptance boundary；一份可选 Ollama recipe 会演示显式 loopback transport，但都不改变该核心 contract。
+这是用于接收 trusted MeanThis development/integration producer 或 host integration 提供的 saved-snapshot bundle JSON document 的可执行公共参考代码。它会组合一份 Agent-safe saved attachment、一份 text-consumer result 与一份独立派生的 effective control boundary。
+
+对已保存的捕捉，公开 consumer extension profile 提供人类可读的 **Copy this snapshot for agent** 操作。它的 **Machine-readable bundle** disclosure 与 JSON 复制控件仅在 development/integration surface 提供。本例的 synthetic proof 与 tests 会在本地创建相同的结构化 bundle，因此不声称 consumer-profile 安装可以从其 UI 生成该 JSON。
+
+核心保持 provider-neutral，不是 npm package、provider SDK、executor 或 action API。一份 example-local file/stdin connector 会向 host process 暴露同一 acceptance boundary；一份可选 Ollama recipe 会演示显式 loopback transport，但不改变该核心 contract。
 
 ## 它证明什么
 
@@ -29,7 +33,7 @@ Model text 不能更新或替换 effective boundary。如果 callback 抛错或�
 npm run example:saved-snapshot:text-consumer
 ```
 
-该命令会 build public packages，从 repository-owned 双目标 fixture 创建 production Compact saved bundle，经与扩展 copy path 相同的 combined JSON ingress 序列化并只重新接收一次，再通过 provider adapter 分别运行一份 confirmed 与 denied synthetic scenario。它只打印 ingress kind、receipt kind、attachment count、model-output status、effective-boundary state 与零 model-field count，不打印 attachment markdown、locator、receipt hash、provider error 或 model text。
+该命令会 build public packages，从 repository-owned 双目标 fixture 创建 production Compact saved bundle，经与兼容 producer 或 host integration 使用的相同 combined JSON ingress 序列化并只重新接收一次，再通过 provider adapter 分别运行一份 confirmed 与 denied synthetic scenario。它只打印 ingress kind、receipt kind、attachment count、model-output status、effective-boundary state 与零 model-field count，不打印 attachment markdown、locator、receipt hash、provider error 或 model text。
 
 ## 运行有界 file/stdin connector
 
@@ -45,7 +49,7 @@ Repository example contract 快速参考：
 | 成功 stdout | 一份 JSON document，顶层精确只有 `acceptedContext` 与 `consumerReceipt` 两个 key |
 | Trusted-host 分流 | stdout 只发送给 trusted local host；只把 `acceptedContext` 传入 text-consumer path，把 `consumerReceipt` 留在 host evidence plane |
 
-复制 machine-readable bundle 后，可使用显式本地文件：
+从 trusted development/integration producer 获得 machine-readable bundle 后，可使用显式本地文件：
 
 ```powershell
 npm run --silent example:saved-snapshot:text-consumer:accept -- --input .\saved-bundle.json
@@ -84,7 +88,7 @@ import {
 import { createSavedSnapshotTextConsumerAdapter } from "./provider-adapter.mjs";
 import { createLocalOllamaTextProvider } from "./local-ollama-provider.mjs";
 
-const acceptance = acceptSavedSnapshotTextConsumerBundleJson(copiedBundleJson);
+const acceptance = acceptSavedSnapshotTextConsumerBundleJson(bundleJson);
 if (acceptance === null) return { status: "rejected" };
 const { acceptedContext, consumerReceipt } = acceptance;
 recordHostConsumerReceipt(consumerReceipt);
@@ -127,7 +131,7 @@ return result.effectiveControlBoundary;
 
 ## Trust boundary
 
-- `copiedBundleJson` 必须来自 host 信任的 producer。JSON ingress 会把完整 transport 限制在 1 MiB；shared projector 随后验证 allowlisted production shape，并把 markdown 限制为最多 262,144 bytes。两步都不能认证 clipboard provenance、解释 markdown instruction 或证明 redaction。
+- `bundleJson` 必须由 host 信任的 producer 提供。JSON ingress 会把完整 transport 限制在 1 MiB；shared projector 随后验证 allowlisted production shape，并把 markdown 限制为最多 262,144 bytes。两步都不能认证 clipboard provenance、解释 markdown instruction 或证明 redaction。
 - `consumerReceipt` 只证明所提供的 JSON text 已成功解析，且其 canonicalized bundle 在当前 host invocation 中通过了该 deterministic public ingress。它不绑定原始 transport 的空白或换行 bytes，也不是 signature、authentication token、clipboard-provenance receipt、model-execution receipt 或 action authorization。
 - Connector stdout 是刻意的 content-bearing local transport。Receipt 本身 public-safe，但相邻的 `acceptedContext` 并不会自动变得适合记录日志、公开或发送给 untrusted provider。
 - `contentSha256` 让 runner 能依据 host 保留的 binding 检出内容变化。它不是 signature 或 secret MAC，无法防护 context 与 digest 同时被替换，也不证明 producer 发出了 canonical 或安全内容。

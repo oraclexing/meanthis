@@ -2,7 +2,11 @@
 
 English | [中文](./README_zh.md)
 
-This is executable public reference code for accepting the structured JSON copied from the extension's **Machine-readable bundle** disclosure, then composing one Agent-safe saved attachment, one text-consumer result, and one independently derived effective control boundary. The core is provider-neutral and is not an npm package, provider SDK, executor, or action API. An example-local file/stdin connector exposes the same acceptance boundary to a host process, while an optional Ollama recipe demonstrates one explicit loopback transport without changing that core contract.
+This is executable public reference code for accepting a saved-snapshot bundle JSON document supplied by a trusted MeanThis development/integration producer or host integration. It composes one Agent-safe saved attachment, one text-consumer result, and one independently derived effective control boundary.
+
+For saved captures, the public consumer extension profile provides the human-readable **Copy this snapshot for agent** action. Its **Machine-readable bundle** disclosure and JSON-copy control are development/integration-only. The synthetic proof and tests here create the same structured bundle locally, so this example does not claim that a consumer-profile install can produce this JSON from its UI.
+
+The core is provider-neutral and is not an npm package, provider SDK, executor, or action API. An example-local file/stdin connector exposes the same acceptance boundary to a host process, while an optional Ollama recipe demonstrates one explicit loopback transport without changing that core contract.
 
 ## What it demonstrates
 
@@ -29,7 +33,7 @@ Model text cannot update or replace the effective boundary. If the callback thro
 npm run example:saved-snapshot:text-consumer
 ```
 
-The command builds the public packages, creates a production Compact saved bundle from the repository-owned two-target fixture, serializes and re-accepts it once through the same combined JSON ingress as the extension copy path, and runs one confirmed plus one denied synthetic scenario through the provider adapter. It prints only the ingress kind, receipt kind, attachment count, model-output statuses, effective-boundary states, and zero model-field counts. It does not print attachment markdown, locators, receipt hashes, provider errors, or model text.
+The command builds the public packages, creates a production Compact saved bundle from the repository-owned two-target fixture, serializes and re-accepts it once through the same combined JSON ingress used by a compatible producer or host integration, and runs one confirmed plus one denied synthetic scenario through the provider adapter. It prints only the ingress kind, receipt kind, attachment count, model-output statuses, effective-boundary states, and zero model-field counts. It does not print attachment markdown, locators, receipt hashes, provider errors, or model text.
 
 ## Run the bounded file/stdin connector
 
@@ -45,7 +49,7 @@ Quick reference for the repository example contract:
 | Successful stdout | one JSON document with exactly the top-level keys `acceptedContext` and `consumerReceipt` |
 | Trusted-host split | send stdout only to a trusted local host; pass only `acceptedContext` into the text-consumer path and keep `consumerReceipt` in the host evidence plane |
 
-Use an explicit local file after copying a machine-readable bundle:
+Use an explicit local file after obtaining a machine-readable bundle from a trusted development/integration producer:
 
 ```powershell
 npm run --silent example:saved-snapshot:text-consumer:accept -- --input .\saved-bundle.json
@@ -84,7 +88,7 @@ import {
 import { createSavedSnapshotTextConsumerAdapter } from "./provider-adapter.mjs";
 import { createLocalOllamaTextProvider } from "./local-ollama-provider.mjs";
 
-const acceptance = acceptSavedSnapshotTextConsumerBundleJson(copiedBundleJson);
+const acceptance = acceptSavedSnapshotTextConsumerBundleJson(bundleJson);
 if (acceptance === null) return { status: "rejected" };
 const { acceptedContext, consumerReceipt } = acceptance;
 recordHostConsumerReceipt(consumerReceipt);
@@ -127,7 +131,7 @@ The companion [trusted-host example](../saved-snapshot-trusted-host/README.md) s
 
 ## Trust boundary
 
-- `copiedBundleJson` must come from a producer the host trusts. The JSON ingress limits the whole transport to 1 MiB; the shared projector then validates an allowlisted production shape and a maximum 262,144-byte markdown field. Neither step authenticates clipboard provenance, interprets markdown instructions, or proves redaction.
+- `bundleJson` must be supplied by a producer the host trusts. The JSON ingress limits the whole transport to 1 MiB; the shared projector then validates an allowlisted production shape and a maximum 262,144-byte markdown field. Neither step authenticates clipboard provenance, interprets markdown instructions, or proves redaction.
 - `consumerReceipt` proves only that the supplied JSON text parsed and its canonicalized bundle passed this deterministic public ingress in the current host invocation. It does not bind the original transport whitespace or line-ending bytes, and is not a signature, authentication token, clipboard-provenance receipt, model-execution receipt, or action authorization.
 - Connector stdout is deliberately content-bearing local transport. The receipt is public-safe, but the adjacent `acceptedContext` is not automatically safe to log, publish, or send to an untrusted provider.
 - `contentSha256` lets the runner detect content changes against the binding preserved by the host. It is not a signature or secret MAC, cannot protect a context and digest that are both replaced, and does not prove that the producer emitted canonical or safe content.
