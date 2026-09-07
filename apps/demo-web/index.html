@@ -3,353 +3,207 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" href="data:," />
-    <title>ui-attach demo</title>
+    <title>MeanThis Web SDK workbench</title>
     <style>
       :root {
-        color: #17202a;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #f7f8fa;
+        color: #10213f;
+        background: #f4f7fb;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
+
+      * { box-sizing: border-box; }
 
       body {
         margin: 0;
+        min-height: 100vh;
       }
 
       main {
         display: grid;
-        grid-template-columns: minmax(280px, 420px) minmax(320px, 1fr);
+        grid-template-columns: minmax(320px, 0.92fr) minmax(360px, 1.08fr);
         min-height: 100vh;
       }
 
       section,
       aside {
-        padding: 32px;
+        padding: clamp(28px, 4vw, 52px);
       }
 
       section {
-        display: flex;
-        flex-direction: column;
-        gap: 18px;
         background: #ffffff;
-        border-right: 1px solid #d8dee8;
+        border-right: 1px solid #d8e0ed;
+      }
+
+      aside {
+        background: #eef4fd;
       }
 
       h1,
       h2 {
-        margin: 0;
-        font-size: 24px;
-        font-weight: 650;
+        margin: 0 0 22px;
+        color: #0b1a31;
+        line-height: 1.08;
       }
+
+      h1 { font-size: clamp(28px, 4vw, 42px); }
+      h2 { font-size: clamp(23px, 3vw, 32px); }
 
       p {
         margin: 0;
-        color: #415066;
-        line-height: 1.5;
+        color: #465977;
+        font-size: 17px;
+        line-height: 1.55;
+      }
+
+      .guide,
+      .card,
+      .output {
+        border: 1px solid #cbd7e8;
+        border-radius: 12px;
+        background: #f8fbff;
+      }
+
+      .guide {
+        margin-bottom: 24px;
+        padding: 18px 20px;
+      }
+
+      .guide strong {
+        display: block;
+        margin-bottom: 6px;
+        color: #10213f;
+      }
+
+      .card {
+        padding: 22px;
+      }
+
+      .card h3 {
+        margin: 0 0 10px;
+        font-size: 20px;
       }
 
       label {
         display: grid;
         gap: 8px;
-        font-size: 14px;
-        color: #415066;
+        margin: 22px 0;
+        font-size: 16px;
       }
 
       input,
-      button,
-      textarea {
-        border-radius: 6px;
+      button {
+        width: 100%;
+        min-height: 48px;
+        border: 1px solid #b8c7dc;
+        border-radius: 8px;
         font: inherit;
       }
 
-      input,
-      button {
-        min-height: 40px;
-      }
-
       input {
-        border: 1px solid #b9c2d0;
-        padding: 0 12px;
+        padding: 0 14px;
+        background: #ffffff;
+      }
+
+      .actions {
+        display: grid;
+        gap: 12px;
       }
 
       button {
-        border: 1px solid #1f63ff;
-        padding: 0 14px;
+        padding: 0 18px;
         color: #ffffff;
-        background: #1f63ff;
+        background: #2865ee;
         cursor: pointer;
       }
 
-      button + button {
-        color: #243246;
-        border-color: #b9c2d0;
-        background: #ffffff;
-      }
-
-      #comment-action {
-        min-height: 48px;
-        font-weight: 650;
-      }
-
-      #bundle-action {
-        border-color: #6a55d8;
-        color: #ffffff;
-        background: #6a55d8;
-      }
-
-      #injected-action {
-        border-color: #3b7a57;
-        color: #ffffff;
-        background: #3b7a57;
-      }
-
-      #standalone-demo-tools {
-        display: grid;
-        gap: 18px;
-      }
-
-      #extension-demo-guide {
-        display: grid;
-        gap: 6px;
-        padding: 14px 16px;
-        border: 1px solid #d8dee8;
-        border-radius: 6px;
-        background: #f7f8fa;
-      }
-
-      #extension-demo-guide strong {
-        color: #17202a;
-      }
-
-      #standalone-demo-tools[hidden],
-      #extension-demo-guide[hidden],
-      #standalone-demo-output[hidden] {
-        display: none;
-      }
-
-      body[data-ui-attach-demo-mode="extension-target"] main {
-        grid-template-columns: minmax(320px, 720px);
-        justify-content: center;
-      }
-
-      body[data-ui-attach-demo-mode="extension-target"] section {
-        border-right: 0;
-      }
-
-      #bookmarklet-link,
-      #external-target-link,
-      #compatibility-fixtures-link {
-        display: inline-flex;
-        min-height: 36px;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid #b9c2d0;
-        border-radius: 6px;
-        color: #243246;
-        background: #ffffff;
-        text-decoration: none;
-      }
-
-      #comment-action[aria-pressed="true"],
-      #bundle-action[aria-pressed="true"],
-      #injected-action[aria-pressed="true"],
-      #bookmarklet-link[aria-pressed="true"] {
-        border-color: #ffc247;
+      button.secondary {
         color: #10213f;
-        background: #ffc247;
+        background: #ffffff;
       }
 
-      [data-ui-attach-selected="true"] {
-        outline: 3px solid #ffc247;
-        outline-offset: 3px;
-        box-shadow: 0 0 0 6px rgba(255, 194, 71, 0.24);
-      }
-
-      #preview {
+      .targets {
         display: grid;
-        gap: 10px;
-        min-height: 116px;
-        margin: 16px 0 24px;
+        gap: 16px;
+      }
+
+      .output {
+        min-height: 170px;
+        padding: 20px;
+        color: #5a6c88;
+        background: #ffffff;
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 16px;
+      }
+
+      .metric {
         padding: 16px;
-        border: 1px solid #d8dee8;
-        border-radius: 6px;
-        color: #17202a;
+        border: 1px solid #d2dced;
+        border-radius: 10px;
         background: #ffffff;
       }
 
-      #preview:empty::before {
-        color: #6c7a90;
-        content: "No element selected";
-      }
+      .metric strong,
+      .metric span { display: block; }
+      .metric strong { margin-bottom: 5px; font-size: 22px; }
+      .metric span { color: #63718a; }
 
-      #preview [data-ui-attach-preview-row="true"] {
-        display: grid;
-        grid-template-columns: 80px minmax(0, 1fr);
-        gap: 12px;
-        align-items: start;
-      }
-
-      #preview strong {
-        color: #415066;
-        font-size: 12px;
-        text-transform: uppercase;
-      }
-
-      #preview span {
-        min-width: 0;
-        overflow-wrap: anywhere;
-      }
-
-      #bundle-list {
-        display: grid;
-        gap: 8px;
-        margin: 16px 0 24px;
-      }
-
-      #bundle-list:empty {
-        display: none;
-      }
-
-      [data-ui-attach-bundle-item="true"] {
-        display: grid;
-        grid-template-columns: 32px minmax(0, 1fr) max-content;
-        gap: 10px;
-        align-items: center;
-        padding: 8px 10px;
-        border: 1px solid #d8dee8;
-        border-radius: 6px;
-        background: #ffffff;
-        color: #415066;
-        font-size: 13px;
-      }
-
-      [data-ui-attach-bundle-item="true"] strong {
-        display: inline-flex;
-        width: 24px;
-        height: 24px;
-        align-items: center;
-        justify-content: center;
-        border-radius: 999px;
-        color: #ffffff;
-        background: #6a55d8;
-        font-size: 12px;
-      }
-
-      [data-ui-attach-preview-visual="true"] {
-        display: flex;
-        min-height: 72px;
-        align-items: center;
-        justify-content: center;
-        padding: 14px;
-        border: 1px dashed #b9c2d0;
-        border-radius: 6px;
-        background:
-          linear-gradient(90deg, rgba(216, 222, 232, 0.36) 1px, transparent 1px),
-          linear-gradient(rgba(216, 222, 232, 0.36) 1px, transparent 1px),
-          #fbfcfe;
-        background-size: 12px 12px;
-      }
-
-      [data-ui-attach-preview-clone="true"] {
-        max-width: 100%;
-      }
-
-      [data-ui-attach-replay-panel="true"] {
-        display: grid;
-        gap: 8px;
-        padding-top: 12px;
-        border-top: 1px solid #e7ebf1;
-      }
-
-      [data-ui-attach-replay-status="true"] {
-        font-size: 14px;
-        font-weight: 650;
-      }
-
-      [data-ui-attach-replay-panel="true"] ol {
-        display: grid;
-        gap: 6px;
-        margin: 0;
-        padding-left: 18px;
-        color: #415066;
-        font-size: 13px;
-      }
-
-      pre {
-        min-height: 320px;
-        overflow: auto;
-        padding: 16px;
-        border: 1px solid #d8dee8;
-        border-radius: 6px;
-        color: #17202a;
-        background: #ffffff;
-        white-space: pre-wrap;
-      }
+      [hidden] { display: none !important; }
 
       @media (max-width: 760px) {
-        main {
-          grid-template-columns: 1fr;
-        }
-
-        section {
-          border-right: 0;
-          border-bottom: 1px solid #d8dee8;
-        }
+        main { grid-template-columns: 1fr; }
+        section { border-right: 0; border-bottom: 1px solid #d8e0ed; }
       }
     </style>
   </head>
-  <body data-ui-attach-demo>
-    <main>
-      <section aria-label="Profile settings" data-ui-attach-surface>
-        <h1>Profile settings</h1>
-        <div id="standalone-demo-tools">
-          <p>Start a comment, click a UI element, then describe the change you want.</p>
-          <button id="comment-action" type="button" data-ui-attach-ignore aria-pressed="false">
-            Comment on UI element
-          </button>
-          <button id="bundle-action" type="button" data-ui-attach-ignore aria-pressed="false">
-            Add element to bundle
-          </button>
-          <button id="injected-action" type="button" data-ui-attach-ignore aria-pressed="false">
-            Try injected runtime
-          </button>
-          <a id="bookmarklet-link" data-ui-attach-ignore href="#">MeanThis Bookmarklet</a>
-          <a
-            id="external-target-link"
-            data-ui-attach-ignore
-            href="/external-target.html?token=external-secret#billing"
-          >
-            Open external target
-          </a>
-          <a
-            id="compatibility-fixtures-link"
-            data-ui-attach-ignore
-            href="/compatibility-fixtures.html?token=compat-secret#fixtures"
-          >
-            Open compatibility fixtures
-          </a>
+  <body>
+    <main data-ui-attach-surface>
+      <section id="sdk-widget-demo-stage" aria-labelledby="profile-heading">
+        <h1 id="profile-heading">Profile settings</h1>
+        <div id="sdk-widget-demo-guide" class="guide" data-ui-attach-ignore>
+          <strong>MeanThis Web SDK widget</strong>
+          <p>This page imports the shared selection, overlay, and widget core directly.</p>
         </div>
-        <div id="extension-demo-guide" data-ui-attach-ignore hidden>
-          <strong>Use MeanThis from the side panel</strong>
-          <p>Choose <strong>Add elements</strong> in MeanThis, then select a control on this page.</p>
+        <div id="extension-demo-guide" class="guide" data-ui-attach-ignore hidden>
+          <strong>MeanThis extension target</strong>
+          <p>The SDK owner is disabled so the browser extension can claim this page.</p>
         </div>
-        <label>
-          Display name
-          <input data-testid="display-name" value="Ada Lovelace" />
-        </label>
-        <button data-testid="save-button" type="button">Save changes</button>
-        <button data-testid="cancel-button" type="button">Cancel</button>
+        <article class="card">
+          <h3>Account profile</h3>
+          <p>Select any control, card, or output region while MeanThis is in work mode.</p>
+          <label>
+            Display name
+            <input value="Ada Lovelace" aria-label="Display name" />
+          </label>
+          <div class="actions">
+            <button id="save" data-testid="save-button" type="button">Save changes</button>
+            <button id="cancel" class="secondary" data-testid="cancel-button" type="button">Cancel</button>
+          </div>
+        </article>
       </section>
-      <aside id="standalone-demo-output">
-        <h2>Bundle targets</h2>
-        <div id="bundle-list" aria-live="polite"></div>
-        <h2>Element preview</h2>
-        <div id="preview" aria-live="polite"></div>
-        <h2>Attachment output</h2>
-        <pre id="output" aria-live="polite"></pre>
+
+      <aside aria-labelledby="targets-heading">
+        <h2 id="targets-heading">Reference targets</h2>
+        <div class="targets">
+          <article class="output" aria-label="Element preview">
+            <strong>Element preview</strong>
+            <p>No element selected</p>
+          </article>
+          <article class="output" aria-label="Attachment output">
+            <strong>Attachment output</strong>
+            <p>The copied agent handoff appears through the MeanThis widget.</p>
+          </article>
+          <div class="metric-grid">
+            <article class="metric"><strong>12</strong><span>Open references</span></article>
+            <article class="metric"><strong>4</strong><span>Resolved today</span></article>
+          </div>
+        </div>
       </aside>
     </main>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

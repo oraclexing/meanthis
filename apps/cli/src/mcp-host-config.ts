@@ -1,13 +1,28 @@
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { MEANTHIS_MCP_HTTP_TOKEN_ENV } from "./local-bridge-mcp-http-token.js";
 
 export const MEANTHIS_MCP_REGISTRATION_NAME = "meanthis";
+export const MEANTHIS_MCP_HTTP_URL = "http://127.0.0.1:38472/mcp";
+export const MEANTHIS_MCP_HTTP_TOKEN_ENV_VAR = MEANTHIS_MCP_HTTP_TOKEN_ENV;
 
 export type MeanThisMcpHost = "codex" | "claude-code" | "vscode" | "cursor";
 
-export interface MeanThisMcpDescriptor {
+export interface MeanThisStdioBrokerMcpDescriptor {
   name: typeof MEANTHIS_MCP_REGISTRATION_NAME;
   transport: {
     type: "stdio";
+    command: string;
+    args: [string];
+    env: null;
+    cwd: null;
+  };
+}
+
+export interface MeanThisStdioCompatibilityMcpDescriptor {
+  name: typeof MEANTHIS_MCP_REGISTRATION_NAME;
+  transport: {
+    type: "stdio_compatibility";
     command: string;
     args: string[];
     env: null;
@@ -15,29 +30,85 @@ export interface MeanThisMcpDescriptor {
   };
 }
 
+export type MeanThisMcpDescriptor = MeanThisStdioBrokerMcpDescriptor;
+
 interface HostCommand {
   executable: string;
   args: string[];
 }
 
-export interface MeanThisMcpHostSetup {
-  host: MeanThisMcpHost;
-  installation: "automated" | "generated_only";
-  verification: "structured_readback_available" | "manual_required";
-  artifact: "command" | "command_and_config" | "config";
-  command: HostCommand | null;
-  config: Record<string, unknown> | null;
-  configPath: string | null;
+interface CodexReadbackExpectation {
+  command: HostCommand;
+  expected: {
+    name: typeof MEANTHIS_MCP_REGISTRATION_NAME;
+    enabled: true;
+    transport: {
+      type: "stdio";
+      command: string;
+      args: [string];
+      env: null;
+      env_vars: [];
+      cwd: null;
+    };
+  };
 }
 
+export interface MeanThisCodexMcpHostSetup {
+  host: "codex";
+  installation: "automated";
+  verification: "structured_readback_available";
+  artifact: "command";
+  command: HostCommand;
+  readback: CodexReadbackExpectation;
+  manual: null;
+}
+
+export interface MeanThisManualMcpHostSetup {
+  host: Exclude<MeanThisMcpHost, "codex">;
+  installation: "manual";
+  verification: "manual_required";
+  artifact: "manual";
+  command: null;
+  readback: null;
+  manual: {
+    transport: "stdio";
+    command: string;
+    args: [string];
+    env: null;
+    cwd: null;
+  };
+}
+
+export type MeanThisMcpHostSetup =
+  | MeanThisCodexMcpHostSetup
+  | MeanThisManualMcpHostSetup;
+
 export function createMeanThisMcpDescriptor(
-  nodePath: string,
-  entryPath: string,
-): MeanThisMcpDescriptor {
+  nodePath: string = process.execPath,
+  brokerEntryPath: string = fileURLToPath(
+    new URL("./local-bridge-mcp-stdio-broker.js", import.meta.url),
+  ),
+): MeanThisStdioBrokerMcpDescriptor {
   return {
     name: MEANTHIS_MCP_REGISTRATION_NAME,
     transport: {
       type: "stdio",
+      command: resolve(nodePath),
+      args: [resolve(brokerEntryPath)],
+      env: null,
+      cwd: null,
+    },
+  };
+}
+
+export function createMeanThisStdioCompatibilityDescriptor(
+  nodePath: string,
+  entryPath: string,
+): MeanThisStdioCompatibilityMcpDescriptor {
+  return {
+    name: MEANTHIS_MCP_REGISTRATION_NAME,
+    transport: {
+      type: "stdio_compatibility",
       command: resolve(nodePath),
       args: [resolve(entryPath), "mcp"],
       env: null,
@@ -48,82 +119,60 @@ export function createMeanThisMcpDescriptor(
 
 export function createMeanThisMcpHostSetup(
   host: MeanThisMcpHost,
-  descriptor: MeanThisMcpDescriptor,
+  descriptor: MeanThisStdioBrokerMcpDescriptor,
 ): MeanThisMcpHostSetup {
-  const server = {
-    command: descriptor.transport.command,
-    args: [...descriptor.transport.args],
-  };
-
-  switch (host) {
-    case "codex":
-      return {
-        host,
-        installation: "automated",
-        verification: "structured_readback_available",
-        artifact: "command",
+  if (host === "codex") {
+    return {
+      host,
+      installation: "automated",
+      verification: "structured_readback_available",
+      artifact: "command",
+      command: {
+        executable: "codex",
+        args: [
+          "mcp",
+          "add",
+          descriptor.name,
+          "--",
+          descriptor.transport.command,
+          ...descriptor.transport.args,
+        ],
+      },
+      readback: {
         command: {
           executable: "codex",
-          args: [
-            "mcp",
-            "add",
-            descriptor.name,
-            "--",
-            server.command,
-            ...server.args,
-          ],
+          args: ["mcp", "get", descriptor.name, "--json"],
         },
-        config: null,
-        configPath: null,
-      };
-    case "claude-code":
-      return {
-        host,
-        installation: "generated_only",
-        verification: "manual_required",
-        artifact: "command",
-        command: {
-          executable: "claude",
-          args: [
-            "mcp",
-            "add",
-            "--transport",
-            "stdio",
-            "--scope",
-            "user",
-            descriptor.name,
-            "--",
-            server.command,
-            ...server.args,
-          ],
+        expected: {
+          name: descriptor.name,
+          enabled: true,
+          transport: {
+            type: "stdio",
+            command: descriptor.transport.command,
+            args: descriptor.transport.args,
+            env: null,
+            env_vars: [],
+            cwd: null,
+          },
         },
-        config: null,
-        configPath: null,
-      };
-    case "vscode": {
-      const config = { name: descriptor.name, type: "stdio", ...server };
-      return {
-        host,
-        installation: "generated_only",
-        verification: "manual_required",
-        artifact: "command_and_config",
-        command: {
-          executable: "code",
-          args: ["--add-mcp", JSON.stringify(config)],
-        },
-        config,
-        configPath: null,
-      };
-    }
-    case "cursor":
-      return {
-        host,
-        installation: "generated_only",
-        verification: "manual_required",
-        artifact: "config",
-        command: null,
-        config: { mcpServers: { [descriptor.name]: server } },
-        configPath: "~/.cursor/mcp.json",
-      };
+      },
+      manual: null,
+    };
   }
+
+  return {
+    host,
+    installation: "manual",
+    verification: "manual_required",
+    artifact: "manual",
+    command: null,
+    readback: null,
+    manual: {
+      transport: "stdio",
+      command: descriptor.transport.command,
+      args: descriptor.transport.args,
+      env: null,
+      cwd: null,
+    },
+  };
 }

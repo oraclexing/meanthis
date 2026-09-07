@@ -37,6 +37,18 @@ export interface LocalBridgeAgentRequestAuth {
   headers: Record<string, string>;
 }
 
+/**
+ * Request authentication for endpoints whose contract includes a raw body.
+ *
+ * This deliberately remains a separate API from LocalBridgeAgentRequestAuth:
+ * the proof is signed under a different canonical domain and includes the
+ * SHA-256 digest of the exact bytes supplied to the creator/verifier. Callers
+ * must pass bytes (Buffer/Uint8Array), never parsed or re-serialized JSON.
+ */
+export interface LocalBridgeAgentBodyRequestAuth extends LocalBridgeAgentRequestAuth {
+  bodySha256: string;
+}
+
 type HeaderSource = Headers | Record<string, string | string[] | undefined>;
 
 export function createLocalBridgeAgentRequestAuth(
@@ -116,6 +128,90 @@ export function verifyLocalBridgeAgentRequestAuth(
   };
 }
 
+export function createLocalBridgeAgentBodyRequestAuth(
+  token: string,
+  path: string,
+  body: Uint8Array,
+  options: {
+    method?: "GET" | "POST";
+    now?: () => number;
+    randomBytes?: (size: number) => Uint8Array;
+  } = {},
+): LocalBridgeAgentBodyRequestAuth {
+  validateToken(token);
+  if (!path.startsWith("/v1/agent/")) throw new Error("Invalid local bridge agent path.");
+  const bodySha256 = hashRawBody(body);
+  const timestamp = String((options.now ?? Date.now)());
+  const nonce = Buffer.from(
+    (options.randomBytes ?? ((size: number) => secureRandomBytes(size)))(16),
+  ).toString("base64url");
+  if (!/^\d{13}$/.test(timestamp) || !/^[A-Za-z0-9_-]{22}$/.test(nonce)) {
+    throw new Error("Invalid local bridge agent request entropy.");
+  }
+  const method = options.method ?? "GET";
+  const proof = sign(token, canonicalBodyRequest(method, path, timestamp, nonce, bodySha256));
+  return {
+    method,
+    path,
+    timestamp,
+    nonce,
+    bodySha256,
+    headers: {
+      [REQUEST_TIMESTAMP_HEADER]: timestamp,
+      [REQUEST_NONCE_HEADER]: nonce,
+      [REQUEST_PROOF_HEADER]: proof,
+    },
+  };
+}
+
+export function verifyLocalBridgeAgentBodyRequestAuth(
+  token: string,
+  method: string,
+  path: string,
+  body: Uint8Array,
+  headers: HeaderSource,
+  seenNonces: Map<string, number>,
+  now = Date.now(),
+): LocalBridgeAgentBodyRequestAuth | null {
+  validateToken(token);
+  if ((method !== "GET" && method !== "POST") || !path.startsWith("/v1/agent/")) return null;
+  const bodySha256 = tryHashRawBody(body);
+  if (!bodySha256) return null;
+  const timestamp = readHeader(headers, REQUEST_TIMESTAMP_HEADER);
+  const nonce = readHeader(headers, REQUEST_NONCE_HEADER);
+  const proof = readHeader(headers, REQUEST_PROOF_HEADER);
+  if (
+    !timestamp || !/^\d{13}$/.test(timestamp) ||
+    !nonce || !/^[A-Za-z0-9_-]{22}$/.test(nonce) ||
+    !proof || !/^[A-Za-z0-9_-]{43}$/.test(proof)
+  ) {
+    return null;
+  }
+  const requestTime = Number(timestamp);
+  if (!Number.isSafeInteger(requestTime) || Math.abs(now - requestTime) > MAX_CLOCK_SKEW_MS) {
+    return null;
+  }
+  for (const [knownNonce, observedAt] of seenNonces) {
+    if (now - observedAt > MAX_CLOCK_SKEW_MS) seenNonces.delete(knownNonce);
+  }
+  if (seenNonces.has(nonce)) return null;
+  const expected = sign(token, canonicalBodyRequest(method, path, timestamp, nonce, bodySha256));
+  if (!sameProof(expected, proof)) return null;
+  seenNonces.set(nonce, now);
+  return {
+    method: method as "GET" | "POST",
+    path,
+    timestamp,
+    nonce,
+    bodySha256,
+    headers: {
+      [REQUEST_TIMESTAMP_HEADER]: timestamp,
+      [REQUEST_NONCE_HEADER]: nonce,
+      [REQUEST_PROOF_HEADER]: proof,
+    },
+  };
+}
+
 export function createLocalBridgeAgentResponseProof(
   token: string,
   request: LocalBridgeAgentRequestAuth,
@@ -136,6 +232,34 @@ export function verifyLocalBridgeAgentResponseProof(
   if (!receivedProof || !/^[A-Za-z0-9_-]{43}$/.test(receivedProof)) return false;
   const expected = createLocalBridgeAgentResponseProof(token, request, status, body);
   return sameProof(expected, receivedProof);
+}
+
+export function createLocalBridgeAgentBodyResponseProof(
+  token: string,
+  request: LocalBridgeAgentBodyRequestAuth,
+  status: number,
+  body: Uint8Array,
+): string {
+  validateToken(token);
+  return sign(token, canonicalBodyResponse(request, status, hashRawBody(body)));
+}
+
+export function verifyLocalBridgeAgentBodyResponseProof(
+  token: string,
+  request: LocalBridgeAgentBodyRequestAuth,
+  status: number,
+  body: Uint8Array,
+  receivedProof: string | null,
+): boolean {
+  if (!receivedProof || !/^[A-Za-z0-9_-]{43}$/.test(receivedProof)) return false;
+  const bodySha256 = tryHashRawBody(body);
+  if (!bodySha256) return false;
+  try {
+    const expected = createLocalBridgeAgentBodyResponseProof(token, request, status, body);
+    return sameProof(expected, receivedProof);
+  } catch {
+    return false;
+  }
 }
 
 export function sealLocalBridgeApprovalKey(
@@ -206,6 +330,16 @@ function canonicalRequest(
   return ["ui-attach-agent-request-v2", method, path, timestamp, nonce].join("\0");
 }
 
+function canonicalBodyRequest(
+  method: string,
+  path: string,
+  timestamp: string,
+  nonce: string,
+  bodySha256: string,
+): string {
+  return ["ui-attach-agent-request-body-v1", method, path, timestamp, nonce, bodySha256].join("\0");
+}
+
 function canonicalResponse(
   request: LocalBridgeAgentRequestAuth,
   status: number,
@@ -221,6 +355,38 @@ function canonicalResponse(
     String(status),
     digest,
   ].join("\0");
+}
+
+function canonicalBodyResponse(
+  request: LocalBridgeAgentBodyRequestAuth,
+  status: number,
+  bodySha256: string,
+): string {
+  return [
+    "ui-attach-agent-response-body-v1",
+    request.method,
+    request.path,
+    request.timestamp,
+    request.nonce,
+    request.bodySha256,
+    String(status),
+    bodySha256,
+  ].join("\0");
+}
+
+function hashRawBody(body: Uint8Array): string {
+  if (!(body instanceof Uint8Array)) {
+    throw new Error("Local bridge agent body must be raw bytes.");
+  }
+  return createHash("sha256").update(Buffer.from(body)).digest("base64url");
+}
+
+function tryHashRawBody(body: Uint8Array): string | null {
+  try {
+    return hashRawBody(body);
+  } catch {
+    return null;
+  }
 }
 
 function sign(token: string, value: string): string {

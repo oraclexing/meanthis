@@ -8,6 +8,7 @@ import {
 } from "@meanthis/prompt";
 import {
   isUIAttachment,
+  UI_ATTACHMENT_COMPUTED_STYLE_FIELDS,
   type SavedSnapshotAuthorityV1,
   type UIAttachment,
   type UIAttachmentDisclosureMode,
@@ -69,8 +70,11 @@ export interface CaptureSession {
 
 export interface CaptureHubItem {
   id: string;
+  annotationId?: string;
+  annotationLifecycle?: CaptureSessionAnnotationLifecycleV3;
   sourceRecord: OriginCaptureRecordLike;
   createdAt: string;
+  updatedAt?: string;
   labels: string[];
 }
 
@@ -228,10 +232,14 @@ export interface CaptureHub {
   ): SavedSnapshotPromptBundleResult;
 }
 
-export const CAPTURE_SESSION_FILE_SCHEMA_VERSION = "0.1.0" as const;
+export const CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1 = "0.1.0" as const;
+export const CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2 = "0.2.0" as const;
+export const CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3 = "0.3.0" as const;
+export const CAPTURE_SESSION_FILE_SCHEMA_VERSION = CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3;
 export const CAPTURE_SESSION_FILE_KIND = "ui-attach.capture-session" as const;
 export const CAPTURE_SESSION_FILE_MAX_BYTES = 1_048_576 as const;
 export const CAPTURE_SESSION_FILE_MAX_ATTACHMENTS = 26 as const;
+export const CAPTURE_SESSION_FILE_MAX_ANNOTATION_ID_LENGTH = 128 as const;
 export const CAPTURE_SESSION_FILE_MAX_COLLECTION_ITEMS = 256 as const;
 export const CAPTURE_SESSION_FILE_MAX_STRING_BYTES = CAPTURE_SESSION_FILE_MAX_BYTES;
 export const CAPTURE_SESSION_FILE_MAX_OBJECT_KEYS = 64 as const;
@@ -268,11 +276,52 @@ export interface CaptureSessionFileSessionV1 {
   attachments: CaptureSessionFileItemV1[];
 }
 
-export interface CaptureSessionFileV1 {
-  schemaVersion: typeof CAPTURE_SESSION_FILE_SCHEMA_VERSION;
+interface CaptureSessionFileBase {
   kind: typeof CAPTURE_SESSION_FILE_KIND;
+}
+
+export interface CaptureSessionFileV1 extends CaptureSessionFileBase {
+  schemaVersion: typeof CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1;
   session: CaptureSessionFileSessionV1;
 }
+
+export interface CaptureSessionFileItemV2 extends CaptureSessionFileItemV1 {
+  annotationId: string;
+  updatedAt: string;
+}
+
+export interface CaptureSessionFileSessionV2
+  extends Omit<CaptureSessionFileSessionV1, "attachments"> {
+  attachments: CaptureSessionFileItemV2[];
+}
+
+export interface CaptureSessionFileV2 extends CaptureSessionFileBase {
+  schemaVersion: typeof CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2;
+  session: CaptureSessionFileSessionV2;
+}
+
+export type CaptureSessionAnnotationLifecycleStateV3 = "open" | "resolved";
+
+export interface CaptureSessionAnnotationLifecycleV3 {
+  state: CaptureSessionAnnotationLifecycleStateV3;
+  resolvedAt: string | null;
+}
+
+export interface CaptureSessionFileItemV3 extends CaptureSessionFileItemV2 {
+  annotationLifecycle: CaptureSessionAnnotationLifecycleV3;
+}
+
+export interface CaptureSessionFileSessionV3
+  extends Omit<CaptureSessionFileSessionV2, "attachments"> {
+  attachments: CaptureSessionFileItemV3[];
+}
+
+export interface CaptureSessionFileV3 extends CaptureSessionFileBase {
+  schemaVersion: typeof CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3;
+  session: CaptureSessionFileSessionV3;
+}
+
+export type CaptureSessionFile = CaptureSessionFileV1 | CaptureSessionFileV2 | CaptureSessionFileV3;
 
 export interface CaptureSessionFileValidationIssue {
   path: string;
@@ -288,8 +337,41 @@ export function isCaptureSessionFileByteLimitIssue(
   return issue.path === "" && issue.message === CAPTURE_SESSION_FILE_BYTE_LIMIT_MESSAGE;
 }
 
+export function isCaptureSessionAnnotationId(value: unknown): value is string {
+  return typeof value === "string" &&
+    new RegExp(`^[A-Za-z0-9._:-]{1,${CAPTURE_SESSION_FILE_MAX_ANNOTATION_ID_LENGTH}}$`).test(value);
+}
+
+export function isCaptureSessionAnnotationLifecycleV3(
+  value: unknown,
+): value is CaptureSessionAnnotationLifecycleV3 {
+  if (!hasExactDataFields(value, ["state", "resolvedAt"])) return false;
+  const lifecycle = value as Record<string, unknown>;
+  if (lifecycle.state === "open") return lifecycle.resolvedAt === null;
+  return lifecycle.state === "resolved" &&
+    typeof lifecycle.resolvedAt === "string" &&
+    isCanonicalDateTime(lifecycle.resolvedAt, true);
+}
+
+export const isCaptureSessionAnnotationLifecycle = isCaptureSessionAnnotationLifecycleV3;
+export const isAnnotationLifecycleV3 = isCaptureSessionAnnotationLifecycleV3;
+
 export type CaptureSessionFileValidationResult =
-  | { ok: true; file: CaptureSessionFileV1 }
+  | { ok: true; file: CaptureSessionFile }
+  | { ok: false; issues: CaptureSessionFileValidationIssue[] };
+
+export interface SerializedCaptureSessionFile {
+  file: CaptureSessionFile;
+  text: string;
+  byteLength: number;
+}
+
+export type CaptureSessionFileSerializationResult =
+  | { ok: true; value: SerializedCaptureSessionFile }
+  | { ok: false; issues: CaptureSessionFileValidationIssue[] };
+
+export type CaptureSessionFileParseResult =
+  | { ok: true; value: CaptureSessionFile }
   | { ok: false; issues: CaptureSessionFileValidationIssue[] };
 
 export type CaptureSessionFileHydrationResult =
@@ -329,6 +411,9 @@ function sanitizeCaptureSessionFileValidationMessage(message: string): string {
 
 const SAFE_CAPTURE_SESSION_VALIDATION_MESSAGES = new Set([
   'Expected "0.1.0".',
+  'Expected "0.2.0".',
+  'Expected "0.3.0".',
+  'Expected "0.1.0", "0.2.0", or "0.3.0".',
   'Expected "ui-attach.capture-session".',
   "Expected a root record.",
   "Expected a session record.",
@@ -338,6 +423,17 @@ const SAFE_CAPTURE_SESSION_VALIDATION_MESSAGES = new Set([
   "Expected an array.",
   "Expected an attachment item record.",
   "Expected a non-empty attachment id.",
+  "Expected an opaque ASCII annotation id up to 128 characters.",
+  "Duplicate annotation id.",
+  "Expected item updatedAt not to precede createdAt.",
+  "Expected item updatedAt not to exceed session updatedAt.",
+  "Expected an annotation lifecycle record.",
+  'Expected annotation lifecycle state to be "open" or "resolved".',
+  "Expected annotation lifecycle resolvedAt to be a string or null.",
+  "Expected open annotation lifecycle resolvedAt to be null.",
+  "Expected resolved annotation lifecycle resolvedAt to be canonical.",
+  "Expected annotation lifecycle resolvedAt not to precede item createdAt.",
+  "Expected annotation lifecycle resolvedAt not to exceed item updatedAt.",
   "Expected a label from A through Z.",
   "Expected a source record.",
   "Expected session title to match at least one source record page title.",
@@ -350,6 +446,8 @@ const SAFE_CAPTURE_SESSION_VALIDATION_MESSAGES = new Set([
   "Unknown field.",
   "Expected a canonical UTC ISO date-time string.",
   "Expected a non-negative integer.",
+  "Expected capture session JSON text.",
+  "Expected canonical capture session JSON bytes.",
   CAPTURE_SESSION_FILE_BYTE_LIMIT_MESSAGE,
   CAPTURE_SESSION_FILE_VALIDATION_LIMIT_MESSAGE,
 ]);
@@ -373,6 +471,7 @@ const CAPTURE_SESSION_ATTACHMENT_AUDIT_FIELDS = new Set([
   "style.display",
   "style.color",
   "style.backgroundColor",
+  ...UI_ATTACHMENT_COMPUTED_STYLE_FIELDS.map((field) => `style.${field}`),
   "context.parentSummary",
   "context.nearbyText",
   "context.selectorHints",
@@ -409,10 +508,13 @@ export function validateCaptureSessionFile(
 
   validateKnownFields(value, "", ["schemaVersion", "kind", "session"], issues);
 
-  if (value.schemaVersion !== CAPTURE_SESSION_FILE_SCHEMA_VERSION) {
+  const isLegacyV1 = value.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1;
+  const isCurrentV2 = value.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2;
+  const isCurrentV3 = value.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3;
+  if (!isLegacyV1 && !isCurrentV2 && !isCurrentV3) {
     issues.push({
       path: "schemaVersion",
-      message: `Expected "${CAPTURE_SESSION_FILE_SCHEMA_VERSION}".`,
+      message: `Expected "${CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1}", "${CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2}", or "${CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3}".`,
     });
   }
   if (value.kind !== CAPTURE_SESSION_FILE_KIND) {
@@ -436,8 +538,8 @@ export function validateCaptureSessionFile(
   if (session.title !== null && typeof session.title !== "string") {
     issues.push({ path: "session.title", message: "Expected a string or null." });
   }
-  validateCanonicalDateTime(session.createdAt, "session.createdAt", issues);
-  validateCanonicalDateTime(session.updatedAt, "session.updatedAt", issues);
+  validateCanonicalDateTime(session.createdAt, "session.createdAt", issues, isCurrentV3);
+  validateCanonicalDateTime(session.updatedAt, "session.updatedAt", issues, isCurrentV3);
   const sessionOrigin = typeof session.origin === "string" && isCanonicalHttpOrigin(session.origin)
     ? session.origin
     : null;
@@ -447,7 +549,7 @@ export function validateCaptureSessionFile(
   if (!Array.isArray(session.attachments)) {
     issues.push({ path: "session.attachments", message: "Expected an array." });
     return issues.length === 0
-      ? { ok: true, file: value as unknown as CaptureSessionFileV1 }
+      ? { ok: true, file: value as unknown as CaptureSessionFile }
       : { ok: false, issues };
   }
   if (session.attachments.length > CAPTURE_SESSION_FILE_MAX_ATTACHMENTS) {
@@ -459,6 +561,7 @@ export function validateCaptureSessionFile(
   }
 
   const itemIds = new Set<string>();
+  const annotationIds = new Set<string>();
   const labels = new Set<string>();
   const validSourceRecords: Array<{ pageTitle: string | null }> = [];
   session.attachments.forEach((item, index) => {
@@ -467,7 +570,24 @@ export function validateCaptureSessionFile(
       issues.push({ path: itemPath, message: "Expected an attachment item record." });
       return;
     }
-    validateKnownFields(item, itemPath, ["id", "createdAt", "labels", "sourceRecord"], issues);
+    validateKnownFields(
+      item,
+      itemPath,
+      isCurrentV2
+        ? ["id", "annotationId", "createdAt", "updatedAt", "labels", "sourceRecord"]
+        : isCurrentV3
+          ? [
+              "id",
+              "annotationId",
+              "createdAt",
+              "updatedAt",
+              "annotationLifecycle",
+              "labels",
+              "sourceRecord",
+            ]
+          : ["id", "createdAt", "labels", "sourceRecord"],
+      issues,
+    );
 
     const sourceRecord = isUnknownRecord(item.sourceRecord) ? item.sourceRecord : null;
     const attachment = sourceRecord?.attachment;
@@ -488,7 +608,52 @@ export function validateCaptureSessionFile(
         });
       }
     }
-    validateCanonicalDateTime(item.createdAt, `${itemPath}.createdAt`, issues);
+    validateCanonicalDateTime(item.createdAt, `${itemPath}.createdAt`, issues, isCurrentV3);
+    if (isCurrentV2 || isCurrentV3) {
+      if (!isCaptureSessionAnnotationId(item.annotationId)) {
+        issues.push({
+          path: `${itemPath}.annotationId`,
+          message: "Expected an opaque ASCII annotation id up to 128 characters.",
+        });
+      } else if (annotationIds.has(item.annotationId)) {
+        issues.push({
+          path: `${itemPath}.annotationId`,
+          message: "Duplicate annotation id.",
+        });
+      } else {
+        annotationIds.add(item.annotationId);
+      }
+      validateCanonicalDateTime(item.updatedAt, `${itemPath}.updatedAt`, issues, isCurrentV3);
+      if (
+        typeof item.createdAt === "string" &&
+        typeof item.updatedAt === "string" &&
+        Date.parse(item.updatedAt) < Date.parse(item.createdAt)
+      ) {
+        issues.push({
+          path: `${itemPath}.updatedAt`,
+          message: "Expected item updatedAt not to precede createdAt.",
+        });
+      }
+      if (
+        typeof item.updatedAt === "string" &&
+        typeof session.updatedAt === "string" &&
+        Date.parse(item.updatedAt) > Date.parse(session.updatedAt)
+      ) {
+        issues.push({
+          path: `${itemPath}.updatedAt`,
+          message: "Expected item updatedAt not to exceed session updatedAt.",
+        });
+      }
+    }
+    if (isCurrentV3) {
+      validateCaptureSessionAnnotationLifecycle(
+        item.annotationLifecycle,
+        `${itemPath}.annotationLifecycle`,
+        item.createdAt,
+        item.updatedAt,
+        issues,
+      );
+    }
     if (!Array.isArray(item.labels)) {
       issues.push({ path: `${itemPath}.labels`, message: "Expected an array." });
     } else {
@@ -514,6 +679,7 @@ export function validateCaptureSessionFile(
       sourceRecord,
       recordPath,
       sessionOrigin,
+      isCurrentV3,
       issues,
     );
     if (sourceRecordIsValid) {
@@ -532,8 +698,96 @@ export function validateCaptureSessionFile(
   }
 
   return issues.length === 0
-    ? { ok: true, file: value as unknown as CaptureSessionFileV1 }
+    ? { ok: true, file: value as unknown as CaptureSessionFile }
     : { ok: false, issues };
+}
+
+export function serializeCaptureSessionFile(
+  value: unknown,
+): CaptureSessionFileSerializationResult {
+  const validation = validateCaptureSessionFile(value);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      issues: sanitizeCaptureSessionFileValidationIssues(validation.issues),
+    };
+  }
+
+  const file = canonicalizeCaptureSessionFile(validation.file);
+  const text = `${JSON.stringify(file, null, 2)}\n`;
+  const byteLength = new TextEncoder().encode(text).byteLength;
+  if (byteLength > CAPTURE_SESSION_FILE_MAX_BYTES) {
+    return {
+      ok: false,
+      issues: [{ path: "", message: CAPTURE_SESSION_FILE_BYTE_LIMIT_MESSAGE }],
+    };
+  }
+  return { ok: true, value: { file, text, byteLength } };
+}
+
+export function serializeCaptureSessionFileText(value: unknown): string | null {
+  const result = serializeCaptureSessionFile(value);
+  return result.ok ? result.value.text : null;
+}
+
+export function parseCaptureSessionFile(text: unknown): CaptureSessionFileParseResult {
+  if (typeof text !== "string") {
+    return {
+      ok: false,
+      issues: [{ path: "", message: "Expected capture session JSON text." }],
+    };
+  }
+  const byteLength = new TextEncoder().encode(text).byteLength;
+  if (byteLength > CAPTURE_SESSION_FILE_MAX_BYTES) {
+    return {
+      ok: false,
+      issues: [{ path: "", message: CAPTURE_SESSION_FILE_BYTE_LIMIT_MESSAGE }],
+    };
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return {
+      ok: false,
+      issues: [{ path: "", message: "Expected capture session JSON text." }],
+    };
+  }
+
+  const serialized = serializeCaptureSessionFile(value);
+  if (!serialized.ok) return serialized;
+  if (serialized.value.text !== text) {
+    return {
+      ok: false,
+      issues: [{ path: "", message: "Expected canonical capture session JSON bytes." }],
+    };
+  }
+  return { ok: true, value: serialized.value.file };
+}
+
+export function parseCaptureSessionFileValue(text: unknown): CaptureSessionFile | null {
+  const result = parseCaptureSessionFile(text);
+  return result.ok ? result.value : null;
+}
+
+export function isCaptureSessionFile(value: unknown): value is CaptureSessionFile {
+  return validateCaptureSessionFile(value).ok;
+}
+
+export function isCaptureSessionFileV1(value: unknown): value is CaptureSessionFileV1 {
+  const result = validateCaptureSessionFile(value);
+  return result.ok && result.file.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1;
+}
+
+export function isCaptureSessionFileV2(value: unknown): value is CaptureSessionFileV2 {
+  const result = validateCaptureSessionFile(value);
+  return result.ok && result.file.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2;
+}
+
+export function isCaptureSessionFileV3(value: unknown): value is CaptureSessionFileV3 {
+  const result = validateCaptureSessionFile(value);
+  return result.ok && result.file.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3;
 }
 
 export function hydrateCaptureSessionFile(
@@ -568,10 +822,81 @@ export function hydrateCaptureSessionFile(
   return { ok: true, hub, sessionId: session.id };
 }
 
+function validateCaptureSessionAnnotationLifecycle(
+  value: unknown,
+  path: string,
+  itemCreatedAt: unknown,
+  itemUpdatedAt: unknown,
+  issues: CaptureSessionFileValidationIssue[],
+): void {
+  if (!isUnknownRecord(value)) {
+    issues.push({ path, message: "Expected an annotation lifecycle record." });
+    return;
+  }
+  validateKnownFields(value, path, ["state", "resolvedAt"], issues);
+
+  const state = value.state;
+  const resolvedAt = value.resolvedAt;
+  if (state !== "open" && state !== "resolved") {
+    issues.push({
+      path: `${path}.state`,
+      message: 'Expected annotation lifecycle state to be "open" or "resolved".',
+    });
+  }
+
+  if (resolvedAt !== null && typeof resolvedAt !== "string") {
+    issues.push({
+      path: `${path}.resolvedAt`,
+      message: "Expected annotation lifecycle resolvedAt to be a string or null.",
+    });
+    return;
+  }
+
+  if (state === "open") {
+    if (resolvedAt !== null) {
+      issues.push({
+        path: `${path}.resolvedAt`,
+        message: "Expected open annotation lifecycle resolvedAt to be null.",
+      });
+    }
+    return;
+  }
+
+  if (state !== "resolved") return;
+  if (typeof resolvedAt !== "string" || !isCanonicalDateTime(resolvedAt, true)) {
+    issues.push({
+      path: `${path}.resolvedAt`,
+      message: "Expected resolved annotation lifecycle resolvedAt to be canonical.",
+    });
+    return;
+  }
+
+  const resolvedMilliseconds = Date.parse(resolvedAt);
+  const createdMilliseconds = typeof itemCreatedAt === "string"
+    ? Date.parse(itemCreatedAt)
+    : Number.NaN;
+  const updatedMilliseconds = typeof itemUpdatedAt === "string"
+    ? Date.parse(itemUpdatedAt)
+    : Number.NaN;
+  if (Number.isFinite(createdMilliseconds) && resolvedMilliseconds < createdMilliseconds) {
+    issues.push({
+      path: `${path}.resolvedAt`,
+      message: "Expected annotation lifecycle resolvedAt not to precede item createdAt.",
+    });
+  }
+  if (Number.isFinite(updatedMilliseconds) && resolvedMilliseconds > updatedMilliseconds) {
+    issues.push({
+      path: `${path}.resolvedAt`,
+      message: "Expected annotation lifecycle resolvedAt not to exceed item updatedAt.",
+    });
+  }
+}
+
 function validateCaptureSessionFileSourceRecord(
   sourceRecord: Record<string, unknown>,
   recordPath: string,
   sessionOrigin: string | null,
+  strictDateTime: boolean,
   issues: CaptureSessionFileValidationIssue[],
 ): boolean {
   const issueCount = issues.length;
@@ -626,6 +951,7 @@ function validateCaptureSessionFileSourceRecord(
       sourceRecord.attachment.capturedAt,
       `${recordPath}.attachment.capturedAt`,
       issues,
+      strictDateTime,
     );
     if (sourceRecord.attachment.id.length === 0) {
       issues.push({ path: `${recordPath}.attachment.id`, message: "Expected a non-empty attachment id." });
@@ -666,7 +992,12 @@ function validateCaptureSessionFileSourceRecord(
   if (typeof sourceRecord.intent !== "string") {
     issues.push({ path: `${recordPath}.intent`, message: "Expected a string." });
   }
-  validateCanonicalDateTime(sourceRecord.capturedAt, `${recordPath}.capturedAt`, issues);
+  validateCanonicalDateTime(
+    sourceRecord.capturedAt,
+    `${recordPath}.capturedAt`,
+    issues,
+    strictDateTime,
+  );
   validateOptionalNonNegativeInteger(sourceRecord.tabId, `${recordPath}.tabId`, issues);
   validateOptionalNonNegativeInteger(sourceRecord.frameId, `${recordPath}.frameId`, issues);
   validateCaptureRouteChain(
@@ -712,6 +1043,7 @@ function validateCaptureSessionFileAttachmentFields(
       "capturedAt",
       "source",
       "sourceAnchor",
+      "selectionPoint",
       "element",
       "style",
       "context",
@@ -730,12 +1062,37 @@ function validateCaptureSessionFileAttachmentFields(
     issues,
   );
   validateNestedKnownFields(
+    value.selectionPoint,
+    `${path}.selectionPoint`,
+    ["kind", "xRatio", "yRatio"],
+    issues,
+  );
+  validateNestedKnownFields(
     value.element,
     `${path}.element`,
-    ["tagName", "role", "text", "accessibleName", "bbox", "visible", "enabled"],
+    [
+      "tagName",
+      "role",
+      "text",
+      "accessibleName",
+      "contentParts",
+      "bbox",
+      "visible",
+      "enabled",
+    ],
     issues,
   );
   if (isUnknownRecord(value.element)) {
+    if (Array.isArray(value.element.contentParts)) {
+      value.element.contentParts.forEach((part, index) => {
+        validateNestedKnownFields(
+          part,
+          `${path}.element.contentParts[${index}]`,
+          ["kind", "tagName", "role", "text", "accessibleName"],
+          issues,
+        );
+      });
+    }
     validateNestedKnownFields(
       value.element.bbox,
       `${path}.element.bbox`,
@@ -746,7 +1103,7 @@ function validateCaptureSessionFileAttachmentFields(
   validateNestedKnownFields(
     value.style,
     `${path}.style`,
-    ["display", "color", "backgroundColor"],
+    ["display", "color", "backgroundColor", ...UI_ATTACHMENT_COMPUTED_STYLE_FIELDS],
     issues,
   );
   validateNestedKnownFields(
@@ -1010,8 +1367,9 @@ function validateCanonicalDateTime(
   value: unknown,
   path: string,
   issues: CaptureSessionFileValidationIssue[],
+  boundedYear = false,
 ): void {
-  if (typeof value !== "string" || !isCanonicalDateTime(value)) {
+  if (typeof value !== "string" || !isCanonicalDateTime(value, boundedYear)) {
     issues.push({ path, message: "Expected a canonical UTC ISO date-time string." });
   }
 }
@@ -1134,7 +1492,10 @@ function isSameOriginHttpUrl(value: string, expectedOrigin: string | null): bool
   }
 }
 
-function isCanonicalDateTime(value: string): boolean {
+function isCanonicalDateTime(value: string, boundedYear = false): boolean {
+  if (boundedYear && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    return false;
+  }
   try {
     return new Date(value).toISOString() === value;
   } catch {
@@ -1752,6 +2113,240 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasExactDataFields(
+  value: unknown,
+  fields: readonly string[],
+): value is Record<string, unknown> {
+  try {
+    if (!isUnknownRecord(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.length !== fields.length ||
+      ownKeys.some((key) => typeof key !== "string")
+    ) {
+      return false;
+    }
+    const expected = new Set(fields);
+    return fields.every((field) => {
+      if (!Object.hasOwn(value, field)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, field);
+      return descriptor !== undefined &&
+        "value" in descriptor &&
+        descriptor.enumerable &&
+        expected.has(field);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function canonicalizeCaptureSessionFile(file: CaptureSessionFile): CaptureSessionFile {
+  const isV1 = file.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V1;
+  const isV3 = file.schemaVersion === CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3;
+  const attachments = file.session.attachments.map((item) => {
+    const projected: Record<string, unknown> = { id: item.id };
+    if (!isV1) {
+      projected.annotationId = (item as CaptureSessionFileItemV2).annotationId;
+    }
+    projected.createdAt = item.createdAt;
+    if (!isV1) {
+      projected.updatedAt = (item as CaptureSessionFileItemV2).updatedAt;
+    }
+    if (isV3) {
+      const lifecycle = (item as CaptureSessionFileItemV3).annotationLifecycle;
+      projected.annotationLifecycle = {
+        state: lifecycle.state,
+        resolvedAt: lifecycle.resolvedAt,
+      } satisfies CaptureSessionAnnotationLifecycleV3;
+    }
+    projected.labels = [...item.labels];
+    projected.sourceRecord = canonicalizeCaptureSessionSourceRecord(item.sourceRecord);
+    return projected;
+  });
+
+  return {
+    schemaVersion: file.schemaVersion,
+    kind: file.kind,
+    session: {
+      id: file.session.id,
+      title: file.session.title,
+      createdAt: file.session.createdAt,
+      updatedAt: file.session.updatedAt,
+      origin: file.session.origin,
+      attachments,
+    },
+  } as unknown as CaptureSessionFile;
+}
+
+function canonicalizeCaptureSessionSourceRecord(
+  record: CaptureSessionFileSourceRecordV1,
+): CaptureSessionFileSourceRecordV1 {
+  return {
+    origin: record.origin,
+    pageUrl: record.pageUrl,
+    pageTitle: record.pageTitle,
+    attachment: canonicalizeCaptureSessionAttachment(record.attachment),
+    intent: record.intent,
+    ...(record.replayAttempts !== undefined
+      ? { replayAttempts: record.replayAttempts.map(canonicalizeCaptureSessionValue) }
+      : {}),
+    capturedAt: record.capturedAt,
+    ...(record.tabId !== undefined ? { tabId: record.tabId } : {}),
+    ...(record.frameId !== undefined ? { frameId: record.frameId } : {}),
+    ...(record.routeChain !== undefined
+      ? {
+          routeChain: record.routeChain.map((route) => ({
+            origin: route.origin,
+            pathname: route.pathname,
+          })),
+        }
+      : {}),
+  };
+}
+
+function canonicalizeCaptureSessionAttachment(attachment: UIAttachment): UIAttachment {
+  return {
+    schemaVersion: attachment.schemaVersion,
+    id: attachment.id,
+    capturedAt: attachment.capturedAt,
+    source: {
+      kind: attachment.source.kind,
+      url: attachment.source.url,
+      title: attachment.source.title,
+    },
+    ...(attachment.sourceAnchor === undefined
+      ? {}
+      : {
+          sourceAnchor: {
+            schemaVersion: attachment.sourceAnchor.schemaVersion,
+            kind: attachment.sourceAnchor.kind,
+            buildId: attachment.sourceAnchor.buildId,
+            sourceId: attachment.sourceAnchor.sourceId,
+          },
+        }),
+    ...(attachment.selectionPoint === undefined
+      ? {}
+      : {
+          selectionPoint: {
+            kind: attachment.selectionPoint.kind,
+            xRatio: attachment.selectionPoint.xRatio,
+            yRatio: attachment.selectionPoint.yRatio,
+          },
+        }),
+    element: {
+      tagName: attachment.element.tagName,
+      role: attachment.element.role,
+      text: attachment.element.text,
+      accessibleName: attachment.element.accessibleName,
+      ...(attachment.element.contentParts === undefined
+        ? {}
+        : {
+            contentParts: attachment.element.contentParts.map((part) => ({
+              kind: part.kind,
+              tagName: part.tagName,
+              role: part.role,
+              text: part.text,
+              accessibleName: part.accessibleName,
+            })),
+          }),
+      bbox: {
+        x: attachment.element.bbox.x,
+        y: attachment.element.bbox.y,
+        width: attachment.element.bbox.width,
+        height: attachment.element.bbox.height,
+      },
+      visible: attachment.element.visible,
+      enabled: attachment.element.enabled,
+    },
+    style: {
+      display: attachment.style.display,
+      color: attachment.style.color,
+      backgroundColor: attachment.style.backgroundColor,
+      ...Object.fromEntries(UI_ATTACHMENT_COMPUTED_STYLE_FIELDS.flatMap((field) =>
+        Object.hasOwn(attachment.style, field)
+          ? [[field, attachment.style[field]]]
+          : []
+      )),
+    },
+    context: {
+      parentSummary: attachment.context.parentSummary,
+      nearbyText: [...attachment.context.nearbyText],
+      selectorHints: [...attachment.context.selectorHints],
+    },
+    locatorBundle: {
+      primary: attachment.locatorBundle.primary === null
+        ? null
+        : canonicalizeCaptureSessionLocator(attachment.locatorBundle.primary),
+      candidates: attachment.locatorBundle.candidates.map(canonicalizeCaptureSessionLocator),
+      stability: {
+        score: attachment.locatorBundle.stability.score,
+        uniqueness: attachment.locatorBundle.stability.uniqueness,
+        replayVerified: attachment.locatorBundle.stability.replayVerified,
+        failureReason: attachment.locatorBundle.stability.failureReason,
+        ...(attachment.locatorBundle.stability.verifiedBy !== undefined
+          ? { verifiedBy: attachment.locatorBundle.stability.verifiedBy }
+          : {}),
+        ...(attachment.locatorBundle.stability.verifiedValue !== undefined
+          ? { verifiedValue: attachment.locatorBundle.stability.verifiedValue }
+          : {}),
+      },
+    },
+    policy: {
+      disclosureMode: attachment.policy.disclosureMode,
+      redactionLevel: attachment.policy.redactionLevel,
+      actionMode: attachment.policy.actionMode,
+      allowScreenshot: attachment.policy.allowScreenshot,
+      allowDomSnippet: attachment.policy.allowDomSnippet,
+      allowNetworkSend: attachment.policy.allowNetworkSend,
+      allowedDomains: [...attachment.policy.allowedDomains],
+      redactedFields: [...attachment.policy.redactedFields],
+      sensitiveHints: [...attachment.policy.sensitiveHints],
+      includedSensitiveFields: [...attachment.policy.includedSensitiveFields],
+    },
+    artifacts: {
+      screenshotCrop: attachment.artifacts.screenshotCrop,
+      overlayImage: attachment.artifacts.overlayImage,
+    },
+    ...(attachment.boundary === undefined
+      ? {}
+      : {
+          boundary: {
+            kind: attachment.boundary.kind,
+            innerDom: attachment.boundary.innerDom,
+            originRelation: attachment.boundary.originRelation,
+            frameOrigin: attachment.boundary.frameOrigin,
+            ...(attachment.boundary.framePathname === undefined
+              ? {}
+              : { framePathname: attachment.boundary.framePathname }),
+            dominantViewport: attachment.boundary.dominantViewport,
+          },
+        }),
+  };
+}
+
+function canonicalizeCaptureSessionLocator(
+  locator: UIAttachment["locatorBundle"]["candidates"][number],
+): UIAttachment["locatorBundle"]["candidates"][number] {
+  return {
+    strategy: locator.strategy,
+    value: locator.value,
+    confidence: locator.confidence,
+    ...(locator.notes !== undefined ? { notes: locator.notes } : {}),
+  };
+}
+
+function canonicalizeCaptureSessionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeCaptureSessionValue);
+  if (!isUnknownRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalizeCaptureSessionValue(value[key])]),
+  );
+}
+
 function markAttachmentFieldRedacted(attachment: UIAttachment, field: string): UIAttachment {
   return {
     ...attachment,
@@ -2062,6 +2657,9 @@ function buildCompactBundleMarkdown(
         locatorBundle: structuredClone(attachment.locatorBundle),
         ...(attachment.sourceAnchor
           ? { sourceAnchor: structuredClone(attachment.sourceAnchor) }
+          : {}),
+        ...(attachment.selectionPoint
+          ? { selectionPoint: structuredClone(attachment.selectionPoint) }
           : {}),
         ...(attachment.boundary
           ? { boundary: structuredClone(attachment.boundary) }

@@ -3,6 +3,7 @@ import type { UiAttachChromeAction } from "./extension-api";
 import { createToolbarEntryHandler } from "./toolbar-entry";
 
 const TITLES = {
+  widgetUnavailableTitle: "Click MeanThis again to open the side panel.",
   readyTitle: "Open MeanThis",
   unsupportedPageTitle: "MeanThis works on HTTP(S) pages. Open a web page and try again.",
   contentUnavailableTitle: "MeanThis could not access this page. Reload it, then select MeanThis again.",
@@ -10,6 +11,42 @@ const TITLES = {
 };
 
 describe("toolbar entry feedback", () => {
+  test.each([false, "reject"])("uses a fresh click for the side panel after widget failure %s", async (failure) => {
+    const action = createActionHarness();
+    const access = createDeferred<boolean>();
+    const ensureContentScript = vi.fn().mockResolvedValueOnce(true).mockImplementationOnce(() => access.promise);
+    const openSidePanel = vi.fn(async () => undefined);
+    const showInPageWidget = vi.fn(async () => { if (failure === "reject") throw new Error("widget failed"); return false; });
+    const handleClick = createToolbarEntryHandler({ action, ensureContentScript, openSidePanel, showInPageWidget, ...TITLES });
+    const tab = { id: 7, windowId: 3, url: "https://app.example.test/settings" };
+    await expect(handleClick(tab)).resolves.toBe("widget_unavailable");
+    expect(openSidePanel).not.toHaveBeenCalled();
+    expect(action.setTitle).toHaveBeenLastCalledWith({ tabId: 7, title: TITLES.widgetUnavailableTitle });
+    const retry = handleClick(tab);
+    expect(openSidePanel).toHaveBeenCalledWith({ windowId: 3 });
+    access.resolve(true);
+    await expect(retry).resolves.toBe("ready");
+    expect(showInPageWidget).toHaveBeenCalledOnce();
+  });
+
+  test("keeps a successful widget as the only opened surface", async () => {
+    const openSidePanel = vi.fn(async () => undefined);
+    const handleClick = createToolbarEntryHandler({ action: createActionHarness(), ensureContentScript: async () => true,
+      showInPageWidget: async () => true, openSidePanel, ...TITLES });
+    await expect(handleClick({ id: 7, url: "https://app.example.test/settings" })).resolves.toBe("ready");
+    expect(openSidePanel).not.toHaveBeenCalled();
+  });
+
+  test("does not carry a page's fallback choice across navigation", async () => {
+    const openSidePanel = vi.fn(async () => undefined);
+    const showInPageWidget = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const handleClick = createToolbarEntryHandler({ action: createActionHarness(), ensureContentScript: async () => true,
+      showInPageWidget, openSidePanel, ...TITLES });
+    await handleClick({ id: 7, url: "https://app.example.test/old" });
+    await expect(handleClick({ id: 7, url: "https://app.example.test/new" })).resolves.toBe("ready");
+    expect(openSidePanel).not.toHaveBeenCalled();
+  });
+
   test("keeps a per-tab error badge when content access fails", async () => {
     const action = createActionHarness();
     const ensureContentScript = vi.fn(async () => false);
@@ -80,7 +117,7 @@ describe("toolbar entry feedback", () => {
 
     expect(action.setBadgeText).toHaveBeenCalledWith({ tabId: 7, text: "" });
     expect(action.setTitle).toHaveBeenCalledWith({ tabId: 7, title: "Open MeanThis" });
-    expect(operations).toEqual(["content-ready", "panel-open", "panel-refresh"]);
+    expect(operations).toEqual(["panel-open", "content-ready", "panel-refresh"]);
   });
 
   test("does not refresh an open panel when toolbar access is unavailable", async () => {

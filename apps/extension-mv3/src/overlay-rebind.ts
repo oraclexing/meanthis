@@ -16,7 +16,24 @@ export interface OverlayRebindController {
   trackCurrentRoute(): void;
   commitCurrent(item: OverlayRestoreItem, target: HTMLElement): Promise<void>;
   readStatus(): OverlayRebindStatusItem[];
+  readCurrentTarget(itemId: string, attachmentId: string): OverlayRebindTargetRead;
+  isCurrentTarget(read: OverlayRebindTargetRead): boolean;
   dispose(): void;
+}
+
+export type OverlayRebindTargetReadStatus =
+  | OverlayRebindStatus
+  | "stale"
+  | "unavailable";
+
+export interface OverlayRebindTargetRead {
+  itemId: string;
+  attachmentId: string;
+  status: OverlayRebindTargetReadStatus;
+  target: HTMLElement | null;
+  revision: number;
+  origin: string;
+  pathname: string;
 }
 
 interface OverlayNavigationLike {
@@ -295,6 +312,45 @@ export function createOverlayRebindController(options: {
     }));
   }
 
+  function readCurrentTarget(
+    itemId: string,
+    attachmentId: string,
+  ): OverlayRebindTargetRead {
+    const route = currentRouteLocation();
+    const base = {
+      itemId,
+      attachmentId,
+      target: null,
+      revision,
+      origin: route?.origin ?? "",
+      pathname: route?.pathname ?? "",
+    } as const;
+    const descriptor = descriptors.get(itemId);
+    if (!descriptor || descriptor.attachmentId !== attachmentId) {
+      return { ...base, status: "unavailable" };
+    }
+    if (!route || restoreRouteKey === null || route.key !== restoreRouteKey) {
+      return { ...base, status: "stale" };
+    }
+    const status = statuses.get(itemId) ?? "checking";
+    if (status !== "restored") return { ...base, status };
+    const target = trackedTargets.get(itemId);
+    if (!target?.isConnected || !isDomReplayTargetVisible(target)) {
+      return { ...base, status: "missing" };
+    }
+    return { ...base, status: "restored", target };
+  }
+
+  function isCurrentTarget(read: OverlayRebindTargetRead): boolean {
+    if (disposed || read.status !== "restored" || !read.target) return false;
+    const current = readCurrentTarget(read.itemId, read.attachmentId);
+    return current.status === "restored" &&
+      current.target === read.target &&
+      current.revision === read.revision &&
+      current.origin === read.origin &&
+      current.pathname === read.pathname;
+  }
+
   function dispose(): void {
     disposed = true;
     revision += 1;
@@ -311,20 +367,40 @@ export function createOverlayRebindController(options: {
   }
 
   function currentRouteKey(): string | null {
+    return currentRouteLocation()?.key ?? null;
+  }
+
+  function currentRouteLocation(): {
+    key: string;
+    origin: string;
+    pathname: string;
+  } | null {
     if (!view) return null;
     try {
       const href = view.location?.href;
       if (!href) return null;
       const url = new URL(href);
-      return url.protocol === "http:" || url.protocol === "https:"
-        ? `${url.origin}${url.pathname}`
-        : null;
+      if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+      return {
+        key: `${url.origin}${url.pathname}`,
+        origin: url.origin,
+        pathname: url.pathname,
+      };
     } catch {
       return null;
     }
   }
 
-  return { restore, applyState, trackCurrentRoute, commitCurrent, readStatus, dispose };
+  return {
+    restore,
+    applyState,
+    trackCurrentRoute,
+    commitCurrent,
+    readStatus,
+    readCurrentTarget,
+    isCurrentTarget,
+    dispose,
+  };
 }
 
 function mutationMayAffectConnectedTarget(

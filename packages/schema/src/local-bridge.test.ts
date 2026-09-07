@@ -1,14 +1,22 @@
 import { describe, expect, test } from "vitest";
 import {
   UI_ATTACH_LOCAL_BRIDGE_CAPABILITIES_PATH,
+  UI_ATTACH_LOCAL_BRIDGE_HEARTBEAT_PATH,
   UI_ATTACH_LOCAL_BRIDGE_ORIGIN,
+  UI_ATTACH_LOCAL_BRIDGE_SHARED_CAPTURE_PATH,
   UI_ATTACH_LOCAL_BRIDGE_STRUCTURED_CAPTURE_CAPABILITIES_PATH,
   UI_ATTACHMENT_SCHEMA_VERSION,
+  createLocalBridgeConnectionCode,
   isLocalBridgeCapabilities,
   isLocalBridgeConnectionRequest,
+  isLocalBridgeMcpReadReceipt,
+  isLocalBridgeReadAcknowledgement,
   isLocalBridgePairRequest,
   isLocalBridgeSnapshot,
   isLocalBridgeStructuredCaptureCapabilities,
+  parseLocalBridgeReadAcknowledgement,
+  parseLocalBridgeMcpReadReceipt,
+  parseLocalBridgeConnectionCode,
   type UIAttachment,
 } from "./index";
 
@@ -99,11 +107,12 @@ const snapshot = {
 const capture = {
   captureId: "session-1",
   title: "Settings review",
-  origin: "https://example.test",
+  origin: "https://aistudio.google.com",
   updatedAt: "2026-07-17T04:29:58.000Z",
   authority: "capture_time" as const,
   disclosureMode: "agent_safe" as const,
   targets: [{
+    targetId: "target_A",
     attachmentId: "att_save",
     label: "A",
     taskNote: "Shorten the label.",
@@ -111,16 +120,233 @@ const capture = {
   }],
 };
 
+const replayDiagnostics = {
+  schemaVersion: "0.1.0",
+  kind: "ui-attach.metadata-only-diagnostics",
+  captureId: capture.captureId,
+  scope: "capture",
+  observedAt: capture.updatedAt,
+  consent: "explicit_capture",
+  authority: "capture_time",
+  replay: {
+    status: "collected",
+    attemptCount: 2,
+    verifiedCount: 1,
+    ambiguousCount: 1,
+    missingCount: 0,
+  },
+  device: { status: "not_requested" },
+  network: { status: "not_requested" },
+  console: { status: "not_requested" },
+  executionAuthority: {
+    grantedByCapture: false,
+    browserControl: false,
+    liveDomMutation: false,
+  },
+} as const;
+
 const capabilities = {
   schemaVersion: "0.1.0",
   kind: "ui-attach.local-bridge-capabilities",
   snapshotObservations: "v1",
 };
 
+const mcpReadReceipt = {
+  schemaVersion: "0.1.0",
+  kind: "ui-attach.mcp-read-receipt",
+  receiptId: "cf9507f2-20c5-48aa-91f2-d3372c4bb42a",
+  status: "returned_to_mcp_client",
+  instanceId: "instance-0123456789ab",
+  captureId: "session-1",
+  snapshotSequence: 4,
+  detail: "handoff",
+  handoffDigest: `sha256:${"a".repeat(64)}`,
+  issuedAt: "2026-09-02T14:00:00.000Z",
+  executionAuthority: {
+    grantedByCapture: false,
+    browserControl: false,
+    liveDomMutation: false,
+  },
+  limitations: [
+    "does_not_prove_model_attention",
+    "does_not_prove_task_creation",
+    "does_not_prove_downstream_execution",
+  ],
+};
+
+const readAcknowledgement = {
+  schemaVersion: "0.1.0",
+  kind: "ui-attach.local-bridge-read-acknowledgement",
+  acknowledgementId: "c8e59b7e-5b59-47e7-9b80-4cf92fbcf89d",
+  status: "acknowledged_by_agent_client",
+  instanceId: "instance-0123456789ab",
+  captureId: "session-1",
+  snapshotSequence: 4,
+  detail: "agent_context",
+  acknowledgedAt: "2026-09-02T14:00:00.000Z",
+  executionAuthority: {
+    grantedByCapture: false,
+    browserControl: false,
+    liveDomMutation: false,
+  },
+  limitations: [
+    "does_not_prove_model_attention",
+    "does_not_prove_task_creation",
+    "does_not_prove_downstream_execution",
+  ],
+};
+
 describe("local agent bridge protocol", () => {
+  test("accepts only an exact bounded MCP read receipt", () => {
+    expect(isLocalBridgeMcpReadReceipt(mcpReadReceipt)).toBe(true);
+    expect(parseLocalBridgeMcpReadReceipt(mcpReadReceipt)).toEqual(mcpReadReceipt);
+
+    const malformed = [
+      { ...mcpReadReceipt, receiptId: "receipt-1" },
+      { ...mcpReadReceipt, status: "consumed_by_model" },
+      { ...mcpReadReceipt, instanceId: "instance-current" },
+      { ...mcpReadReceipt, captureId: "x".repeat(129) },
+      { ...mcpReadReceipt, snapshotSequence: -1 },
+      { ...mcpReadReceipt, snapshotSequence: 1.5 },
+      { ...mcpReadReceipt, detail: "summary" },
+      { ...mcpReadReceipt, handoffDigest: `sha256:${"A".repeat(64)}` },
+      { ...mcpReadReceipt, issuedAt: "+020026-09-02T14:00:00.000Z" },
+      {
+        ...mcpReadReceipt,
+        executionAuthority: { ...mcpReadReceipt.executionAuthority, browserControl: true },
+      },
+      {
+        ...mcpReadReceipt,
+        limitations: [...mcpReadReceipt.limitations].reverse(),
+      },
+      { ...mcpReadReceipt, unexpected: true },
+    ];
+    for (const value of malformed) {
+      expect(isLocalBridgeMcpReadReceipt(value)).toBe(false);
+      expect(parseLocalBridgeMcpReadReceipt(value)).toBeNull();
+    }
+  });
+
+  test("distinguishes missing fields from own undefined in MCP read receipts", () => {
+    const missing = { ...mcpReadReceipt } as Record<string, unknown>;
+    delete missing.handoffDigest;
+    const ownUndefined = { ...mcpReadReceipt, handoffDigest: undefined };
+
+    expect(parseLocalBridgeMcpReadReceipt(missing)).toBeNull();
+    expect(Object.hasOwn(ownUndefined, "handoffDigest")).toBe(true);
+    expect(parseLocalBridgeMcpReadReceipt(ownUndefined)).toBeNull();
+  });
+
+  test("rejects MCP read receipt accessors without invoking them", () => {
+    let getterCalls = 0;
+    const hostile = { ...mcpReadReceipt } as Record<string, unknown>;
+    Object.defineProperty(hostile, "handoffDigest", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return mcpReadReceipt.handoffDigest;
+      },
+    });
+
+    expect(parseLocalBridgeMcpReadReceipt(hostile)).toBeNull();
+    expect(getterCalls).toBe(0);
+  });
+
+  test("accepts only an exact bounded Agent read acknowledgement", () => {
+    expect(isLocalBridgeReadAcknowledgement(readAcknowledgement)).toBe(true);
+    expect(parseLocalBridgeReadAcknowledgement(readAcknowledgement)).toEqual(readAcknowledgement);
+
+    const malformed = [
+      { ...readAcknowledgement, acknowledgementId: "ack-1" },
+      { ...readAcknowledgement, status: "returned_to_mcp_client" },
+      { ...readAcknowledgement, instanceId: "instance-current" },
+      { ...readAcknowledgement, captureId: "x".repeat(129) },
+      { ...readAcknowledgement, snapshotSequence: 0 },
+      { ...readAcknowledgement, snapshotSequence: -1 },
+      { ...readAcknowledgement, snapshotSequence: 1.5 },
+      { ...readAcknowledgement, detail: "unknown" },
+      { ...readAcknowledgement, acknowledgedAt: "+020026-09-02T14:00:00.000Z" },
+      {
+        ...readAcknowledgement,
+        executionAuthority: { ...readAcknowledgement.executionAuthority, browserControl: true },
+      },
+      {
+        ...readAcknowledgement,
+        limitations: [...readAcknowledgement.limitations].reverse(),
+      },
+      { ...readAcknowledgement, unexpected: true },
+    ];
+    for (const value of malformed) {
+      expect(isLocalBridgeReadAcknowledgement(value)).toBe(false);
+      expect(parseLocalBridgeReadAcknowledgement(value)).toBeNull();
+    }
+  });
+
+  test("rejects missing, own undefined, accessors, and overbound acknowledgement data", () => {
+    const missing = { ...readAcknowledgement } as Record<string, unknown>;
+    delete missing.detail;
+    expect(parseLocalBridgeReadAcknowledgement(missing)).toBeNull();
+    expect(parseLocalBridgeReadAcknowledgement({ ...readAcknowledgement, detail: undefined })).toBeNull();
+
+    let getterCalls = 0;
+    const accessor = { ...readAcknowledgement } as Record<string, unknown>;
+    Object.defineProperty(accessor, "detail", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return readAcknowledgement.detail;
+      },
+    });
+    expect(parseLocalBridgeReadAcknowledgement(accessor)).toBeNull();
+    expect(getterCalls).toBe(0);
+
+    expect(parseLocalBridgeReadAcknowledgement({
+      ...readAcknowledgement,
+      captureId: "x".repeat(129),
+    })).toBeNull();
+  });
+
+  test("round-trips one canonical compact connection code", () => {
+    const code = createLocalBridgeConnectionCode({
+      requestId: connectionRequest.requestId,
+      approvalMode: "ask",
+      approvalKey: "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+    });
+
+    expect(code).toMatch(/^[A-Za-z0-9]{68}$/);
+    expect(code).not.toMatch(/[-_\\]/);
+    expect(code).toHaveLength(68);
+    expect(parseLocalBridgeConnectionCode(code)).toEqual({
+      requestId: connectionRequest.requestId,
+      approvalMode: "ask",
+      approvalKey: "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+    });
+    expect(parseLocalBridgeConnectionCode(`${code}x`)).toBeNull();
+    expect(parseLocalBridgeConnectionCode(`Ag${code.slice(2)}`)).toBeNull();
+    expect(parseLocalBridgeConnectionCode(`AQI${code.slice(3)}`)).toBeNull();
+  });
+
+  test("round-trips the browser-session mode without changing the payload shape", () => {
+    const code = createLocalBridgeConnectionCode({
+      requestId: connectionRequest.requestId,
+      approvalMode: "browser_session",
+      approvalKey: "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+    });
+
+    expect(code).toMatch(/^[A-Za-z0-9]{68}$/);
+    expect(code).toHaveLength(68);
+    expect(parseLocalBridgeConnectionCode(code)).toEqual({
+      requestId: connectionRequest.requestId,
+      approvalMode: "browser_session",
+      approvalKey: "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+    });
+  });
+
   test("pins the loopback origin and accepts exact pairing requests", () => {
     expect(UI_ATTACH_LOCAL_BRIDGE_ORIGIN).toBe("http://127.0.0.1:38471");
     expect(UI_ATTACH_LOCAL_BRIDGE_CAPABILITIES_PATH).toBe("/v1/capabilities");
+    expect(UI_ATTACH_LOCAL_BRIDGE_HEARTBEAT_PATH).toBe("/v1/heartbeat");
+    expect(UI_ATTACH_LOCAL_BRIDGE_SHARED_CAPTURE_PATH).toBe("/v1/shared-capture");
     expect(isLocalBridgePairRequest(pairRequest)).toBe(true);
     expect(isLocalBridgePairRequest({ ...pairRequest, pairingCode: "482193" })).toBe(false);
     expect(isLocalBridgePairRequest({ ...pairRequest, installationId: "profile-default" })).toBe(false);
@@ -147,6 +373,14 @@ describe("local agent bridge protocol", () => {
     expect(isLocalBridgeStructuredCaptureCapabilities({
       ...structured,
       structuredCapture: "v2",
+    })).toBe(true);
+    expect(isLocalBridgeStructuredCaptureCapabilities({
+      ...structured,
+      structuredCapture: "v3",
+    })).toBe(true);
+    expect(isLocalBridgeStructuredCaptureCapabilities({
+      ...structured,
+      structuredCapture: "v4",
     })).toBe(false);
     expect(isLocalBridgeStructuredCaptureCapabilities({ ...structured, controls: true })).toBe(false);
   });
@@ -187,6 +421,51 @@ describe("local agent bridge protocol", () => {
 
   test("accepts one bounded structured capture without widening disclosure", () => {
     expect(isLocalBridgeSnapshot({ ...snapshot, capture })).toBe(true);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          attachment: {
+            ...attachment,
+            style: {
+              ...attachment.style,
+              position: "relative",
+              padding: "6px 8px",
+              fontSize: "14px",
+            },
+          },
+        }],
+      },
+    })).toBe(true);
+    for (const style of [
+      { ...attachment.style, opacity: "0.5" },
+      { ...attachment.style, position: undefined },
+      { ...attachment.style, padding: "x".repeat(513) },
+    ]) {
+      expect(isLocalBridgeSnapshot({
+        ...snapshot,
+        capture: {
+          ...capture,
+          targets: [{
+            ...capture.targets[0],
+            attachment: { ...attachment, style },
+          }],
+        },
+      })).toBe(false);
+    }
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: { ...capture, origin: "https://other.example.test" },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: capture.targets.map(({ targetId: _targetId, ...target }) => target),
+      },
+    })).toBe(true);
     expect(isLocalBridgeSnapshot({ ...snapshot, page: null, capture })).toBe(true);
     expect(isLocalBridgeSnapshot({
       ...snapshot,
@@ -216,6 +495,603 @@ describe("local agent bridge protocol", () => {
         targets: [{ ...capture.targets[0], attachment: { ...attachment, id: "att_other" } }],
       },
     })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{ ...capture.targets[0], targetId: "A" }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          attachment: {
+            ...attachment,
+            element: {
+              ...attachment.element,
+              contentParts: [{
+                kind: "author",
+                tagName: "span",
+                role: null,
+                text: "Tibo",
+                accessibleName: "Tibo",
+              }],
+            },
+          },
+        }],
+      },
+    })).toBe(false);
+  });
+
+  test("binds capture-time replay diagnostics to the exact shared capture", () => {
+    const diagnosticCapture = { ...capture, metadataDiagnostics: replayDiagnostics };
+    expect(isLocalBridgeSnapshot({ ...snapshot, capture: diagnosticCapture })).toBe(true);
+    const collectedDeviceDiagnostics = {
+      ...replayDiagnostics,
+      observedAt: "2026-07-17T04:29:57.000Z",
+      device: {
+        status: "collected",
+        deviceClass: "desktop",
+        viewportClass: "large",
+        touch: "none",
+      },
+    };
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: { ...capture, metadataDiagnostics: collectedDeviceDiagnostics },
+    })).toBe(true);
+
+    for (const metadataDiagnostics of [
+      { ...replayDiagnostics, captureId: "session-other" },
+      { ...replayDiagnostics, observedAt: "2026-07-17T04:29:59.000Z" },
+      { ...replayDiagnostics, authority: "live_page" },
+      {
+        ...replayDiagnostics,
+        network: { status: "collected", requestCount: 1, failureCount: 0, windowMs: 10 },
+      },
+      {
+        ...replayDiagnostics,
+        console: { status: "collected", logCount: 1, warnCount: 0, errorCount: 0, windowMs: 10 },
+      },
+    ]) {
+      expect(isLocalBridgeSnapshot({
+        ...snapshot,
+        capture: { ...capture, metadataDiagnostics },
+      })).toBe(false);
+    }
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: { ...capture, metadataDiagnostics: undefined },
+    })).toBe(false);
+  });
+
+  test("accepts the complete annotation identity group and rejects unsafe variants", () => {
+    const identity = {
+      annotationId: "annotation-save",
+      annotationIdScope: "capture_session" as const,
+      annotationCreatedAt: "2026-07-17T04:29:57.000Z",
+      annotationUpdatedAt: "2026-07-17T04:29:58.000Z",
+    };
+    const annotatedCapture = {
+      ...capture,
+      targets: [{ ...capture.targets[0], ...identity }],
+    };
+    expect(isLocalBridgeSnapshot({ ...snapshot, capture: annotatedCapture })).toBe(true);
+    expect(isLocalBridgeSnapshot({ ...snapshot, capture })).toBe(true);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: { ...capture, targets: [{ ...capture.targets[0], annotationId: identity.annotationId }] },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: undefined,
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: identity.annotationCreatedAt,
+          annotationUpdatedAt: identity.annotationUpdatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: null,
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: null,
+          annotationUpdatedAt: null,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "annotation-save",
+          annotationIdScope: "unknown",
+          annotationCreatedAt: identity.annotationCreatedAt,
+          annotationUpdatedAt: identity.annotationUpdatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "annotation-save",
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: identity.annotationUpdatedAt,
+          annotationUpdatedAt: identity.annotationCreatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "annotation-save",
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: identity.annotationCreatedAt,
+          annotationUpdatedAt: "2026-07-17T04:29:59.000Z",
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "annotation/save",
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: identity.annotationCreatedAt,
+          annotationUpdatedAt: identity.annotationUpdatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "a".repeat(129),
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: identity.annotationCreatedAt,
+          annotationUpdatedAt: identity.annotationUpdatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: "annotation-save",
+          annotationIdScope: "capture_session",
+          annotationCreatedAt: "not-a-date",
+          annotationUpdatedAt: identity.annotationUpdatedAt,
+        }],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      attachmentCount: 2,
+      capture: {
+        ...capture,
+        targets: [
+          { ...capture.targets[0], ...identity },
+          {
+            ...capture.targets[0],
+            targetId: "target_B",
+            attachmentId: "att_other",
+            attachment: { ...attachment, id: "att_other" },
+            annotationId: identity.annotationId,
+          },
+        ],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      attachmentCount: 2,
+      capture: {
+        ...capture,
+        targets: [
+          { ...capture.targets[0], ...identity },
+          {
+            ...capture.targets[0],
+            targetId: "target_B",
+            attachmentId: "att_other",
+            attachment: { ...attachment, id: "att_other" },
+            annotationId: null,
+            annotationIdScope: "unknown",
+            annotationCreatedAt: null,
+            annotationUpdatedAt: null,
+          },
+        ],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          annotationId: null,
+          annotationIdScope: "unknown",
+          annotationCreatedAt: null,
+          annotationUpdatedAt: null,
+        }],
+      },
+    })).toBe(true);
+  });
+
+  test("accepts exact lifecycle-v1 captures and rejects marker, identity, shape, time, and mode drift", () => {
+    const identity = {
+      annotationId: "annotation-save",
+      annotationIdScope: "capture_session" as const,
+      annotationCreatedAt: "2026-07-17T04:29:55.000Z",
+      annotationUpdatedAt: "2026-07-17T04:29:57.000Z",
+    };
+    const resolvedLifecycle = {
+      state: "resolved" as const,
+      resolvedAt: "2026-07-17T04:29:56.000Z",
+    };
+    const lifecycleCapture = {
+      ...capture,
+      annotationLifecycleVersion: "v1" as const,
+      targets: [{
+        ...capture.targets[0],
+        ...identity,
+        annotationLifecycle: resolvedLifecycle,
+      }],
+    };
+    const withTarget = (target: Record<string, unknown>) => ({
+      ...snapshot,
+      capture: { ...lifecycleCapture, targets: [target] },
+    });
+
+    expect(isLocalBridgeSnapshot({ ...snapshot, capture: lifecycleCapture })).toBe(true);
+    expect(isLocalBridgeSnapshot(withTarget({
+      ...lifecycleCapture.targets[0],
+      annotationLifecycle: { state: "open", resolvedAt: null },
+    }))).toBe(true);
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: {
+        ...capture,
+        targets: [{
+          ...capture.targets[0],
+          ...identity,
+          annotationLifecycle: resolvedLifecycle,
+        }],
+      },
+    })).toBe(false);
+
+    for (const annotationLifecycleVersion of [undefined, null, "v2"]) {
+      expect(isLocalBridgeSnapshot({
+        ...snapshot,
+        capture: { ...lifecycleCapture, annotationLifecycleVersion },
+      })).toBe(false);
+    }
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      capture: { ...lifecycleCapture, lifecyclePolicy: "unknown" },
+    })).toBe(false);
+
+    const malformedLifecycles: unknown[] = [
+      undefined,
+      null,
+      {},
+      { state: "open" },
+      { resolvedAt: null },
+      { state: "open", resolvedAt: null, extra: true },
+      { state: "unknown", resolvedAt: null },
+      { state: "open", resolvedAt: resolvedLifecycle.resolvedAt },
+      { state: "resolved", resolvedAt: null },
+      { state: "resolved", resolvedAt: "not-a-date" },
+      { state: "resolved", resolvedAt: "+010000-01-01T00:00:00.000Z" },
+    ];
+    for (const annotationLifecycle of malformedLifecycles) {
+      expect(isLocalBridgeSnapshot(withTarget({
+        ...lifecycleCapture.targets[0],
+        annotationLifecycle,
+      }))).toBe(false);
+    }
+
+    expect(isLocalBridgeSnapshot(withTarget({
+      ...capture.targets[0],
+      annotationLifecycle: resolvedLifecycle,
+    }))).toBe(false);
+    expect(isLocalBridgeSnapshot(withTarget({
+      ...capture.targets[0],
+      annotationId: null,
+      annotationIdScope: "unknown",
+      annotationCreatedAt: null,
+      annotationUpdatedAt: null,
+      annotationLifecycle: resolvedLifecycle,
+    }))).toBe(false);
+    expect(isLocalBridgeSnapshot(withTarget({
+      ...lifecycleCapture.targets[0],
+      annotationCreatedAt: "2026-07-17T04:29:56.500Z",
+    }))).toBe(false);
+    expect(isLocalBridgeSnapshot(withTarget({
+      ...lifecycleCapture.targets[0],
+      annotationUpdatedAt: "2026-07-17T04:29:55.500Z",
+    }))).toBe(false);
+
+    const secondAttachment = { ...attachment, id: "att_cancel" };
+    expect(isLocalBridgeSnapshot({
+      ...snapshot,
+      attachmentCount: 2,
+      capture: {
+        ...lifecycleCapture,
+        targets: [
+          lifecycleCapture.targets[0],
+          {
+            ...capture.targets[0],
+            targetId: "target_B",
+            attachmentId: secondAttachment.id,
+            annotationId: "annotation-cancel",
+            annotationIdScope: "capture_session",
+            annotationCreatedAt: identity.annotationCreatedAt,
+            annotationUpdatedAt: identity.annotationUpdatedAt,
+            attachment: secondAttachment,
+          },
+        ],
+      },
+    })).toBe(false);
+
+    const extendedYearCapture = {
+      ...lifecycleCapture,
+      updatedAt: "+010000-01-01T00:00:03.000Z",
+      targets: [{
+        ...lifecycleCapture.targets[0],
+        annotationCreatedAt: "+010000-01-01T00:00:00.000Z",
+        annotationUpdatedAt: "+010000-01-01T00:00:02.000Z",
+        annotationLifecycle: {
+          state: "resolved" as const,
+          resolvedAt: "+010000-01-01T00:00:01.000Z",
+        },
+      }],
+    };
+    expect(isLocalBridgeSnapshot({ ...snapshot, capture: extendedYearCapture })).toBe(false);
+  });
+
+  test("treats the complete snapshot graph as data-only and remains total for hostile proxies", () => {
+    const lifecycleCapture = {
+      ...capture,
+      annotationLifecycleVersion: "v1" as const,
+      targets: [{
+        ...capture.targets[0],
+        annotationId: "annotation-save",
+        annotationIdScope: "capture_session" as const,
+        annotationCreatedAt: "2026-07-17T04:29:55.000Z",
+        annotationUpdatedAt: "2026-07-17T04:29:57.000Z",
+        annotationLifecycle: {
+          state: "resolved" as const,
+          resolvedAt: "2026-07-17T04:29:56.000Z",
+        },
+      }],
+    };
+    const valid = { ...snapshot, capture: lifecycleCapture };
+
+    const accessorCases: Array<{
+      value: Record<string, unknown>;
+      calls: () => number;
+    }> = [];
+    {
+      let calls = 0;
+      const value = { ...valid } as Record<string, unknown>;
+      Object.defineProperty(value, "sequence", {
+        enumerable: true,
+        get() {
+          calls += 1;
+          return snapshot.sequence;
+        },
+      });
+      accessorCases.push({ value, calls: () => calls });
+    }
+    {
+      let calls = 0;
+      const captureWithGetter = { ...lifecycleCapture } as Record<string, unknown>;
+      Object.defineProperty(captureWithGetter, "annotationLifecycleVersion", {
+        enumerable: true,
+        get() {
+          calls += 1;
+          return "v1";
+        },
+      });
+      accessorCases.push({ value: { ...valid, capture: captureWithGetter }, calls: () => calls });
+    }
+    {
+      let calls = 0;
+      const targetWithGetter = { ...lifecycleCapture.targets[0] } as Record<string, unknown>;
+      Object.defineProperty(targetWithGetter, "annotationLifecycle", {
+        enumerable: true,
+        get() {
+          calls += 1;
+          return lifecycleCapture.targets[0].annotationLifecycle;
+        },
+      });
+      accessorCases.push({
+        value: {
+          ...valid,
+          capture: { ...lifecycleCapture, targets: [targetWithGetter] },
+        },
+        calls: () => calls,
+      });
+    }
+    {
+      let calls = 0;
+      const lifecycleWithGetter = { resolvedAt: "2026-07-17T04:29:56.000Z" } as Record<string, unknown>;
+      Object.defineProperty(lifecycleWithGetter, "state", {
+        enumerable: true,
+        get() {
+          calls += 1;
+          return "resolved";
+        },
+      });
+      accessorCases.push({
+        value: {
+          ...valid,
+          capture: {
+            ...lifecycleCapture,
+            targets: [{
+              ...lifecycleCapture.targets[0],
+              annotationLifecycle: lifecycleWithGetter,
+            }],
+          },
+        },
+        calls: () => calls,
+      });
+    }
+    for (const accessorCase of accessorCases) {
+      expect(() => isLocalBridgeSnapshot(accessorCase.value)).not.toThrow();
+      expect(isLocalBridgeSnapshot(accessorCase.value)).toBe(false);
+      expect(accessorCase.calls()).toBe(0);
+    }
+
+    const withSymbol = (value: object) => {
+      Object.defineProperty(value, Symbol("unexpected"), { value: true, enumerable: true });
+      return value;
+    };
+    expect(isLocalBridgeSnapshot(withSymbol({ ...valid }))).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...valid,
+      capture: withSymbol({ ...lifecycleCapture }),
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...valid,
+      capture: {
+        ...lifecycleCapture,
+        targets: [withSymbol({ ...lifecycleCapture.targets[0] })],
+      },
+    })).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      ...valid,
+      capture: {
+        ...lifecycleCapture,
+        targets: [{
+          ...lifecycleCapture.targets[0],
+          annotationLifecycle: withSymbol({
+            ...lifecycleCapture.targets[0].annotationLifecycle,
+          }),
+        }],
+      },
+    })).toBe(false);
+
+    const throwingProxy = (trap: "ownKeys" | "getOwnPropertyDescriptor" | "get") => new Proxy(
+      valid,
+      {
+        [trap]() {
+          throw new Error(`hostile-${trap}`);
+        },
+      },
+    );
+    for (const trap of ["ownKeys", "getOwnPropertyDescriptor", "get"] as const) {
+      const hostile = throwingProxy(trap);
+      expect(() => isLocalBridgeSnapshot(hostile)).not.toThrow();
+      expect(isLocalBridgeSnapshot(hostile)).toBe(false);
+    }
+
+    const transparentProxy = <T extends object>(
+      value: T,
+      trap: "ownKeys" | "getOwnPropertyDescriptor" | "get",
+      onTrap: () => void,
+    ): T => {
+      if (trap === "ownKeys") {
+        return new Proxy(value, {
+          ownKeys(target) {
+            onTrap();
+            return Reflect.ownKeys(target);
+          },
+        });
+      }
+      if (trap === "getOwnPropertyDescriptor") {
+        return new Proxy(value, {
+          getOwnPropertyDescriptor(target, key) {
+            onTrap();
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+        });
+      }
+      return new Proxy(value, {
+        get(target, key, receiver) {
+          onTrap();
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    };
+    const atLayer = (
+      layer: "root" | "capture" | "target" | "lifecycle",
+      trap: "ownKeys" | "getOwnPropertyDescriptor" | "get",
+      onTrap: () => void,
+    ): unknown => {
+      const candidate = structuredClone(valid);
+      if (layer === "root") return transparentProxy(candidate, trap, onTrap);
+      if (layer === "capture") {
+        candidate.capture = transparentProxy(candidate.capture, trap, onTrap);
+        return candidate;
+      }
+      if (layer === "target") {
+        candidate.capture.targets[0] = transparentProxy(
+          candidate.capture.targets[0],
+          trap,
+          onTrap,
+        );
+        return candidate;
+      }
+      candidate.capture.targets[0].annotationLifecycle = transparentProxy(
+        candidate.capture.targets[0].annotationLifecycle,
+        trap,
+        onTrap,
+      );
+      return candidate;
+    };
+    for (const layer of ["root", "capture", "target", "lifecycle"] as const) {
+      for (const trap of ["ownKeys", "getOwnPropertyDescriptor", "get"] as const) {
+        let trapCalls = 0;
+        const hostile = atLayer(layer, trap, () => {
+          trapCalls += 1;
+        });
+        let result: boolean | undefined;
+        expect(() => {
+          result = isLocalBridgeSnapshot(hostile);
+        }).not.toThrow();
+        expect(result, `${layer}:${trap}`).toBe(false);
+        if (trap === "get") {
+          expect(trapCalls, `${layer}:${trap}`).toBe(0);
+        } else {
+          expect(trapCalls, `${layer}:${trap}`).toBeGreaterThan(0);
+        }
+      }
+    }
+    const nestedHostile = {
+      ...valid,
+      capture: new Proxy(lifecycleCapture, {
+        ownKeys() {
+          throw new Error("hostile-nested-ownKeys");
+        },
+      }),
+    };
+    expect(() => isLocalBridgeSnapshot(nestedHostile)).not.toThrow();
+    expect(isLocalBridgeSnapshot(nestedHostile)).toBe(false);
   });
 
   test("requires fresh exact restored observations for live-page capture authority", () => {

@@ -52,7 +52,14 @@ export function createCurrentOverlayRestoreItem(
   return {
     itemId: receipt.itemId,
     attachmentId: record.attachment.id,
-    label: receipt.label,
+    label: receipt.annotationLabel,
+    taskNote: record.intent,
+    ...(record.attachment.selectionPoint ? {
+      anchor: {
+        xRatio: record.attachment.selectionPoint.xRatio,
+        yRatio: record.attachment.selectionPoint.yRatio,
+      },
+    } : {}),
     locators,
   };
 }

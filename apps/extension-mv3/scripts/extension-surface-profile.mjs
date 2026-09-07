@@ -51,8 +51,20 @@ export function extensionProfileOutDir(profile) {
 }
 
 export function projectExtensionManifest(manifest, profile) {
-  parseExtensionSurfaceProfile(profile);
-  return structuredClone(manifest);
+  const parsedProfile = parseExtensionSurfaceProfile(profile);
+  const projected = structuredClone(manifest);
+  if (parsedProfile === "development") {
+    projected.host_permissions = ["http://127.0.0.1/*"];
+    projected.optional_host_permissions = (projected.optional_host_permissions ?? [])
+      .filter((origin) => origin !== "http://127.0.0.1/*");
+    projected.externally_connectable = {
+      matches: ["http://127.0.0.1/*"],
+    };
+  } else {
+    delete projected.host_permissions;
+    delete projected.externally_connectable;
+  }
+  return projected;
 }
 
 export function projectExtensionLocaleMessages(messages, profile) {

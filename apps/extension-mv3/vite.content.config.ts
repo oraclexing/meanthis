@@ -12,14 +12,12 @@ const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 export default defineConfig(({ mode }) => {
   const surfaceProfile = parseExtensionSurfaceProfile(mode);
   return {
-  define: {
-    __UI_ATTACH_SURFACE_PROFILE__: JSON.stringify(surfaceProfile),
-  },
   resolve: {
     alias: {
       "@meanthis/prompt": resolve(workspaceRoot, "packages/prompt/src/index.ts"),
       "@meanthis/replay": resolve(workspaceRoot, "packages/replay/src/index.ts"),
       "@meanthis/schema": resolve(workspaceRoot, "packages/schema/src/index.ts"),
+      "@meanthis/web-picker": resolve(workspaceRoot, "packages/web-picker/src/index.ts"),
       "@meanthis/web-extractor": resolve(workspaceRoot, "packages/web-extractor/src/index.ts"),
     },
   },

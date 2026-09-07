@@ -6,12 +6,17 @@ import {
   validateCaptureSessionFile,
   type CapturePromptBundleFormat,
   type CaptureRouteSegmentV1,
+  type CaptureSessionFile,
   type CaptureSessionFileSourceRecordV1,
-  type CaptureSessionFileV1,
+  type CaptureSessionFileV2,
+  type CaptureSessionFileV3,
   type SavedSnapshotPromptBundle,
 } from "@meanthis/hub-core";
-import type { UIAttachment } from "@meanthis/schema";
-import type { UIAttachmentDisclosureMode } from "@meanthis/schema";
+import {
+  UI_ATTACHMENT_COMPUTED_STYLE_FIELDS,
+  type UIAttachment,
+  type UIAttachmentDisclosureMode,
+} from "@meanthis/schema";
 import type { OriginCaptureRecord } from "./capture-store";
 
 export const EXTENSION_SESSION_MAX_ITEMS = 26;
@@ -66,7 +71,7 @@ export function serializeSavedSnapshotPromptBundleJson(
 }
 
 export function deriveStoredSessionReview(
-  file: CaptureSessionFileV1,
+  file: CaptureSessionFile,
   origin: string,
   epoch: string,
 ): SessionFileResult<StoredSessionReviewData> {
@@ -134,7 +139,7 @@ export function deriveStoredSessionReview(
 }
 
 export function deriveStoredSessionHandoff(
-  file: CaptureSessionFileV1,
+  file: CaptureSessionFile,
   origin: string,
   epoch: string,
 ): SessionFileResult<StoredSessionHandoffData> {
@@ -228,9 +233,9 @@ export function toSessionFileSourceRecord(
 }
 
 export function projectCaptureSessionFile(
-  file: CaptureSessionFileV1,
-): CaptureSessionFileV1 {
-  return {
+  file: CaptureSessionFile,
+): CaptureSessionFile {
+  const projected = {
     schemaVersion: file.schemaVersion,
     kind: file.kind,
     session: {
@@ -241,18 +246,38 @@ export function projectCaptureSessionFile(
       origin: file.session.origin,
       attachments: file.session.attachments.map((item) => ({
         id: item.id,
+        ...(file.schemaVersion !== "0.1.0"
+          ? {
+              annotationId: (item as CaptureSessionFileV2["session"]["attachments"][number])
+                .annotationId,
+            }
+          : {}),
         createdAt: item.createdAt,
+        ...(file.schemaVersion !== "0.1.0"
+          ? {
+              updatedAt: (item as CaptureSessionFileV2["session"]["attachments"][number])
+                .updatedAt,
+            }
+          : {}),
+        ...(file.schemaVersion === "0.3.0"
+          ? {
+              annotationLifecycle: projectAnnotationLifecycle(
+                item as CaptureSessionFileV3["session"]["attachments"][number],
+              ),
+            }
+          : {}),
         labels: [...item.labels],
         sourceRecord: projectSourceRecord(item.sourceRecord),
       })),
     },
   };
+  return projected as CaptureSessionFile;
 }
 
 export function serializeCaptureSessionFile(
   value: unknown,
 ): SessionFileResult<{
-  file: CaptureSessionFileV1;
+  file: CaptureSessionFile;
   text: string;
   byteLength: number;
 }> {
@@ -275,7 +300,17 @@ export function serializeCaptureSessionFile(
       issues: sanitizeCaptureSessionFileValidationIssues(validation.issues),
     };
   }
-  const file = projectCaptureSessionFile(validation.file);
+  const projected = projectCaptureSessionFile(validation.file);
+  const projectedValidation = validateCaptureSessionFile(projected);
+  if (!projectedValidation.ok) {
+    return {
+      ok: false,
+      code: "INVALID_SESSION_FILE",
+      error: "Stored capture session is invalid.",
+      issues: sanitizeCaptureSessionFileValidationIssues(projectedValidation.issues),
+    };
+  }
+  const file = projectedValidation.file;
   const text = `${JSON.stringify(file, null, 2)}\n`;
   const byteLength = new TextEncoder().encode(text).byteLength;
   if (byteLength > EXTENSION_SESSION_MAX_BYTES) {
@@ -329,6 +364,15 @@ function projectSourceRecord(
     ...(record.routeChain !== undefined
       ? { routeChain: record.routeChain.map((route) => ({ ...route })) }
       : {}),
+  };
+}
+
+function projectAnnotationLifecycle(
+  item: CaptureSessionFileV3["session"]["attachments"][number],
+): CaptureSessionFileV3["session"]["attachments"][number]["annotationLifecycle"] {
+  return {
+    state: item.annotationLifecycle.state,
+    resolvedAt: item.annotationLifecycle.resolvedAt,
   };
 }
 
@@ -434,6 +478,9 @@ function projectAttachment(attachment: UIAttachment): UIAttachment {
     ...(attachment.sourceAnchor === undefined
       ? {}
       : { sourceAnchor: { ...attachment.sourceAnchor } }),
+    ...(attachment.selectionPoint === undefined
+      ? {}
+      : { selectionPoint: { ...attachment.selectionPoint } }),
     element: projectElement(attachment.element),
     style: projectStyle(attachment.style),
     context: projectContext(attachment.context),
@@ -460,6 +507,17 @@ function projectElement(element: UIAttachment["element"]): UIAttachment["element
     role: element.role,
     text: element.text,
     accessibleName: element.accessibleName,
+    ...(element.contentParts === undefined
+      ? {}
+      : {
+          contentParts: element.contentParts.map((part) => ({
+            kind: part.kind,
+            tagName: part.tagName,
+            role: part.role,
+            text: part.text,
+            accessibleName: part.accessibleName,
+          })),
+        }),
     bbox: projectBbox(element.bbox),
     visible: element.visible,
     enabled: element.enabled,
@@ -476,11 +534,15 @@ function projectBbox(bbox: UIAttachment["element"]["bbox"]): UIAttachment["eleme
 }
 
 function projectStyle(style: UIAttachment["style"]): UIAttachment["style"] {
-  return {
+  const projected: UIAttachment["style"] = {
     display: style.display,
     color: style.color,
     backgroundColor: style.backgroundColor,
   };
+  for (const field of UI_ATTACHMENT_COMPUTED_STYLE_FIELDS) {
+    if (Object.hasOwn(style, field)) projected[field] = style[field] ?? null;
+  }
+  return projected;
 }
 
 function projectContext(context: UIAttachment["context"]): UIAttachment["context"] {

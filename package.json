@@ -8,7 +8,7 @@
     "type": "git",
     "url": "git+https://github.com/oraclexing/meanthis.git"
   },
-  "homepage": "https://oraclexing.github.io/meanthis/",
+  "homepage": "https://github.com/oraclexing/meanthis#readme",
   "bugs": {
     "url": "https://github.com/oraclexing/meanthis/issues"
   },
@@ -37,19 +37,24 @@
     }
   },
   "scripts": {
-    "build": "npm run verify:version-alignment && npm run build:packages && npm --workspace @meanthis/cli run build && npm --workspace @meanthis/demo-web run build && npm --workspace @meanthis/extension-mv3 run build && npm run verify:examples && npm run verify:packages",
+    "build": "npm run verify:version-alignment && npm run build:packages && npm --workspace @meanthis/cli run build && npm --workspace @meanthis/demo-web run build && npm --workspace @meanthis/extension-mv3 run build && npm run verify:examples && npm run verify:package-packs:node22",
     "build:packages": "tsc -b packages/schema packages/prompt packages/web-extractor packages/hub-core packages/web-picker packages/replay tools/source-map-core tools/source-resolver-mcp",
-    "test": "npm run build:packages && vitest run --maxWorkers=4",
+    "test": "npm run build:packages && npm --workspace @meanthis/cli run build && vitest run --maxWorkers=4",
     "typecheck": "tsc -b packages/schema packages/prompt packages/web-extractor packages/hub-core packages/web-picker packages/replay tools/source-map-core tools/source-resolver-mcp apps/cli apps/demo-web apps/extension-mv3",
     "demo": "npm --workspace @meanthis/demo-web run dev",
     "cli": "node apps/cli/dist/index.js",
     "build:bridge": "npm run build:packages && tsc -b tools/source-map-core tools/source-resolver-mcp apps/cli && npm --workspace @meanthis/cli run verify:cli && npm --workspace @meanthis/cli run verify:bridge-process",
-    "setup:bridge:codex": "npm run build:bridge && npm link --workspace @meanthis/cli && meanthis bridge install --host codex --json",
+    "setup:bridge:codex": "npm run build:bridge && npm link --workspace @meanthis/cli && meanthis bridge install --host codex --json && meanthis bridge install-native-host --json",
     "setup:codex-bridge": "npm run setup:bridge:codex",
     "start:bridge": "meanthis bridge start --json",
     "verify:version-alignment": "node scripts/version-alignment.mjs",
     "verify:examples": "node examples/saved-snapshot-trusted-host/run-synthetic.mjs && node examples/saved-snapshot-text-consumer/run-synthetic.mjs && node examples/saved-snapshot-text-consumer/verify-accept-saved-bundle.mjs",
-    "verify:packages": "node scripts/verify-package-packs.mjs",
+    "verify:packages": "npm run build:packages && npm --workspace @meanthis/cli run build && npm run verify:package-packs:node22",
+    "verify:package-packs:node22": "npx --yes node@22.12.0 scripts/verify-package-packs.mjs --require-node-22.12",
+    "example:saved-snapshot:trusted-host": "npm run build:packages && node examples/saved-snapshot-trusted-host/run-synthetic.mjs",
+    "example:saved-snapshot:text-consumer": "npm run build:packages && node examples/saved-snapshot-text-consumer/run-synthetic.mjs",
+    "example:saved-snapshot:text-consumer:accept": "npm run build:packages && node examples/saved-snapshot-text-consumer/accept-saved-bundle.mjs",
+    "example:saved-snapshot:text-consumer:ollama": "npm run build:packages && node examples/saved-snapshot-text-consumer/run-local-ollama-smoke.mjs",
     "pack:extension": "npm --workspace @meanthis/extension-mv3 run pack:release"
   },
   "devDependencies": {

@@ -9,7 +9,7 @@ incorporate a third-party source asset.
 
 ## Heroicons
 
-The settings icon at `apps/extension-mv3/public/icons/settings.svg` is adapted from
+The interface icons under `apps/extension-mv3/public/icons/*.svg` are adapted from
 Heroicons by Tailwind Labs, Inc., licensed under the MIT License.
 
 Source: https://github.com/tailwindlabs/heroicons

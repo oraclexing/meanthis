@@ -36,6 +36,11 @@ describe("captureElementTarget", () => {
       documentTitle: "Settings",
       tabId: 5,
       frameId: 0,
+      selectionPoint: {
+        kind: "element_relative_pointer",
+        xRatio: 0.25,
+        yRatio: 0.75,
+      },
     });
 
     expect(result.ok).toBe(true);
@@ -47,6 +52,11 @@ describe("captureElementTarget", () => {
     expect(result.record.pageUrl).toBe("https://app.example.com/settings");
     expect(result.record.tabId).toBe(5);
     expect(result.record.frameId).toBe(0);
+    expect(result.record.attachment.selectionPoint).toEqual({
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+    });
     expect(result.record.attachment.source.url).toBe("https://app.example.com/settings");
     expect(result.record.attachment.policy.allowedDomains).toEqual(["https://app.example.com"]);
     expect(result.record.attachment.policy.disclosureMode).toBe("agent_safe");
@@ -77,6 +87,9 @@ describe("captureElementTarget", () => {
       }),
     ]);
     expect(result.record.markdown).toContain("## Selected UI Element");
+    expect(result.record.markdown).toContain(
+      "Selection Point: 25% from left, 75% from top",
+    );
     expect(result.record.markdown).toContain("- Replay Verified: true");
     expect(result.record.markdown).toContain(
       "- Verified Locator: playwright.role page.getByRole(\"button\", { name: \"Save changes\" })",

@@ -4,6 +4,7 @@ import {
   FRAME_SCOPE_AUTO_START_KEY,
   INDEPENDENT_VIEW_MODE_KEY,
   OVERLAY_VISIBILITY_PREFERENCE_KEY,
+  OVERLAY_DISPLAY_MODE_PREFERENCE_KEY,
   PREVIEW_COPY_MODE_KEY,
   RELATION_SHORTCUTS_KEY,
   TIME_DISPLAY_PREFERENCE_KEY,
@@ -11,18 +12,59 @@ import {
   readContextMenuSelectionMode,
   readFrameScopeAutoStart,
   readOverlayVisibilityPreference,
+  readOverlayDisplayModePreference,
   readPreviewCopyPreference,
   readRelationShortcuts,
   readTimeDisplayPreference,
   saveContextMenuSelectionMode,
   saveFrameScopeAutoStart,
   saveOverlayVisibilityPreference,
+  saveOverlayDisplayModePreference,
   savePreviewCopyPreference,
   saveRelationShortcuts,
   saveTimeDisplayPreference,
+  createDeferredPreferenceReadbackCoordinator,
 } from "./settings-preferences";
 
 describe("extension settings preferences", () => {
+  test("defers an external display-mode readback until a stale local read has drained", async () => {
+    let stored = "hover";
+    let releaseStaleRead: ((value: "full") => void) | undefined;
+    const staleRead = new Promise<"full">((resolve) => { releaseStaleRead = resolve; });
+    let reads = 0;
+    const applied: string[] = [];
+    const coordinator = createDeferredPreferenceReadbackCoordinator({
+      write: vi.fn(async (value: string) => { stored = value; }),
+      read: vi.fn(async () => ++reads === 1 ? staleRead : stored),
+      onValue: (value: string) => applied.push(value),
+    });
+
+    void coordinator.request("full");
+    await Promise.resolve();
+    stored = "hidden";
+    coordinator.externalChange();
+    releaseStaleRead?.("full");
+    await coordinator.drain();
+
+    expect(reads).toBe(2);
+    expect(applied.at(-1)).toBe("hidden");
+    expect(applied.at(-1)).not.toBe("full");
+  });
+
+  test.each(["write", "read"])("settles after a rejected local %s and preserves authority", async (failure) => {
+    const applied = ["hover"];
+    const settled = vi.fn();
+    const coordinator = createDeferredPreferenceReadbackCoordinator({
+      write: vi.fn(async () => { if (failure === "write") throw new Error("write failed"); }),
+      read: vi.fn(async () => { if (failure === "read") throw new Error("read failed"); return "hover"; }),
+      onValue: (value: string) => applied.push(value),
+      onSettled: settled,
+    });
+    coordinator.request("hidden");
+    await coordinator.drain();
+    expect(applied.at(-1)).toBe("hover");
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
   test("defaults to a linked Agent-safe preview and copy mode", async () => {
     const storage = {
       get: vi.fn(async () => ({})),
@@ -109,6 +151,21 @@ describe("extension settings preferences", () => {
     expect(storage.set).toHaveBeenCalledWith({
       [OVERLAY_VISIBILITY_PREFERENCE_KEY]: "always",
     });
+  });
+
+  test("defaults annotation display to hover and strictly sanitizes persisted modes", async () => {
+    const storage = {
+      get: vi.fn(async () => ({})),
+      set: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+    };
+    await expect(readOverlayDisplayModePreference(storage)).resolves.toBe("hover");
+    storage.get.mockResolvedValue({ [OVERLAY_DISPLAY_MODE_PREFERENCE_KEY]: "not-a-mode" });
+    await expect(readOverlayDisplayModePreference(storage)).resolves.toBe("hover");
+    storage.get.mockResolvedValue({ [OVERLAY_DISPLAY_MODE_PREFERENCE_KEY]: "markers" });
+    await expect(readOverlayDisplayModePreference(storage)).resolves.toBe("markers");
+    await saveOverlayDisplayModePreference(storage, "hidden");
+    expect(storage.set).toHaveBeenCalledWith({ [OVERLAY_DISPLAY_MODE_PREFERENCE_KEY]: "hidden" });
   });
 
   test("defaults human-facing timestamps to local time while preserving an explicit UTC preference", async () => {

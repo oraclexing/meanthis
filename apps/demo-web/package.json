@@ -4,16 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build && npm run verify:runtime",
+    "build": "tsc -b && vite build",
     "dev": "vite --host 127.0.0.1",
-    "preview": "vite preview --host 127.0.0.1",
-    "verify:runtime": "node scripts/verify-runtime.mjs"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "@meanthis/hub-core": "0.1.0",
-    "@meanthis/prompt": "0.1.0",
-    "@meanthis/replay": "0.1.0",
-    "@meanthis/schema": "0.1.0",
     "@meanthis/web-picker": "0.1.0"
   },
   "devDependencies": {

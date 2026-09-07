@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const sizes = Object.freeze([16, 32, 48, 128]);
 const outputDirectory = fileURLToPath(new URL("../public/icons/", import.meta.url));
-const storeIconSource = fileURLToPath(new URL("../assets/meanthis-icon-128.png", import.meta.url));
+const storeIconPath = fileURLToPath(new URL("../assets/meanthis-icon-128.png", import.meta.url));
 const supersample = 4;
 
 function crc32(bytes) {
@@ -126,9 +126,17 @@ function blend(pixel, color) {
 function renderIcon(size) {
   const logicalSize = size === 16 ? 16 : 32;
   const scale = size * supersample;
+  const safeInset = size === 128 ? 8 * supersample : 0;
+  const renderScale = (size === 128 ? 112 : size) * supersample;
+  const visualScale = size === 16 ? 1.18 : size === 32 ? 1.1 : size === 48 ? 1.06 : 1.1;
   const pixels = Array.from({ length: scale * scale }, () => [0, 0, 0, 0]);
-  const unit = scale / logicalSize;
-  const position = (value) => value * unit;
+  const unit = (renderScale / logicalSize) * visualScale;
+  const horizontalNudge = 0;
+  const verticalNudge = (size === 16 ? -0.8 : size === 32 ? -0.75 : size === 48 ? -1 : 0)
+    * supersample;
+  const renderCenter = safeInset + renderScale / 2;
+  const positionX = (value) => renderCenter + horizontalNudge + (value - logicalSize / 2) * unit;
+  const positionY = (value) => renderCenter + verticalNudge + (value - logicalSize / 2) * unit;
   const distance = (value) => value * unit;
   const draw = (predicate, color) => {
     for (let y = 0; y < scale; y += 1) {
@@ -144,8 +152,8 @@ function renderIcon(size) {
     (x, y) => insideRoundedRect(
       x,
       y,
-      position(left),
-      position(top),
+      positionX(left),
+      positionY(top),
       distance(width),
       distance(height),
       distance(radius),
@@ -156,19 +164,19 @@ function renderIcon(size) {
     (x, y) => insideEllipse(
       x,
       y,
-      position(centerX),
-      position(centerY),
+      positionX(centerX),
+      positionY(centerY),
       distance(radiusX),
       distance(radiusY),
     ),
     color,
   );
   const polygon = (points, color) => {
-    const scaled = points.map(([x, y]) => [position(x), position(y)]);
+    const scaled = points.map(([x, y]) => [positionX(x), positionY(y)]);
     draw((x, y) => insidePolygon(x, y, scaled), color);
   };
   const stroke = (points, width, color) => {
-    const scaled = points.map(([x, y]) => [position(x), position(y)]);
+    const scaled = points.map(([x, y]) => [positionX(x), positionY(y)]);
     const radius = distance(width) / 2;
     draw((x, y) => scaled.some((point, index) => index > 0 && distanceToSegment(
       x,
@@ -179,70 +187,108 @@ function renderIcon(size) {
       point[1],
     ) <= radius), color);
   };
-  const curve = (start, control, end, width, color) => stroke(
-    quadraticPoints(start, control, end),
-    width,
-    color,
-  );
 
   const cobalt = [36, 87, 214, 255];
   const navy = [5, 11, 32, 255];
   const cream = [255, 240, 204, 255];
+  const nose = [169, 99, 86, 255];
 
   if (logicalSize === 32) {
     const gold = [247, 183, 51, 255];
-    rounded(0.5, 0.5, 31, 31, 7.5, cobalt);
+    const head = [[5.1, 10.5], [5.6, 5.2]];
+    appendQuadratic(head, [5.7, 4.3], [6.5, 4.7], 6);
+    head.push([11, 9.2]);
+    appendQuadratic(head, [12.5, 8.1], [14.3, 9.1], 8);
+    head.push([16, 7.8], [17.7, 9.1]);
+    appendQuadratic(head, [19.5, 8.1], [21, 9.2], 8);
+    head.push([25.5, 4.7]);
+    appendQuadratic(head, [26.3, 4.3], [26.4, 5.2], 6);
+    head.push([26.8, 10.5]);
+    appendQuadratic(head, [29.2, 12.9], [29.5, 17], 10);
+    head.push(
+      [31, 18.5], [29.6, 20], [30.8, 21.6], [28.9, 22.7], [29.8, 24.5],
+      [27.4, 25.2], [27.8, 27], [24.8, 26.9],
+    );
+    appendQuadratic(head, [21.6, 29.3], [16, 29.5], 12);
+    appendQuadratic(head, [10.4, 29.3], [7.2, 26.9], 12);
+    head.push(
+      [4.2, 27], [4.6, 25.2], [2.2, 24.5], [3.1, 22.7], [1.2, 21.6],
+      [2.4, 20], [1, 18.5], [2.5, 17],
+    );
+    appendQuadratic(head, [2.8, 12.9], [5.1, 10.5], 10);
+    polygon(head, gold);
+    stroke(head, 1.6, cobalt);
+    stroke(head, 0.7, navy);
 
-    const leftEye = [[0.7, 5.3], [16.1, 14.7]];
-    appendQuadratic(leftEye, [15.2, 19.9], [10.6, 22.3], 10);
-    appendQuadratic(leftEye, [4.7, 23.2], [1.5, 17.7], 10);
-    appendQuadratic(leftEye, [0.3, 12.3], [0.7, 5.3], 10);
-    polygon(leftEye, gold);
-    const rightEye = [[18, 15.5], [31.2, 9.6]];
-    appendQuadratic(rightEye, [30.6, 14.8], [27.5, 18.1], 10);
-    appendQuadratic(rightEye, [24.3, 20.9], [20.7, 18.8], 10);
-    appendQuadratic(rightEye, [19.2, 18.1], [18, 15.5], 8);
-    polygon(rightEye, gold);
+    polygon([[6.6, 6.4], [10.6, 9.9], [6.3, 10.7]], cream);
+    polygon([[25.4, 6.4], [21.4, 9.9], [25.7, 10.7]], cream);
 
-    rounded(7.9, 12, 2.8, 6.4, 1.4, navy);
-    rounded(24.4, 13.3, 1.8, 4, 0.9, navy);
-    ellipse(8.7, 13.2, 0.42, 0.42, cream);
-    ellipse(24.9, 14.1, 0.34, 0.34, cream);
-    curve([0.5, 4.2], [8.1, 8.5], [16.2, 14.3], 1.5, cream);
-    curve([31.3, 7.2], [23.9, 9.8], [18.3, 14.7], 1.3, cream);
-    curve([15.3, 19], [8.8, 25.8], [2, 30.7], 1.5, cream);
-    curve([18.2, 19], [24.5, 25.1], [31, 29.4], 1.3, cream);
-    const mouth = [[10.3, 28]];
-    appendQuadratic(mouth, [16.3, 22.9], [21, 26], 10);
-    appendQuadratic(mouth, [23.5, 28], [26, 25.4], 8);
-    stroke(mouth, 2.2, cream);
-    stroke(mouth, 1.1, gold);
+    const leftEye = [[7.1, 15.1]];
+    appendQuadratic(leftEye, [10.6, 15.9], [14.1, 15.2], 8);
+    appendQuadratic(leftEye, [13.2, 20.2], [10.4, 20.2], 10);
+    appendQuadratic(leftEye, [7.7, 20.2], [7.1, 15.1], 10);
+    polygon(leftEye, navy);
+    const leftEyeLight = [[8.5, 16.4]];
+    appendQuadratic(leftEyeLight, [10.7, 16.9], [12.8, 16.4], 8);
+    appendQuadratic(leftEyeLight, [12.3, 18.9], [10.6, 18.9], 8);
+    appendQuadratic(leftEyeLight, [8.9, 18.9], [8.5, 16.4], 8);
+    polygon(leftEyeLight, cream);
+    ellipse(10.6, 17, 0.8, 1.15, navy);
+
+    const rightEye = [[17.9, 15.2]];
+    appendQuadratic(rightEye, [21.4, 15.9], [24.9, 15.1], 8);
+    appendQuadratic(rightEye, [24.3, 20.2], [21.6, 20.2], 10);
+    appendQuadratic(rightEye, [18.8, 20.2], [17.9, 15.2], 10);
+    polygon(rightEye, navy);
+    const rightEyeLight = [[19.2, 16.4]];
+    appendQuadratic(rightEyeLight, [21.3, 16.9], [23.5, 16.4], 8);
+    appendQuadratic(rightEyeLight, [23.1, 18.9], [21.4, 18.9], 8);
+    appendQuadratic(rightEyeLight, [19.7, 18.9], [19.2, 16.4], 8);
+    polygon(rightEyeLight, cream);
+    ellipse(21.4, 17, 0.8, 1.15, navy);
+
+    ellipse(13.4, 23.2, 3.9, 4.2, cream);
+    ellipse(18.6, 23.2, 3.9, 4.2, cream);
+    polygon([[13.8, 19.8], [16, 18.9], [18.2, 19.8], [16, 21.9]], nose);
+    stroke([[13.8, 19.8], [16, 18.9], [18.2, 19.8], [16, 21.9], [13.8, 19.8]], 0.45, navy);
+    stroke([[16, 21.9], [16, 23.4]], 0.9, navy);
+    stroke([[16, 23.4], [14.6, 24.6]], 0.9, navy);
+    stroke([[16, 23.4], [17.4, 24.6]], 0.9, navy);
+    stroke([[10.3, 20.5], [3.9, 19.8]], 0.78, navy);
+    stroke([[10.1, 22.5], [3.6, 22.1]], 0.78, navy);
+    stroke([[10.3, 23.3], [4.3, 24.8]], 0.78, navy);
+    stroke([[21.7, 20.5], [28.1, 19.8]], 0.78, navy);
+    stroke([[21.9, 22.5], [28.4, 22.1]], 0.78, navy);
+    stroke([[21.7, 23.3], [27.7, 24.8]], 0.78, navy);
   } else {
     const gold = [255, 196, 77, 255];
-    rounded(0, 0, 16, 16, 4, cobalt);
-
-    const leftEye = [[0.2, 2.5], [8, 7.2]];
-    appendQuadratic(leftEye, [7.6, 10.1], [5.2, 11.2], 8);
-    appendQuadratic(leftEye, [2.3, 11.7], [0.7, 8.8], 8);
-    appendQuadratic(leftEye, [0.1, 6.1], [0.2, 2.5], 8);
-    polygon(leftEye, gold);
-    const rightEye = [[9, 7.6], [15.7, 4.8]];
-    appendQuadratic(rightEye, [15.4, 7.4], [13.8, 9.1], 8);
-    appendQuadratic(rightEye, [12.2, 10.3], [10.4, 9.4], 8);
-    appendQuadratic(rightEye, [9.5, 9], [9, 7.6], 6);
-    polygon(rightEye, gold);
-
-    rounded(3.9, 5.9, 1.5, 3.6, 0.75, navy);
-    rounded(12.15, 6.4, 1.1, 2.4, 0.55, navy);
-    curve([0.1, 2], [4, 4.2], [8, 7.1], 0.85, cream);
-    curve([15.9, 3.6], [12.1, 4.9], [9.1, 7.3], 0.72, cream);
-    curve([7.7, 9.6], [4.4, 13], [0.8, 15.5], 0.8, cream);
-    curve([9.1, 9.6], [12.3, 12.7], [15.6, 14.8], 0.7, cream);
-    const mouth = [[5, 14.4]];
-    appendQuadratic(mouth, [8.1, 11.6], [10.4, 13.2], 8);
-    appendQuadratic(mouth, [11.6, 14.2], [12.9, 12.8], 6);
-    stroke(mouth, 1.2, cream);
-    stroke(mouth, 0.65, gold);
+    const head = [
+      [2.4, 5.6], [2.8, 2.5], [5.2, 4.7], [7.2, 4.7], [8, 4], [8.8, 4.7],
+      [10.8, 4.7], [13.2, 2.5], [13.6, 5.6], [15.1, 8.7], [15.8, 9.4],
+      [15.1, 10.2], [15.7, 11], [14.8, 11.6], [15.2, 12.5], [14, 12.8],
+      [14.2, 13.8], [12.7, 13.7], [11, 14.8], [8, 15], [5, 14.8], [3.3, 13.7],
+      [1.8, 13.8], [2, 12.8], [0.8, 12.5], [1.2, 11.6], [0.3, 11],
+      [0.9, 10.2], [0.2, 9.4], [0.9, 8.7], [2.4, 5.6],
+    ];
+    polygon(head, gold);
+    stroke(head, 0.8, cobalt);
+    stroke(head, 0.35, navy);
+    polygon([[3.3, 3.5], [5.1, 4.9], [3.2, 5.4]], cream);
+    polygon([[12.7, 3.5], [10.9, 4.9], [12.8, 5.4]], cream);
+    polygon([[3.5, 7.3], [7, 7.3], [6.2, 9.2], [5.1, 9.6], [4, 9.1]], navy);
+    ellipse(5.2, 8.15, 0.9, 0.75, cream);
+    polygon([[9, 7.3], [12.5, 7.3], [12, 9.1], [10.9, 9.6], [9.8, 9.2]], navy);
+    ellipse(10.8, 8.15, 0.9, 0.75, cream);
+    ellipse(6.6, 11.6, 2, 2.2, cream);
+    ellipse(9.4, 11.6, 2, 2.2, cream);
+    polygon([[7.3, 10], [8, 9.6], [8.7, 10], [8, 10.8]], nose);
+    stroke([[8, 10.8], [8, 11.7]], 0.5, navy);
+    stroke([[8, 11.7], [7.3, 12.3]], 0.5, navy);
+    stroke([[8, 11.7], [8.7, 12.3]], 0.5, navy);
+    stroke([[5.5, 10.6], [2.3, 10.2]], 0.45, navy);
+    stroke([[5.4, 11.5], [2.3, 12]], 0.45, navy);
+    stroke([[10.5, 10.6], [13.7, 10.2]], 0.45, navy);
+    stroke([[10.6, 11.5], [13.7, 12]], 0.45, navy);
   }
 
   const rgba = Buffer.alloc(size * size * 4);
@@ -267,12 +313,21 @@ function renderIcon(size) {
 
 export async function generateIcons({ check = false } = {}) {
   if (!check) await mkdir(outputDirectory, { recursive: true });
+  const expectedStoreIcon = renderIcon(128);
+  if (check) {
+    const observedStoreIcon = await readFile(storeIconPath);
+    if (!observedStoreIcon.equals(expectedStoreIcon)) {
+      throw new Error("Extension icon is stale: " + storeIconPath);
+    }
+  } else {
+    await writeFile(storeIconPath, expectedStoreIcon);
+  }
   for (const size of sizes) {
-    const path = join(outputDirectory, `meanthis-${size}.png`);
-    const expected = size === 128 ? await readFile(storeIconSource) : renderIcon(size);
+    const path = join(outputDirectory, "meanthis-" + size + ".png");
+    const expected = size === 128 ? expectedStoreIcon : renderIcon(size);
     if (check) {
       const observed = await readFile(path);
-      if (!observed.equals(expected)) throw new Error(`Extension icon is stale: ${path}`);
+      if (!observed.equals(expected)) throw new Error("Extension icon is stale: " + path);
     } else {
       await writeFile(path, expected);
     }
@@ -282,7 +337,9 @@ export async function generateIcons({ check = false } = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     await generateIcons({ check: process.argv.includes("--check") });
-    process.stdout.write(`Extension icons ${process.argv.includes("--check") ? "verified" : "generated"}.\n`);
+    process.stdout.write("Extension icons "
+      + (process.argv.includes("--check") ? "verified" : "generated")
+      + ".\n");
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

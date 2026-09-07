@@ -1,7 +1,7 @@
 {
   "name": "@meanthis/web-picker",
   "version": "0.1.0",
-  "description": "Reusable anchored UI comment and element-selection flow for web apps.",
+  "description": "Shared annotation surface, element-selection, overlay, and in-page widget primitives for web apps.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,9 +17,27 @@
   "types": "./dist/index.d.ts",
   "files": [
     "README_zh.md",
+    "dist/annotation-surface-controller.js",
+    "dist/annotation-surface-controller.js.map",
+    "dist/annotation-surface-controller.d.ts",
+    "dist/element-selection-controller.js",
+    "dist/element-selection-controller.js.map",
+    "dist/element-selection-controller.d.ts",
+    "dist/in-page-widget-view.js",
+    "dist/in-page-widget-view.js.map",
+    "dist/in-page-widget-view.d.ts",
     "dist/index.js",
     "dist/index.js.map",
-    "dist/index.d.ts"
+    "dist/index.d.ts",
+    "dist/persistent-overlays.js",
+    "dist/persistent-overlays.js.map",
+    "dist/persistent-overlays.d.ts",
+    "dist/surface-claim.js",
+    "dist/surface-claim.js.map",
+    "dist/surface-claim.d.ts",
+    "dist/web-widget.js",
+    "dist/web-widget.js.map",
+    "dist/web-widget.d.ts"
   ],
   "exports": {
     ".": {
@@ -33,7 +51,7 @@
   "scripts": {
     "build": "tsc -b",
     "prepack": "npm run build",
-    "test": "vitest run src/index.test.ts --environment jsdom"
+    "test": "vitest run --environment jsdom"
   },
   "dependencies": {
     "@meanthis/prompt": "0.1.0",

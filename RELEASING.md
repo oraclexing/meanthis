@@ -17,7 +17,7 @@ npm audit --audit-level=moderate
 git diff --check
 ```
 
-`npm run build` compiles the nine public packages, demo, and consumer extension; runs the public examples; and verifies package tarballs in a temporary offline consumer.
+`npm run build` compiles the nine public packages, demo, and consumer extension; runs the public examples; and verifies package tarballs in a temporary cache-preferred consumer. That consumer uses `--prefer-offline`, so a cold cache may still make npm access the configured registry.
 
 `npm run pack:extension` writes an unsigned consumer ZIP and checksum manifest under `output/extension-mv3/consumer/<version>/`. The artifact is a local integrity candidate, not a signature or publisher attestation.
 

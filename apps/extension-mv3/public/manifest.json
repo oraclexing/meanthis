@@ -12,7 +12,7 @@
     "48": "icons/meanthis-48.png",
     "128": "icons/meanthis-128.png"
   },
-  "permissions": ["activeTab", "alarms", "contextMenus", "scripting", "sidePanel", "storage", "webNavigation"],
+  "permissions": ["activeTab", "alarms", "contextMenus", "nativeMessaging", "scripting", "sidePanel", "storage", "webNavigation"],
   "optional_host_permissions": ["http://127.0.0.1/*", "http://*/*", "https://*/*"],
   "background": {
     "service_worker": "assets/background.js",
@@ -33,5 +33,10 @@
       "128": "icons/meanthis-128.png"
     },
     "default_title": "__MSG_open_ui_attach__"
-  }
+  },
+  "web_accessible_resources": [{
+    "resources": ["widget.html"],
+    "matches": ["http://*/*", "https://*/*"],
+    "use_dynamic_url": false
+  }]
 }

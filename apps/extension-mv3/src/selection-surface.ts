@@ -26,10 +26,10 @@ export function createSelectionSurfaceController(
   const frameInputGuard = options.root.createElement("style");
   frameInputGuard.dataset.uiAttachSelectionFrameGuard = "true";
   frameInputGuard.dataset.uiAttachIgnore = "true";
-  frameInputGuard.textContent = "iframe { pointer-events: none !important; }";
+  frameInputGuard.textContent =
+    "iframe { pointer-events: none !important; }";
   const host = options.root.createElement("div");
   host.dataset.uiAttachSelectionSurface = "true";
-  host.dataset.uiAttachIgnore = "true";
   host.setAttribute("aria-hidden", "true");
   Object.assign(host.style, {
     all: "initial",
@@ -37,7 +37,7 @@ export function createSelectionSurfaceController(
     inset: "0",
     display: "block",
     pointerEvents: "auto",
-    zIndex: "2147483647",
+    zIndex: "2147483646",
     cursor: "default",
     background: "transparent",
   });
@@ -265,7 +265,10 @@ export function createSelectionSurfaceController(
     host.style.display = "none";
     frameInputGuard.remove();
     try {
-      return getSelectableTarget(options.root, hitTest(event.clientX, event.clientY));
+      return getSelectableTarget(
+        options.root,
+        resolveDeepestOpenShadowHit(hitTest(event.clientX, event.clientY), event.clientX, event.clientY),
+      );
     } finally {
       if (guardParent) {
         guardParent.insertBefore(frameInputGuard, guardNextSibling);
@@ -280,4 +283,23 @@ export function createSelectionSurfaceController(
     resolveTarget,
     setEnabled,
   };
+}
+
+function resolveDeepestOpenShadowHit(
+  initial: Element | null,
+  x: number,
+  y: number,
+): Element | null {
+  let current = initial;
+  const seen = new Set<Element>();
+  for (let depth = 0; current !== null && depth < 32; depth += 1) {
+    if (seen.has(current)) return current;
+    seen.add(current);
+    const shadow = current.shadowRoot;
+    if (!shadow || typeof shadow.elementFromPoint !== "function") return current;
+    const nested = shadow.elementFromPoint(x, y);
+    if (!nested || nested === current) return current;
+    current = nested;
+  }
+  return current;
 }

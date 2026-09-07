@@ -28,6 +28,151 @@ export interface FrameScopePermissionLease {
   release(): Promise<void>;
 }
 
+export interface FrameScopePermissionTarget {
+  origin: string;
+  requiresHostPermission: boolean;
+}
+
+export interface FrameScopeSelectionController<
+  TTarget extends FrameScopePermissionTarget = FrameScopeSelectionTarget,
+  TOperation = void,
+> {
+  select(target: TTarget, startSelection: boolean, operation?: TOperation): Promise<boolean>;
+  stop(operation?: TOperation): Promise<boolean>;
+  releasePermission(): Promise<void>;
+}
+
+export function createFrameScopeSelectionController<
+  TTarget extends FrameScopePermissionTarget = FrameScopeSelectionTarget,
+  TOperation = void,
+>(options: {
+  permissions: UiAttachChromePermissions;
+  selectTarget(
+    target: TTarget,
+    startSelection: boolean,
+    operation?: TOperation,
+  ): Promise<boolean>;
+  stopSelection(operation?: TOperation): Promise<boolean>;
+  isOperationCurrent?(operation?: TOperation): boolean;
+}): FrameScopeSelectionController<TTarget, TOperation> {
+  let retainedPermission: {
+    origin: string;
+    lease: FrameScopePermissionLease;
+  } | null = null;
+  let operationTail = Promise.resolve();
+
+  function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = operationTail.then(operation, operation);
+    operationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  async function releasePermissionNow(): Promise<void> {
+    const current = retainedPermission;
+    if (!current) return;
+    try {
+      await current.lease.release();
+      if (retainedPermission === current) retainedPermission = null;
+    } catch (error) {
+      throw normalizeFrameScopeError(error, "FRAME_PERMISSION_CLEANUP_FAILED");
+    }
+  }
+
+  async function releasePreparedPermission(
+    prepared: { origin: string; lease: FrameScopePermissionLease } | null,
+  ): Promise<void> {
+    if (!prepared || prepared === retainedPermission) return;
+    try {
+      await prepared.lease.release();
+    } catch (error) {
+      throw normalizeFrameScopeError(error, "FRAME_PERMISSION_CLEANUP_FAILED");
+    }
+  }
+
+  async function selectNow(
+    target: TTarget,
+    startSelection: boolean,
+    operation?: TOperation,
+  ): Promise<boolean> {
+    assertOperationCurrent(operation);
+    let prepared = target.requiresHostPermission
+      ? retainedPermission?.origin === target.origin
+        ? retainedPermission
+        : {
+            origin: target.origin,
+            lease: await acquireFrameScopePermission(options.permissions, target.origin),
+          }
+      : null;
+    let enabled: boolean;
+    try {
+      assertOperationCurrent(operation);
+      enabled = await options.selectTarget(target, startSelection, operation);
+      assertOperationCurrent(operation);
+      if (enabled !== startSelection) {
+        throw new FrameScopeAccessError("INVALID_SESSION_RESPONSE");
+      }
+    } catch (error) {
+      try {
+        await releasePreparedPermission(prepared);
+      } catch (cleanupError) {
+        throw cleanupError;
+      }
+      throw normalizeFrameScopeError(error, "FRAME_SCOPE_UNAVAILABLE");
+    }
+
+    if (!enabled) {
+      await releasePreparedPermission(prepared);
+      prepared = null;
+      await releasePermissionNow();
+      return false;
+    }
+
+    const previous = retainedPermission;
+    retainedPermission = prepared;
+    prepared = null;
+    if (previous && previous !== retainedPermission) {
+      try {
+        await previous.lease.release();
+      } catch (error) {
+        try {
+          await options.stopSelection(operation);
+        } catch {
+          // Permission cleanup remains the authoritative failure.
+        }
+        throw normalizeFrameScopeError(error, "FRAME_PERMISSION_CLEANUP_FAILED");
+      }
+    }
+    return true;
+  }
+
+  async function stopNow(operation?: TOperation): Promise<boolean> {
+    let enabled: boolean;
+    try {
+      assertOperationCurrent(operation);
+      enabled = await options.stopSelection(operation);
+      assertOperationCurrent(operation);
+    } catch (error) {
+      throw normalizeFrameScopeError(error, "FRAME_SCOPE_UNAVAILABLE");
+    }
+    if (enabled) throw new FrameScopeAccessError("INVALID_SESSION_RESPONSE");
+    await releasePermissionNow();
+    return false;
+  }
+
+  function assertOperationCurrent(operation?: TOperation): void {
+    if (options.isOperationCurrent && !options.isOperationCurrent(operation)) {
+      throw new FrameScopeAccessError("FRAME_SCOPE_OPERATION_CANCELLED");
+    }
+  }
+
+  return {
+    select: (target, startSelection, operation) =>
+      enqueue(() => selectNow(target, startSelection, operation)),
+    stop: (operation) => enqueue(() => stopNow(operation)),
+    releasePermission: () => enqueue(releasePermissionNow),
+  };
+}
+
 export async function readFrameScopes(
   sendCommand: (command: SessionCommand) => Promise<SessionCommandResponse<unknown>>,
 ): Promise<FrameScopeListData> {
@@ -131,12 +276,18 @@ export async function acquireFrameScopePermission(
   return {
     async release(): Promise<void> {
       if (released || alreadyGranted) return;
-      released = true;
       if (!(await removePermission(permissions, permissionPattern))) {
         throw new FrameScopeAccessError("FRAME_PERMISSION_CLEANUP_FAILED");
       }
+      released = true;
     },
   };
+}
+
+function normalizeFrameScopeError(error: unknown, fallbackCode: string): FrameScopeAccessError {
+  return error instanceof FrameScopeAccessError
+    ? error
+    : new FrameScopeAccessError(fallbackCode);
 }
 
 function isFrameScopeListData(value: unknown): value is FrameScopeListData {

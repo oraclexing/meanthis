@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 
-import { UI_ATTACHMENT_REPLAY_LOCATOR_MAX_CHARACTERS } from "@meanthis/schema";
+import {
+  UI_ATTACHMENT_REPLAY_LOCATOR_MAX_CHARACTERS,
+  UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+  UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
+  isUIAttachment,
+} from "@meanthis/schema";
 import { describe, expect, it, vi } from "vitest";
 import {
   deriveAttachmentDisclosure,
@@ -45,6 +50,55 @@ describe("redactRecognizedSensitiveText", () => {
     expect(redactRecognizedSensitiveText(legalValue)).toBe(legalValue);
     expect(redactRecognizedSensitiveText(abusiveValue)).toBe("[redacted:url]");
   });
+
+  it.each([
+    ["GitHub classic", "ghp_1234567890abcdefghijklmnopqrstuvwxyz"],
+    ["GitHub fine-grained", "github_pat_11AAAABBBBCCCCDDDDEEEEFFFF"],
+    ["GitLab", "glpat-1234567890abcdefghijkl"],
+    ["Slack", "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx"],
+    ["Google", `AIza${"A".repeat(35)}`],
+    ["npm", "npm_1234567890abcdefghijklmnopqrstuvwxyz"],
+  ])("scrubs %s provider tokens", (_provider, token) => {
+    expect(redactRecognizedSensitiveText(`credential=${token}`)).toBe(
+      "credential=[redacted:secret]",
+    );
+  });
+
+  it("does not scrub short or embedded provider-shaped values", () => {
+    const github = "ghp_1234567890123456789";
+    const githubFineGrained = "github_pat_1234567890123456789";
+    const gitlab = "glpat-1234567890abcdefghi";
+    const slack = "xoxb-1234567890-abcde";
+    const google = `AIza${"A".repeat(34)}`;
+    const npm = "npm_1234567890abcdefghijklmnopqrstuvwxy";
+    const embedded = [
+      "xghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      "xgithub_pat_11AAAABBBBCCCCDDDDEEEEFFFF",
+      "xglpat-1234567890abcdefghijkl",
+      "xxoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx",
+      `xAIza${"A".repeat(35)}`,
+      "xnpm_1234567890abcdefghijklmnopqrstuvwxyz",
+    ];
+    const value = [
+      github,
+      githubFineGrained,
+      gitlab,
+      slack,
+      google,
+      npm,
+      ...embedded,
+    ].join(" | ");
+
+    expect(redactRecognizedSensitiveText(value)).toBe(value);
+  });
+
+  it("handles an allowed terminal dash without truncating a longer Google-shaped value", () => {
+    const terminalDash = `AIza${"A".repeat(34)}-`;
+    const longerValue = `AIza${"A".repeat(35)}-`;
+
+    expect(redactRecognizedSensitiveText(terminalDash)).toBe("[redacted:secret]");
+    expect(redactRecognizedSensitiveText(longerValue)).toBe(longerValue);
+  });
 });
 
 describe("extractElementAttachment", () => {
@@ -52,7 +106,7 @@ describe("extractElementAttachment", () => {
     document.body.innerHTML = `
       <main>
         <form aria-label="Profile settings">
-          <button type="submit" data-testid="save-button" style="display: inline-flex; color: rgb(255, 255, 255); background-color: rgb(31, 99, 255);">Save</button>
+          <button type="submit" data-testid="save-button" style="display: inline-flex; position: relative; box-sizing: border-box; width: 90px; height: 40px; margin: 4px; padding: 6px 8px; gap: 10px; flex-direction: column; justify-content: center; align-items: flex-start; overflow-x: auto; overflow-y: hidden; font-size: 14px; font-weight: 600; line-height: 20px; border-radius: 8px; color: rgb(255, 255, 255); background-color: rgb(31, 99, 255);">Save</button>
           <button type="button">Cancel</button>
         </form>
       </main>
@@ -89,6 +143,25 @@ describe("extractElementAttachment", () => {
     expect(attachment.element.bbox).toEqual({ x: 10, y: 20, width: 80, height: 32 });
     expect(attachment.context.selectorHints).toContain("[data-testid=\"save-button\"]");
     expect(attachment.context.nearbyText).toContain("Cancel");
+    expect(attachment.style).toMatchObject({
+      display: "inline-flex",
+      position: "relative",
+      boxSizing: "border-box",
+      width: "90px",
+      height: "40px",
+      margin: "4px",
+      padding: "6px 8px",
+      gap: "10px",
+      flexDirection: "column",
+      justifyContent: "center",
+      alignItems: "flex-start",
+      overflowX: "auto",
+      overflowY: "hidden",
+      fontSize: "14px",
+      fontWeight: "600",
+      lineHeight: "20px",
+      borderRadius: "8px",
+    });
     expect(attachment.locatorBundle.primary).toEqual({
       strategy: "playwright.role",
       value: "page.getByRole(\"button\", { name: \"Save\" })",
@@ -108,6 +181,492 @@ describe("extractElementAttachment", () => {
       allowDomSnippet: false,
       allowNetworkSend: false,
     });
+  });
+
+  it("preserves bounded DOM-backed content parts without guessing site-specific fields", () => {
+    document.body.innerHTML = `
+      <article>
+        <a href="/tibo"><span>Tibo</span></a>
+        <time datetime="2026-08-08T01:00:00.000Z">29 minutes</time>
+        <p>Astro Boy and Sol</p>
+        <button aria-label="123 replies"><span>123</span></button>
+      </article>
+    `;
+    const article = document.querySelector("article");
+    if (!(article instanceof HTMLElement)) throw new Error("article fixture missing");
+
+    const attachment = extractElementAttachment(article, { idSeed: "post" });
+
+    expect(attachment.element.text).toContain("Tibo");
+    expect(attachment.element.contentParts).toEqual([
+      {
+        kind: "link",
+        tagName: "a",
+        role: "link",
+        text: "Tibo",
+        accessibleName: "Tibo",
+      },
+      {
+        kind: "time",
+        tagName: "time",
+        role: null,
+        text: "29 minutes",
+        accessibleName: "29 minutes",
+      },
+      {
+        kind: "text",
+        tagName: "p",
+        role: null,
+        text: "Astro Boy and Sol",
+        accessibleName: "Astro Boy and Sol",
+      },
+      {
+        kind: "button",
+        tagName: "button",
+        role: "button",
+        text: "123",
+        accessibleName: "123 replies",
+      },
+    ]);
+    expect(attachment.element.contentParts?.[0]).not.toHaveProperty("author");
+    expect(attachment.element.contentParts?.[2]).not.toHaveProperty("body");
+    expect(attachment.element.contentParts?.[3]).not.toHaveProperty("metrics");
+  });
+
+  it("coalesces transparent styling spans before reserving semantic part slots", () => {
+    const article = document.createElement("article");
+    for (let index = 0; index < 64; index += 1) {
+      const span = document.createElement("span");
+      span.className = index % 2 === 0 ? "muted" : "accent";
+      span.textContent = `label-${index} `;
+      article.append(span);
+    }
+    const time = document.createElement("time");
+    time.dateTime = "2026-08-08T01:00:00.000Z";
+    time.textContent = "29 minutes";
+    article.append(time);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Reply";
+    article.append(button);
+
+    const attachment = extractElementAttachment(article, { idSeed: "styled-post" });
+    const contentParts = attachment.element.contentParts ?? [];
+
+    expect(contentParts).toHaveLength(3);
+    expect(contentParts[0]).toMatchObject({
+      kind: "text",
+      tagName: "span",
+      role: null,
+    });
+    expect(contentParts[0]?.text).toContain("label-0");
+    expect(contentParts[0]?.text).toContain("label-63");
+    expect(contentParts[1]).toMatchObject({
+      kind: "time",
+      tagName: "time",
+      text: "29 minutes",
+    });
+    expect(contentParts[2]).toMatchObject({
+      kind: "button",
+      tagName: "button",
+      role: "button",
+      text: "Reply",
+    });
+  });
+
+  it("preserves a nested semantic descendant inside a semantic wrapper", () => {
+    document.body.innerHTML = `
+      <article>
+        <a href="/recent"><span><time datetime="2026-08-08T01:00:00.000Z">29 minutes</time></span></a>
+      </article>
+    `;
+    const article = document.querySelector("article");
+    if (!(article instanceof HTMLElement)) throw new Error("article fixture missing");
+
+    const attachment = extractElementAttachment(article, { idSeed: "nested-time" });
+
+    expect(attachment.element.contentParts).toContainEqual({
+      kind: "time",
+      tagName: "time",
+      role: null,
+      text: "29 minutes",
+      accessibleName: "29 minutes",
+    });
+  });
+
+  it("redacts a complete secret before applying the remaining output byte budget", () => {
+    const article = document.createElement("article");
+    const budgetFiller = document.createElement("p");
+    budgetFiller.textContent = "x".repeat(7_995);
+    const secret = document.createElement("p");
+    secret.textContent = " sk-test-1234567890";
+    article.append(budgetFiller, secret);
+
+    const attachment = extractElementAttachment(article, { idSeed: "budgeted-secret" });
+    const serializedParts = JSON.stringify(attachment.element.contentParts);
+
+    expect(serializedParts).not.toContain("sk-test");
+    expect(serializedParts).not.toContain("1234567890");
+    expect(attachment.policy.redactedFields).toContain("element.text");
+  });
+
+  it("does not emit an unmarked secret prefix when full-debug budget is too small", () => {
+    const article = document.createElement("article");
+    const budgetFiller = document.createElement("p");
+    budgetFiller.textContent = "x".repeat(7_995);
+    const secret = document.createElement("p");
+    secret.textContent = " sk-test-1234567890";
+    article.append(budgetFiller, secret);
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "budgeted-debug-secret",
+      disclosureMode: "full_debug",
+    });
+
+    expect(JSON.stringify(fullDebug.element.contentParts)).not.toContain("sk-test");
+    expect(fullDebug.element.contentParts?.[1]?.text).toBe("[truncated");
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    expect(JSON.stringify(derived.attachment.element.contentParts)).not.toContain("sk-test");
+  });
+
+  it("fails closed when deriving Agent-safe parts from a truncated full-debug token", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = `${"x".repeat(15_982)}sk-test-1234567890z`;
+    article.append(paragraph);
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "truncated-debug-secret",
+      disclosureMode: "full_debug",
+    });
+
+    expect(fullDebug.element.contentParts?.[0]?.text).toContain("sk-test");
+    expect(fullDebug.element.contentParts?.[0]?.text).toMatch(/\[truncated\]$/);
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    expect(JSON.stringify(derived.attachment.element.contentParts)).not.toContain("sk-test");
+    expect(derived.attachment.element.contentParts?.[0]?.text).toBe(
+      "[redacted:declared-sensitive]",
+    );
+  });
+
+  it("coalesces interleaved parent and inline text before reserving semantic slots", () => {
+    const article = document.createElement("article");
+    for (let index = 0; index < 40; index += 1) {
+      const span = document.createElement("span");
+      span.className = index % 2 === 0 ? "muted" : "accent";
+      span.textContent = `inline-${index}`;
+      article.append(
+        document.createTextNode(`before-${index} `),
+        span,
+        document.createTextNode(` after-${index} `),
+      );
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Continue";
+    article.append(button);
+
+    const attachment = extractElementAttachment(article, { idSeed: "interleaved-text" });
+
+    expect(attachment.element.contentParts).toHaveLength(2);
+    expect(attachment.element.contentParts?.[0]).toMatchObject({ kind: "text" });
+    expect(attachment.element.contentParts?.[0]?.text).toContain("before-0");
+    expect(attachment.element.contentParts?.[0]?.text).toContain("after-39");
+    expect(attachment.element.contentParts?.[1]).toMatchObject({
+      kind: "button",
+      role: "button",
+      text: "Continue",
+    });
+  });
+
+  it("reserves output bytes for a later semantic control without reordering parts", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "x".repeat(8_000);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", "Continue");
+    article.append(paragraph, button);
+
+    const attachment = extractElementAttachment(article, { idSeed: "semantic-byte-reserve" });
+    const contentParts = attachment.element.contentParts ?? [];
+
+    expect(contentParts.map((part) => part.kind)).toEqual(["text", "button"]);
+    expect(contentParts[1]).toEqual({
+      kind: "button",
+      tagName: "button",
+      role: "button",
+      text: null,
+      accessibleName: "Continue",
+    });
+    const disclosedBytes = contentParts.reduce(
+      (total, part) => total +
+        new TextEncoder().encode(part.text ?? "").byteLength +
+        new TextEncoder().encode(part.accessibleName ?? "").byteLength,
+      0,
+    );
+    expect(disclosedBytes).toBeLessThanOrEqual(16_000);
+  });
+
+  it("reserves derived output bytes for a semantic control after redaction expansion", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "a@b.co ".repeat(1_000);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", "Continue");
+    article.append(paragraph, button);
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "derived-semantic-byte-reserve",
+      disclosureMode: "full_debug",
+    });
+
+    expect(fullDebug.element.contentParts?.map((part) => part.kind)).toEqual([
+      "text",
+      "button",
+    ]);
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    const contentParts = derived.attachment.element.contentParts ?? [];
+    expect(contentParts.map((part) => part.kind)).toEqual(["text", "button"]);
+    expect(contentParts[1]).toEqual({
+      kind: "button",
+      tagName: "button",
+      role: "button",
+      text: null,
+      accessibleName: "[redacted:declared-sensitive]",
+    });
+    const disclosedBytes = contentParts.reduce(
+      (total, part) => total +
+        new TextEncoder().encode(part.text ?? "").byteLength +
+        new TextEncoder().encode(part.accessibleName ?? "").byteLength,
+      0,
+    );
+    expect(disclosedBytes).toBeLessThanOrEqual(16_000);
+  });
+
+  it("reserves derived bytes for a stored accessible-name-only generic part", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "a@b.co ".repeat(1_000);
+    const namedRegion = document.createElement("div");
+    namedRegion.setAttribute("aria-label", "Named region");
+    article.append(paragraph, namedRegion);
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "derived-named-generic-reserve",
+      disclosureMode: "full_debug",
+    });
+    const textPart = fullDebug.element.contentParts?.find((part) => part.tagName === "p");
+    if (!textPart) throw new Error("text content part missing");
+    fullDebug.element.contentParts = [
+      textPart,
+      {
+        kind: "text",
+        tagName: "div",
+        role: null,
+        text: null,
+        accessibleName: "Named region",
+      },
+    ];
+
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    const contentParts = derived.attachment.element.contentParts ?? [];
+    expect(contentParts.map((part) => part.tagName)).toEqual(["p", "div"]);
+    expect(contentParts[1]).toEqual({
+      kind: "text",
+      tagName: "div",
+      role: null,
+      text: null,
+      accessibleName: "[redacted:declared-sensitive]",
+    });
+    const disclosedBytes = contentParts.reduce(
+      (total, part) => total +
+        new TextEncoder().encode(part.text ?? "").byteLength +
+        new TextEncoder().encode(part.accessibleName ?? "").byteLength,
+      0,
+    );
+    expect(disclosedBytes).toBeLessThanOrEqual(16_000);
+  });
+
+  it("reapplies the aggregate byte budget after structural declared redaction", () => {
+    document.body.innerHTML = '<button type="button">Base</button>';
+    const button = document.querySelector("button");
+    if (!(button instanceof HTMLButtonElement)) throw new Error("button fixture missing");
+    const fullDebug = extractElementAttachment(button, {
+      idSeed: "structural-content-parts-budget",
+      disclosureMode: "full_debug",
+    });
+    const expectedPrefixes = Array.from(
+      { length: 64 },
+      (_, index) => `part-${index.toString().padStart(2, "0")}-`,
+    );
+    fullDebug.element.contentParts = expectedPrefixes.map((prefix) => ({
+      kind: "button",
+      tagName: "button",
+      role: "button",
+      text: "sk-test-12345678",
+      accessibleName: `${prefix}${"x".repeat(222)}`,
+    }));
+    fullDebug.policy = {
+      ...fullDebug.policy,
+      sensitiveHints: [...new Set([...fullDebug.policy.sensitiveHints, "element.text"])],
+      includedSensitiveFields: [
+        ...new Set([...fullDebug.policy.includedSensitiveFields, "element.text"]),
+      ],
+    };
+    expect(isUIAttachment(fullDebug)).toBe(true);
+
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    const contentParts = derived.attachment.element.contentParts ?? [];
+    expect(contentParts).toHaveLength(64);
+    expect(contentParts.map((part) => part.accessibleName?.slice(0, 8))).toEqual(
+      expectedPrefixes,
+    );
+    expect(JSON.stringify(contentParts)).not.toContain("sk-test");
+    const disclosedBytes = contentParts.reduce(
+      (total, part) => total +
+        new TextEncoder().encode(part.text ?? "").byteLength +
+        new TextEncoder().encode(part.accessibleName ?? "").byteLength,
+      0,
+    );
+    expect(disclosedBytes).toBeLessThanOrEqual(16_000);
+    expect(isUIAttachment(derived.attachment)).toBe(true);
+  });
+
+  it("keeps semantic wrapper continuations in exact DOM order", () => {
+    document.body.innerHTML = `
+      <article><a href="/recent">before <time>29m</time> after</a></article>
+    `;
+    const article = document.querySelector("article");
+    if (!(article instanceof HTMLElement)) throw new Error("article fixture missing");
+
+    const attachment = extractElementAttachment(article, { idSeed: "ordered-link" });
+
+    expect(attachment.element.contentParts).toEqual([
+      {
+        kind: "link",
+        tagName: "a",
+        role: "link",
+        text: "before",
+        accessibleName: "before",
+      },
+      {
+        kind: "time",
+        tagName: "time",
+        role: null,
+        text: "29m",
+        accessibleName: "29m",
+      },
+      {
+        kind: "link",
+        tagName: "a",
+        role: "link",
+        text: "after",
+        accessibleName: "after",
+      },
+    ]);
+  });
+
+  it("uses the shared node budget as a deterministic wide DOM prefix", () => {
+    const article = document.createElement("article");
+    const firstButton = document.createElement("button");
+    firstButton.type = "button";
+    firstButton.setAttribute("aria-label", "First action");
+    article.append(firstButton);
+    for (let index = 1; index < 512; index += 1) {
+      article.append(document.createElement("span"));
+    }
+
+    const attachment = extractElementAttachment(article, { idSeed: "wide-prefix" });
+
+    expect(attachment.element.contentParts).toContainEqual({
+      kind: "button",
+      tagName: "button",
+      role: "button",
+      text: null,
+      accessibleName: "First action",
+    });
+  });
+
+  it("keeps multibyte content parts valid against the public attachment schema", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "中".repeat(6_000);
+    article.append(paragraph);
+
+    const attachment = extractElementAttachment(article, { idSeed: "multibyte-post" });
+
+    expect(isUIAttachment(attachment)).toBe(true);
+    for (const part of attachment.element.contentParts ?? []) {
+      expect(new TextEncoder().encode(part.text ?? "").byteLength)
+        .toBeLessThanOrEqual(16_384);
+      expect(new TextEncoder().encode(part.accessibleName ?? "").byteLength)
+        .toBeLessThanOrEqual(16_384);
+    }
+  });
+
+  it("budgets content parts after Agent-safe redaction expands repeated short probes", () => {
+    const article = document.createElement("article");
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "a@b.co ".repeat(2_000);
+    article.append(paragraph);
+
+    const attachment = extractElementAttachment(article, {
+      idSeed: "redaction-expansion-post",
+    });
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "redaction-expansion-post-debug",
+      disclosureMode: "full_debug",
+    });
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+
+    for (const disclosedAttachment of [attachment, derived.attachment]) {
+      expect(isUIAttachment(disclosedAttachment)).toBe(true);
+      let totalBytes = 0;
+      for (const part of disclosedAttachment.element.contentParts ?? []) {
+        const textBytes = new TextEncoder().encode(part.text ?? "").byteLength;
+        const accessibleNameBytes = new TextEncoder()
+          .encode(part.accessibleName ?? "").byteLength;
+        expect(textBytes).toBeLessThanOrEqual(16_384);
+        expect(accessibleNameBytes).toBeLessThanOrEqual(16_384);
+        totalBytes += textBytes + accessibleNameBytes;
+      }
+      expect(totalBytes).toBeLessThanOrEqual(16_000);
+    }
+  });
+
+  it("applies Agent-safe redaction to structured content parts", () => {
+    document.body.innerHTML = `<article><span>Contact alice@example.com</span></article>`;
+    const article = document.querySelector("article");
+    if (!(article instanceof HTMLElement)) throw new Error("article fixture missing");
+    const fullDebug = extractElementAttachment(article, {
+      idSeed: "contact",
+      disclosureMode: "full_debug",
+    });
+
+    expect(JSON.stringify(fullDebug.element.contentParts)).toContain("alice@example.com");
+    const result = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(JSON.stringify(result.attachment.element.contentParts)).not.toContain(
+      "alice@example.com",
+    );
+    expect(result.attachment.policy.redactedFields).toContain("element.text");
   });
 
   it("caps selected DOM text before building disclosure, locators, and the attachment id", () => {
@@ -302,6 +861,107 @@ describe("extractElementAttachment", () => {
       sourceId: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
     });
     expect(JSON.stringify(attachment.sourceAnchor)).not.toContain("Settings.tsx");
+  });
+
+  it("prefers a complete valid callsite source pair over the ordinary source pair", () => {
+    const button = document.createElement("button");
+    button.setAttribute(
+      UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+      "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    );
+    button.setAttribute(
+      UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
+      "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    );
+    button.setAttribute(
+      "data-ui-attach-build-id",
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    button.setAttribute(
+      "data-ui-attach-source-id",
+      "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    );
+
+    expect(extractElementAttachment(button).sourceAnchor).toEqual({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.opaque-source-anchor",
+      buildId: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      sourceId: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    });
+  });
+
+  it.each([
+    [
+      "missing callsite source id",
+      "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      null,
+    ],
+    [
+      "missing callsite build id",
+      null,
+      "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    ],
+    [
+      "malformed callsite source id",
+      "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "short",
+    ],
+    [
+      "malformed callsite build id",
+      "short",
+      "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    ],
+  ])("falls back to the complete ordinary pair for a %s", (_name, buildId, sourceId) => {
+    const button = document.createElement("button");
+    if (buildId !== null) {
+      button.setAttribute(UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE, buildId);
+    }
+    if (sourceId !== null) {
+      button.setAttribute(UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE, sourceId);
+    }
+    button.setAttribute(
+      "data-ui-attach-build-id",
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    button.setAttribute(
+      "data-ui-attach-source-id",
+      "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    );
+
+    expect(extractElementAttachment(button).sourceAnchor).toEqual({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.opaque-source-anchor",
+      buildId: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      sourceId: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    });
+  });
+
+  it.each([
+    ["callsite build id with an ordinary source id", true],
+    ["ordinary build id with a callsite source id", false],
+  ])("does not combine a %s", (_name, useCallsiteBuild) => {
+    const button = document.createElement("button");
+    if (useCallsiteBuild) {
+      button.setAttribute(
+        UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      );
+      button.setAttribute(
+        "data-ui-attach-source-id",
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      );
+    } else {
+      button.setAttribute(
+        "data-ui-attach-build-id",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      );
+      button.setAttribute(
+        UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+      );
+    }
+
+    expect(extractElementAttachment(button).sourceAnchor).toBeUndefined();
   });
 
   it.each([
@@ -1502,6 +2162,163 @@ describe("extractElementAttachment", () => {
     expect(attachment.policy.sensitiveHints).toContain("context.nearbyText");
   });
 
+  it("redacts provider tokens from agent-safe DOM, aria, attributes, and locators", () => {
+    const githubToken = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+    const githubFineGrainedToken = "github_pat_11AAAABBBBCCCCDDDDEEEEFFFF";
+    const gitlabToken = "glpat-1234567890abcdefghijkl";
+    const slackToken = "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx";
+    const googleToken = `AIza${"A".repeat(35)}`;
+    const npmToken = "npm_1234567890abcdefghijklmnopqrstuvwxyz";
+    document.body.innerHTML = `
+      <main>
+        <section>
+          <button
+            id="${npmToken}"
+            data-testid="${githubToken}"
+            aria-label="${googleToken}"
+            title="${slackToken}"
+          >${gitlabToken}</button>
+          <p>${githubFineGrainedToken}</p>
+        </section>
+      </main>
+    `;
+    const button = document.querySelector("button");
+    if (!(button instanceof HTMLElement)) {
+      throw new Error("button fixture missing");
+    }
+    button.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 32,
+        top: 0,
+        left: 0,
+        right: 80,
+        bottom: 32,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const agentSafe = extractElementAttachment(button, {
+      now: () => new Date("2026-07-02T00:00:00.000Z"),
+      locationHref: "https://example.test/provider-tokens",
+      documentTitle: githubFineGrainedToken,
+    });
+    const serialized = JSON.stringify(agentSafe);
+
+    for (const token of [
+      githubToken,
+      githubFineGrainedToken,
+      gitlabToken,
+      slackToken,
+      googleToken,
+      npmToken,
+    ]) {
+      expect(serialized).not.toContain(token);
+    }
+    expect(agentSafe.element.text).toBe("[redacted:secret]");
+    expect(agentSafe.element.accessibleName).toBe("[redacted:secret]");
+    expect(agentSafe.context.nearbyText.join(" ")).toContain("[redacted:secret]");
+    expect(agentSafe.context.selectorHints.join(" ")).toContain("[redacted:secret]");
+    expect(agentSafe.locatorBundle.candidates.map((candidate) => candidate.value).join(" "))
+      .toContain("[redacted:secret]");
+    expect(agentSafe.policy.redactedFields).toEqual(
+      expect.arrayContaining([
+        "attachment.id",
+        "context.nearbyText",
+        "context.selectorHints",
+        "element.accessibleName",
+        "element.text",
+        "locatorBundle.candidates",
+        "source.title",
+      ]),
+    );
+  });
+
+  it("retains provider tokens only in explicitly requested full-debug output", () => {
+    const githubToken = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+    const githubFineGrainedToken = "github_pat_11AAAABBBBCCCCDDDDEEEEFFFF";
+    const gitlabToken = "glpat-1234567890abcdefghijkl";
+    const slackToken = "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx";
+    const googleToken = `AIza${"A".repeat(35)}`;
+    const npmToken = "npm_1234567890abcdefghijklmnopqrstuvwxyz";
+    document.body.innerHTML = `
+      <main>
+        <section>
+          <button
+            id="${npmToken}"
+            data-testid="${githubToken}"
+            aria-label="${googleToken}"
+            title="${slackToken}"
+          >${gitlabToken}</button>
+          <p>${githubFineGrainedToken}</p>
+        </section>
+      </main>
+    `;
+    const button = document.querySelector("button");
+    if (!(button instanceof HTMLElement)) {
+      throw new Error("button fixture missing");
+    }
+    button.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 32,
+        top: 0,
+        left: 0,
+        right: 80,
+        bottom: 32,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const fullDebug = extractElementAttachment(button, {
+      now: () => new Date("2026-07-02T00:00:00.000Z"),
+      locationHref: "https://example.test/provider-tokens",
+      documentTitle: githubFineGrainedToken,
+      disclosureMode: "full_debug",
+    });
+    const serialized = JSON.stringify(fullDebug);
+
+    for (const token of [
+      githubToken,
+      githubFineGrainedToken,
+      gitlabToken,
+      slackToken,
+      googleToken,
+      npmToken,
+    ]) {
+      expect(serialized).toContain(token);
+    }
+    expect(fullDebug.policy.redactedFields).toEqual([]);
+    expect(fullDebug.policy.includedSensitiveFields).toEqual(
+      expect.arrayContaining([
+        "attachment.id",
+        "context.nearbyText",
+        "context.selectorHints",
+        "element.accessibleName",
+        "element.text",
+        "locatorBundle.candidates",
+        "source.title",
+      ]),
+    );
+
+    const derived = deriveAttachmentDisclosure(fullDebug, "agent_safe");
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
+    const derivedSerialized = JSON.stringify(derived.attachment);
+    for (const token of [
+      githubToken,
+      githubFineGrainedToken,
+      gitlabToken,
+      slackToken,
+      googleToken,
+      npmToken,
+    ]) {
+      expect(derivedSerialized).not.toContain(token);
+    }
+  });
+
   it("audits common sensitive patterns retained by full debug disclosure", () => {
     const bearer = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
     document.body.innerHTML = `
@@ -2613,6 +3430,9 @@ describe("extractElementAttachment", () => {
       display: "sk-test-1234567890",
       color: "owner@example.com",
       backgroundColor: "token-secret-1234567890",
+      position: "relative",
+      padding: "owner@example.com",
+      fontSize: "14px",
     };
     const before = structuredClone(fullDebug);
 
@@ -2625,6 +3445,9 @@ describe("extractElementAttachment", () => {
         display: "[redacted:secret]",
         color: "[redacted:email]",
         backgroundColor: "[redacted:secret]",
+        position: "relative",
+        padding: "[redacted:email]",
+        fontSize: "14px",
       });
       expect(result.attachment.policy.redactedFields).toEqual(
         expect.arrayContaining([
@@ -2632,6 +3455,7 @@ describe("extractElementAttachment", () => {
           "style.display",
           "style.color",
           "style.backgroundColor",
+          "style.padding",
         ]),
       );
       expect(JSON.stringify(result.attachment)).not.toContain("owner@example.com");
@@ -2650,6 +3474,7 @@ describe("extractElementAttachment", () => {
           "style.display",
           "style.color",
           "style.backgroundColor",
+          "style.padding",
         ]),
       );
     }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import type { CaptureSessionFileV2 } from "@meanthis/hub-core";
 import type { OriginCaptureRecord } from "./capture-store";
 import {
   createCaptureRecord,
@@ -6,7 +7,9 @@ import {
 } from "../test/session-fixtures";
 import {
   derivePanelCopyScope,
+  derivePanelCurrentScope,
   derivePanelSessionPreview,
+  findPanelSessionItem,
   formatSessionItemCount,
   groupPanelSessionRows,
   getSourceExportWarning,
@@ -17,6 +20,23 @@ import {
 } from "./panel-session-model";
 
 describe("panel session model", () => {
+  test("keeps the strict V1 fixture field-free and preserves V2 identity metadata", () => {
+    const record = createCaptureRecord("save", "Save changes", "agent_safe");
+    const legacyFile = createSessionFile([record]);
+    const currentFile = createV2SessionFile([record]);
+    const before = structuredClone(currentFile);
+
+    expect(legacyFile.schemaVersion).toBe("0.1.0");
+    expect(Object.hasOwn(legacyFile.session.attachments[0]!, "annotationId")).toBe(false);
+    expect(Object.hasOwn(legacyFile.session.attachments[0]!, "updatedAt")).toBe(false);
+    expect(summarizePanelSessionRows(currentFile, "att_save", "agent_safe")).toHaveLength(1);
+    expect(findPanelSessionItem(currentFile, "att_save")).toMatchObject({
+      annotationId: "annotation:1",
+      updatedAt: record.capturedAt,
+    });
+    expect(currentFile).toEqual(before);
+  });
+
   test("summarizes rows in capture order with stable labels, source modes, and last item selected", () => {
     const file = createSessionFile([
       createCaptureRecord("save", "Save changes", "agent_safe"),
@@ -210,6 +230,49 @@ describe("panel session model", () => {
     });
     expect(derivePanelCopyScope(file, "att_stale", activePage)).toBeNull();
     expect(derivePanelCopyScope(file, "att_cancel", null)).toBeNull();
+  });
+
+  test("derives the exact current frame scope independently of a stale selected item", () => {
+    const topSave = { ...createCaptureRecord("top-save", "Top save"), tabId: 7, frameId: 0 };
+    topSave.pageUrl = "https://app.example.test/reference";
+    const topCancel = { ...createCaptureRecord("top-cancel", "Top cancel"), tabId: 7, frameId: 0 };
+    topCancel.pageUrl = "https://app.example.test/reference";
+    const childOne = { ...createCaptureRecord("child-one", "Child one"), tabId: 7, frameId: 3 };
+    childOne.pageUrl = "https://app.example.test/reference";
+    const childTwo = { ...createCaptureRecord("child-two", "Child two"), tabId: 7, frameId: 3 };
+    childTwo.pageUrl = "https://app.example.test/reference";
+    const otherRoute = { ...createCaptureRecord("other-route", "Other route"), tabId: 7, frameId: 3 };
+    otherRoute.pageUrl = "https://app.example.test/other";
+    const file = createSessionFile([topSave, topCancel, childOne, childTwo, otherRoute]);
+
+    expect(derivePanelCurrentScope(file, "att_child-two", {
+      tabId: 7,
+      frameId: 0,
+      origin: "https://app.example.test",
+      pathname: "/reference",
+    })).toEqual({
+      itemIds: ["att_top-save", "att_top-cancel"],
+      selectedItemId: "att_top-cancel",
+    });
+    expect(derivePanelCurrentScope(file, "att_top-save", {
+      tabId: 7,
+      frameId: 3,
+      origin: "https://app.example.test",
+      pathname: "/reference",
+    })).toEqual({
+      itemIds: ["att_child-one", "att_child-two"],
+      selectedItemId: "att_child-two",
+    });
+    expect(derivePanelCurrentScope(file, "att_top-save", {
+      tabId: 7,
+      frameId: 5,
+      documentId: "replacement-child-document",
+      origin: "https://app.example.test",
+      pathname: "/reference",
+    }, new Set(["att_child-one", "att_child-two"]))).toEqual({
+      itemIds: ["att_child-one", "att_child-two"],
+      selectedItemId: "att_child-two",
+    });
   });
 
   test("treats rechecked route items as current without rewriting capture-time tab and frame ids", () => {
@@ -437,3 +500,19 @@ describe("panel session model", () => {
     expect(fullDebug.attachment.element.accessibleName).toBe("Invite ada@example.com");
   });
 });
+
+function createV2SessionFile(records: OriginCaptureRecord[]): CaptureSessionFileV2 {
+  const legacyFile = createSessionFile(records);
+  return {
+    ...legacyFile,
+    schemaVersion: "0.2.0",
+    session: {
+      ...legacyFile.session,
+      attachments: legacyFile.session.attachments.map((item, index) => ({
+        ...item,
+        annotationId: `annotation:${index + 1}`,
+        updatedAt: item.createdAt,
+      })),
+    },
+  };
+}

@@ -557,6 +557,11 @@ describe("CaptureHub", () => {
       framePathname: "/reference",
       dominantViewport: false,
     };
+    save.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+    };
     hub.addAttachment(
       session.id,
       save,
@@ -674,6 +679,7 @@ describe("CaptureHub", () => {
       },
       locatorBundle: saveView.record.attachment.locatorBundle,
       sourceAnchor: saveView.record.attachment.sourceAnchor,
+      selectionPoint: saveView.record.attachment.selectionPoint,
       boundary: saveView.record.attachment.boundary,
       disclosureAudit: {
         redactedFields: saveView.record.attachment.policy.redactedFields,

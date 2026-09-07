@@ -1,13 +1,19 @@
 import {
   UI_ATTACH_LOCAL_BRIDGE_CAPABILITIES_PATH,
   UI_ATTACH_LOCAL_BRIDGE_CONNECTION_REQUEST_PATH,
+  UI_ATTACH_LOCAL_BRIDGE_HEARTBEAT_PATH,
   UI_ATTACH_LOCAL_BRIDGE_ORIGIN,
+  UI_ATTACH_LOCAL_BRIDGE_READ_ACKNOWLEDGEMENT_PATH,
   UI_ATTACH_LOCAL_BRIDGE_SNAPSHOT_PATH,
+  UI_ATTACH_LOCAL_BRIDGE_SHARED_CAPTURE_PATH,
   UI_ATTACH_LOCAL_BRIDGE_STRUCTURED_CAPTURE_CAPABILITIES_PATH,
   createLocalBridgeApprovalProofMessage,
+  createLocalBridgeConnectionCode,
   isLocalBridgeCapabilities,
   isLocalBridgeSnapshot,
   isLocalBridgeStructuredCaptureCapabilities,
+  parseLocalBridgeReadAcknowledgement,
+  parseLocalBridgeConnectionCode,
   type LocalBridgeApprovalMode,
   type LocalBridgeActivityV1,
   type LocalBridgeCaptureV1,
@@ -15,6 +21,15 @@ import {
   type LocalBridgePageV1,
 } from "@meanthis/schema";
 import type { ExtensionStorageArea } from "./capture-store";
+import {
+  createAnnotationLifecycleControlTransport,
+  type AnnotationLifecycleOperationApprovalV1,
+  type AnnotationLifecycleOperationClaimV1,
+  type AnnotationLifecycleControlAuthorityV1,
+  type AnnotationLifecycleOperationReferenceV1,
+  type AnnotationLifecycleOperationViewV1,
+} from "./annotation-lifecycle-control-client";
+import type { AnnotationLifecycleOperationReceiptV1 } from "@meanthis/schema";
 
 export const LOCAL_AGENT_BRIDGE_INSTALLATION_STORAGE_KEY =
   "ui-attach.local-agent-bridge.installation.v1";
@@ -44,8 +59,30 @@ interface LocalAgentBridgeSessionState {
   sequence?: number;
   pending?: LocalAgentBridgePendingRequest;
   latestSnapshot?: LocalAgentBridgePublishInput;
-  snapshotObservationCapability?: "v1" | "none";
-  structuredCaptureCapability?: "v1" | "none";
+  panelSnapshot?: LocalAgentBridgePublishInput;
+  sessionSnapshot?: LocalAgentBridgePublishInput;
+  activeSnapshotSource?: "panel" | "session" | "unknown";
+  publishedSnapshot?: LocalAgentBridgePublishInput;
+  clearPending?: true;
+  snapshotObservationCapability?: LocalAgentBridgeCapabilityState;
+  structuredCaptureCapability?: LocalAgentBridgeCapabilityState;
+  /** One bounded v2 re-probe is allowed when an older v1 owner meets a V3 capture. */
+  structuredCaptureV2UpgradeProbeUsed?: true;
+  /** One bounded v3 re-probe is allowed when a v1/v2 owner meets replay diagnostics. */
+  structuredCaptureV3UpgradeProbeUsed?: true;
+}
+
+type LocalAgentBridgeStructuredCaptureVersion = "v3" | "v2" | "v1";
+type LocalAgentBridgeCapabilityState = LocalAgentBridgeStructuredCaptureVersion | "none" | "unknown";
+
+interface EffectivePublishInput {
+  input: LocalAgentBridgePublishInput;
+  complete: boolean;
+}
+
+interface PublishInternalResult {
+  status: "published" | "unchanged" | "failed";
+  complete: boolean;
 }
 
 export interface LocalAgentBridgeStatus {
@@ -55,7 +92,18 @@ export interface LocalAgentBridgeStatus {
   approvalMode: LocalBridgeApprovalMode | null;
   requestText: string | null;
   expiresAt: string | null;
+  /** Exact target count from the last snapshot acknowledged by the local bridge. */
+  sharedTargetCount: number | null;
+  /** Sequence of that acknowledged snapshot, or null before the first publish. */
+  sharedSequence: number | null;
+  /** Ephemeral, authenticated read acknowledgement for the currently published snapshot. */
+  readAcknowledgementState?: LocalAgentBridgeReadAcknowledgementState;
 }
+
+export type LocalAgentBridgeReadAcknowledgementState =
+  | "waiting"
+  | "current"
+  | "unavailable";
 
 export interface LocalAgentBridgePublishInput {
   page: LocalBridgePageV1 | null;
@@ -90,9 +138,25 @@ export interface LocalAgentBridgeClient {
   readStatus(): Promise<LocalAgentBridgeStatus>;
   createConnectionRequest(approvalMode: LocalBridgeApprovalMode): Promise<LocalAgentBridgeStatus>;
   refreshConnection(): Promise<LocalAgentBridgeStatus>;
-  refreshConnectionAndPublish(): Promise<LocalAgentBridgeStatus>;
+  refreshConnectionAndHeartbeat(): Promise<LocalAgentBridgeStatus>;
   publish(input: LocalAgentBridgePublishInput): Promise<boolean>;
+  publishSessionContext(input: LocalAgentBridgePublishInput): Promise<boolean>;
+  clearSessionContext(): Promise<boolean>;
+  clearPanelContext(): Promise<boolean>;
+  clearSharedCapture?(): Promise<boolean>;
   disconnect(): Promise<void>;
+  repairConnection?(): Promise<void>;
+  annotationLifecycleControl?: {
+    readAuthority(): Promise<AnnotationLifecycleControlAuthorityV1>;
+    readNext(): Promise<AnnotationLifecycleOperationViewV1 | null>;
+    claim(reference: AnnotationLifecycleOperationReferenceV1): Promise<AnnotationLifecycleOperationClaimV1>;
+    reject(reference: AnnotationLifecycleOperationReferenceV1): Promise<AnnotationLifecycleOperationViewV1>;
+    finalize(
+      reference: AnnotationLifecycleOperationReferenceV1,
+      approval: AnnotationLifecycleOperationApprovalV1,
+      receipt: AnnotationLifecycleOperationReceiptV1,
+    ): Promise<AnnotationLifecycleOperationViewV1>;
+  };
 }
 
 export interface LocalAgentBridgeDependencies {
@@ -106,11 +170,15 @@ export interface LocalAgentBridgeDependencies {
   randomBytes(size: number): Uint8Array;
   now(): Date;
   withSessionLock<T>(operation: () => Promise<T>): Promise<T>;
+  ensureOwnersReady?(): Promise<void>;
+  repairOwners?(): Promise<void>;
 }
 
 export interface BrowserLocalAgentBridgeClientOptions {
   requestPermission?(): Promise<boolean>;
   withSessionLock?<T>(operation: () => Promise<T>): Promise<T>;
+  ensureOwnersReady?(): Promise<void>;
+  repairOwners?(): Promise<void>;
 }
 
 export function createBrowserLocalAgentBridgeClient(
@@ -135,6 +203,8 @@ export function createBrowserLocalAgentBridgeClient(
       { mode: "exclusive" },
       operation,
     )),
+    ensureOwnersReady: options.ensureOwnersReady,
+    repairOwners: options.repairOwners,
   });
 }
 
@@ -142,6 +212,9 @@ export function createLocalAgentBridgeClient(
   dependencies: LocalAgentBridgeDependencies,
 ): LocalAgentBridgeClient {
   let operationTail: Promise<void> = Promise.resolve();
+  const annotationLifecycleTransport = createAnnotationLifecycleControlTransport({
+    fetch: dependencies.fetch,
+  });
 
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const run = () => dependencies.withSessionLock(operation);
@@ -186,7 +259,7 @@ export function createLocalAgentBridgeClient(
   async function readSessionState(): Promise<LocalAgentBridgeSessionState | null> {
     const entries = await dependencies.sessionStorage.get(LOCAL_AGENT_BRIDGE_SESSION_STORAGE_KEY);
     const value = entries[LOCAL_AGENT_BRIDGE_SESSION_STORAGE_KEY];
-    return isSessionState(value) ? value : null;
+    return isSessionState(value) ? normalizeLegacySnapshotState(value) : null;
   }
 
   async function ensureSessionState(): Promise<LocalAgentBridgeSessionState> {
@@ -206,6 +279,7 @@ export function createLocalAgentBridgeClient(
     state: LocalAgentBridgeSessionState,
     rotateBrowserSessionId = false,
     preserveTrust = false,
+    preserveClearPending = true,
   ): Promise<void> {
     const browserSessionId = rotateBrowserSessionId
       ? dependencies.randomUUID()
@@ -218,6 +292,7 @@ export function createLocalAgentBridgeClient(
       ...(preserveTrust && !rotateBrowserSessionId && state.trustKey
         ? { trustKey: state.trustKey }
         : {}),
+      ...(preserveClearPending && state.clearPending ? { clearPending: true as const } : {}),
     });
   }
 
@@ -278,6 +353,12 @@ export function createLocalAgentBridgeClient(
       sequence: 0,
       ...(parsed.sessionTrustKey ? { trustKey: parsed.sessionTrustKey } : {}),
       ...(state.latestSnapshot ? { latestSnapshot: state.latestSnapshot } : {}),
+      ...(state.panelSnapshot ? { panelSnapshot: state.panelSnapshot } : {}),
+      ...(state.sessionSnapshot ? { sessionSnapshot: state.sessionSnapshot } : {}),
+      ...(state.activeSnapshotSource
+        ? { activeSnapshotSource: state.activeSnapshotSource }
+        : {}),
+      ...(state.clearPending ? { clearPending: true } : {}),
     };
     await saveSessionState(connected);
     return toStatus(connected);
@@ -286,29 +367,37 @@ export function createLocalAgentBridgeClient(
   async function publishInternal(
     state: LocalAgentBridgeSessionState,
     input: LocalAgentBridgePublishInput,
-  ): Promise<boolean> {
-    if (!state.instanceId || !state.token) return false;
+  ): Promise<PublishInternalResult> {
+    if (!state.instanceId || !state.token) return { status: "failed", complete: false };
     const capabilities = await readSnapshotCapabilities(state, {
       observations: Boolean(input.observations),
       structuredCapture: Boolean(input.capture),
+      requiredStructuredCapture: requiredStructuredCaptureVersion(input.capture),
     });
+    const effective = toEffectivePublishInput(input, capabilities);
+    const current = await readSessionState();
+    if (
+      !current?.instanceId ||
+      current.instanceId !== state.instanceId ||
+      current.token !== state.token ||
+      current.clearPending
+    ) {
+      return { status: "failed", complete: false };
+    }
+    if (
+      current.publishedSnapshot &&
+      samePublishInput(current.publishedSnapshot, effective.input)
+    ) {
+      return { status: "unchanged", complete: effective.complete };
+    }
     const snapshot = {
       schemaVersion: "0.1.0",
       kind: "ui-attach.local-bridge-snapshot",
-      sequence: (state.sequence ?? 0) + 1,
+      sequence: (current.sequence ?? 0) + 1,
       publishedAt: dependencies.now().toISOString(),
-      page: input.page,
-      attachmentCount: input.attachmentCount,
-      agentCopy: input.agentCopy,
-      ...(capabilities.structuredCapture && input.capture
-        ? { capture: input.capture }
-        : {}),
-      ...(capabilities.observations && input.observations
-        ? { observations: input.observations }
-        : {}),
-      ...(input.activity ? { activity: input.activity } : {}),
+      ...effective.input,
     };
-    if (!isLocalBridgeSnapshot(snapshot)) return false;
+    if (!isLocalBridgeSnapshot(snapshot)) return { status: "failed", complete: false };
     try {
       const response = await dependencies.fetch(
         `${UI_ATTACH_LOCAL_BRIDGE_ORIGIN}${UI_ATTACH_LOCAL_BRIDGE_SNAPSHOT_PATH}`,
@@ -332,49 +421,242 @@ export function createLocalAgentBridgeClient(
           await clearSessionCredentials(latest, false, true);
         }
         await dependencies.removePermission().catch(() => false);
-        return false;
+        return { status: "failed", complete: false };
       }
-      if (!response.ok) return false;
+      if (!response.ok) return { status: "failed", complete: false };
       const latest = await readSessionState();
       if (
         !latest?.instanceId ||
         latest.instanceId !== state.instanceId ||
         latest.token !== state.token
       ) {
-        return false;
+        return { status: "failed", complete: false };
       }
       await saveSessionState({
         ...latest,
         sequence: Math.max(latest.sequence ?? 0, snapshot.sequence),
+        publishedSnapshot: structuredClone(effective.input),
       });
+      return { status: "published", complete: effective.complete };
+    } catch {
+      return { status: "failed", complete: false };
+    }
+  }
+
+  async function heartbeatInternal(state: LocalAgentBridgeSessionState): Promise<boolean> {
+    if (!state.instanceId || !state.token) return false;
+    try {
+      const response = await dependencies.fetch(
+        `${UI_ATTACH_LOCAL_BRIDGE_ORIGIN}${UI_ATTACH_LOCAL_BRIDGE_HEARTBEAT_PATH}`,
+        {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(LOCAL_AGENT_BRIDGE_REQUEST_TIMEOUT_MS),
+          headers: { authorization: `Bearer ${state.token}` },
+        },
+      );
+      if (response.status === 401) {
+        const latest = await readSessionState();
+        if (latest?.instanceId === state.instanceId && latest.token === state.token) {
+          await clearSessionCredentials(latest, false, true);
+        }
+        await dependencies.removePermission().catch(() => false);
+        return false;
+      }
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function readAcknowledgementState(
+    state: LocalAgentBridgeSessionState | null,
+  ): Promise<LocalAgentBridgeStatus> {
+    const base = toStatus(state);
+    // A bridge without a published structured capture cannot have a matching
+    // acknowledgement. Keep this status local and avoid an unnecessary probe.
+    if (
+      !state?.instanceId ||
+      !state.token ||
+      !state.publishedSnapshot?.capture
+    ) {
+      return base;
+    }
+
+    let response: Response;
+    try {
+      response = await dependencies.fetch(
+        `${UI_ATTACH_LOCAL_BRIDGE_ORIGIN}${UI_ATTACH_LOCAL_BRIDGE_READ_ACKNOWLEDGEMENT_PATH}`,
+        {
+          method: "GET",
+          redirect: "error",
+          signal: AbortSignal.timeout(LOCAL_AGENT_BRIDGE_REQUEST_TIMEOUT_MS),
+          headers: {
+            authorization: `Bearer ${state.token}`,
+            "content-type": "application/json",
+          },
+        },
+      );
+    } catch {
+      return { ...base, readAcknowledgementState: "unavailable" };
+    }
+
+    if (!response || typeof response.status !== "number" || typeof response.ok !== "boolean") {
+      return { ...base, readAcknowledgementState: "unavailable" };
+    }
+    if (response.status === 401) {
+      const latest = await readSessionState();
+      if (latest?.instanceId === state.instanceId && latest.token === state.token) {
+        await clearSessionCredentials(latest, false, true);
+      }
+      await dependencies.removePermission().catch(() => false);
+      return disconnectedStatus();
+    }
+    if (!response.ok) {
+      return { ...base, readAcknowledgementState: "unavailable" };
+    }
+
+    const bodyResult = await readJsonResult(response);
+    if (!bodyResult.ok) {
+      return { ...base, readAcknowledgementState: "unavailable" };
+    }
+    if (bodyResult.value === null) {
+      return { ...base, readAcknowledgementState: "waiting" };
+    }
+    const acknowledgement = parseLocalBridgeReadAcknowledgement(bodyResult.value);
+    if (!acknowledgement) {
+      return { ...base, readAcknowledgementState: "unavailable" };
+    }
+
+    // Re-read session state after the network round trip so a snapshot
+    // published while the GET was in flight cannot be marked current.
+    const latest = await readSessionState();
+    const latestBase = toStatus(latest);
+    if (
+      !latest?.instanceId ||
+      latest.instanceId !== state.instanceId ||
+      latest.token !== state.token ||
+      !latest.publishedSnapshot?.capture
+    ) {
+      return latestBase;
+    }
+    const current = acknowledgement.instanceId === latest.instanceId &&
+      acknowledgement.captureId === latest.publishedSnapshot.capture.captureId &&
+      acknowledgement.snapshotSequence === latest.sequence;
+    return {
+      ...latestBase,
+      // A valid acknowledgement for an older/newer snapshot is not current.
+      // The bridge may return one transiently while the extension is catching
+      // up, so expose the safe waiting state rather than treating it as an
+      // unavailable transport.
+      readAcknowledgementState: current ? "current" : "waiting",
+    };
+  }
+
+  async function clearSharedCaptureInternal(
+    state: LocalAgentBridgeSessionState,
+  ): Promise<boolean> {
+    if (!state.clearPending || !state.instanceId || !state.token) return false;
+    try {
+      const response = await dependencies.fetch(
+        `${UI_ATTACH_LOCAL_BRIDGE_ORIGIN}${UI_ATTACH_LOCAL_BRIDGE_SHARED_CAPTURE_PATH}`,
+        {
+          method: "DELETE",
+          redirect: "error",
+          signal: AbortSignal.timeout(LOCAL_AGENT_BRIDGE_REQUEST_TIMEOUT_MS),
+          headers: { authorization: `Bearer ${state.token}` },
+        },
+      );
+      if (response.status === 401) {
+        const latest = await readSessionState();
+        if (latest?.instanceId === state.instanceId && latest.token === state.token) {
+          await clearSessionCredentials(latest, false, true);
+        }
+        await dependencies.removePermission().catch(() => false);
+        return false;
+      }
+      if (!response.ok) return false;
+      const latest = await readSessionState();
+      if (latest?.instanceId !== state.instanceId || latest.token !== state.token) return false;
+      const {
+        latestSnapshot: _latestSnapshot,
+        panelSnapshot: _panelSnapshot,
+        sessionSnapshot: _sessionSnapshot,
+        activeSnapshotSource: _activeSnapshotSource,
+        publishedSnapshot: _publishedSnapshot,
+        clearPending: _clearPending,
+        ...cleared
+      } = latest;
+      await saveSessionState(cleared);
       return true;
     } catch {
       return false;
     }
   }
 
+  async function refreshConnectionAndPendingClearInternal(): Promise<LocalAgentBridgeStatus> {
+    await refreshConnectionInternal();
+    const state = await readSessionState();
+    if (state?.clearPending && state.instanceId && state.token) {
+      await clearSharedCaptureInternal(state);
+    }
+    return readAcknowledgementState(await readSessionState());
+  }
+
   async function readSnapshotCapabilities(
     state: LocalAgentBridgeSessionState,
-    requested: { observations: boolean; structuredCapture: boolean },
-  ): Promise<{ observations: boolean; structuredCapture: boolean }> {
+    requested: {
+      observations: boolean;
+      structuredCapture: boolean;
+      requiredStructuredCapture: LocalAgentBridgeStructuredCaptureVersion;
+    },
+  ): Promise<{
+    observations: LocalAgentBridgeCapabilityState;
+    structuredCapture: LocalAgentBridgeCapabilityState;
+  }> {
     const observations = requested.observations
       ? await readSnapshotCapability(state, "observations")
-      : false;
+      : "none";
     const latest = await readSessionState();
     const structuredCapture = requested.structuredCapture
-      ? await readSnapshotCapability(latest ?? state, "structuredCapture")
-      : false;
+      ? await readSnapshotCapability(
+        latest ?? state,
+        "structuredCapture",
+        requested.requiredStructuredCapture,
+      )
+      : "none";
     return { observations, structuredCapture };
   }
 
   async function readSnapshotCapability(
     state: LocalAgentBridgeSessionState,
     capability: "observations" | "structuredCapture",
-  ): Promise<boolean> {
+    requiredStructuredCapture: LocalAgentBridgeStructuredCaptureVersion = "v1",
+  ): Promise<LocalAgentBridgeCapabilityState> {
     const cached = capability === "observations"
       ? state.snapshotObservationCapability
       : state.structuredCaptureCapability;
-    if (cached !== undefined) return cached === "v1";
+    if (capability === "observations") {
+      if (cached === "v1" || cached === "none") return cached;
+    } else {
+      const upgradeProbeUsed = requiredStructuredCapture === "v3"
+        ? state.structuredCaptureV3UpgradeProbeUsed
+        : requiredStructuredCapture === "v2"
+          ? state.structuredCaptureV2UpgradeProbeUsed
+          : false;
+      // Each protocol generation gets one connection-scoped upgrade probe.
+      // A timeout or lower-version response must not cause an unbounded probe
+      // loop on every subsequent snapshot.
+      if (cached === "none") return cached;
+      if (
+        isStructuredCaptureVersion(cached) &&
+        supportsStructuredCapture(cached, requiredStructuredCapture)
+      ) return cached;
+      if (requiredStructuredCapture !== "v1" && cached !== undefined) {
+        if (upgradeProbeUsed) return cached ?? "unknown";
+        await markStructuredCaptureUpgradeProbeUsed(state, requiredStructuredCapture);
+      }
+    }
     const path = capability === "observations"
       ? UI_ATTACH_LOCAL_BRIDGE_CAPABILITIES_PATH
       : UI_ATTACH_LOCAL_BRIDGE_STRUCTURED_CAPTURE_CAPABILITIES_PATH;
@@ -393,16 +675,57 @@ export function createLocalAgentBridgeClient(
         },
       );
     } catch {
-      return false;
+      if (capability === "structuredCapture" &&
+        requiredStructuredCapture !== "v1" && cached === undefined) {
+        await markStructuredCaptureUpgradeProbeUsed(state, requiredStructuredCapture);
+      }
+      await saveSnapshotCapability(state, capability, "unknown");
+      return "unknown";
     }
     const body = await readJson(response);
-    const supported = response.ok && (
-      capability === "observations"
-        ? isLocalBridgeCapabilities(body)
-        : isLocalBridgeStructuredCaptureCapabilities(body)
-    );
-    const negotiated = supported ? "v1" as const : response.status === 404 ? "none" as const : null;
-    if (negotiated === null) return false;
+    const negotiated: LocalAgentBridgeCapabilityState = capability === "observations"
+      ? response.ok && isLocalBridgeCapabilities(body)
+        ? "v1"
+        : response.status === 404
+          ? "none"
+          : "unknown"
+      : response.ok && isLocalBridgeStructuredCaptureCapabilities(body)
+        ? body.structuredCapture
+        : response.status === 404
+          ? "none"
+          : "unknown";
+    if (capability === "structuredCapture" &&
+      requiredStructuredCapture !== "v1" && cached === undefined && negotiated === "unknown") {
+      await markStructuredCaptureUpgradeProbeUsed(state, requiredStructuredCapture);
+    }
+    await saveSnapshotCapability(state, capability, negotiated);
+    return negotiated;
+  }
+
+  async function markStructuredCaptureUpgradeProbeUsed(
+    state: LocalAgentBridgeSessionState,
+    requiredVersion: LocalAgentBridgeStructuredCaptureVersion,
+  ): Promise<void> {
+    if (requiredVersion === "v1") return;
+    const latest = await readSessionState();
+    const key = requiredVersion === "v3"
+      ? "structuredCaptureV3UpgradeProbeUsed"
+      : "structuredCaptureV2UpgradeProbeUsed";
+    if (
+      latest !== null &&
+      latest.instanceId === state.instanceId &&
+      latest.token === state.token &&
+      !latest[key]
+    ) {
+      await saveSessionState({ ...latest, [key]: true });
+    }
+  }
+
+  async function saveSnapshotCapability(
+    state: LocalAgentBridgeSessionState,
+    capability: "observations" | "structuredCapture",
+    negotiated: LocalAgentBridgeCapabilityState,
+  ): Promise<void> {
     const latest = await readSessionState();
     if (
       latest !== null &&
@@ -416,13 +739,71 @@ export function createLocalAgentBridgeClient(
           : { structuredCaptureCapability: negotiated }),
       });
     }
-    return negotiated === "v1";
   }
 
   return {
+    annotationLifecycleControl: {
+      readAuthority() {
+        return enqueue(async () => {
+          const state = await readSessionState();
+          if (!state?.instanceId || !state.token || state.clearPending) {
+            throw new Error("Local bridge control connection is unavailable.");
+          }
+          return await annotationLifecycleTransport.readAuthority(state.token);
+        });
+      },
+      readNext() {
+        return enqueue(async () => {
+          const state = await readSessionState();
+          if (!state?.instanceId || !state.token || state.clearPending) return null;
+          return await annotationLifecycleTransport.readNext(state.token);
+        });
+      },
+
+      claim(reference) {
+        return enqueue(async () => {
+          const state = await readSessionState();
+          if (!state?.instanceId || !state.token || state.clearPending) {
+            throw new Error("Local bridge control connection is unavailable.");
+          }
+          return await annotationLifecycleTransport.claim(state.token, reference);
+        });
+      },
+
+      reject(reference) {
+        return enqueue(async () => {
+          const state = await readSessionState();
+          if (!state?.instanceId || !state.token || state.clearPending) {
+            throw new Error("Local bridge control connection is unavailable.");
+          }
+          return await annotationLifecycleTransport.reject(state.token, reference);
+        });
+      },
+
+      finalize(reference, approval, receipt) {
+        return enqueue(async () => {
+          const state = await readSessionState();
+          if (!state?.instanceId || !state.token || state.clearPending) {
+            throw new Error("Local bridge control connection is unavailable.");
+          }
+          return await annotationLifecycleTransport.finalize(
+            state.token,
+            reference,
+            approval,
+            receipt,
+          );
+        });
+      },
+    },
+
+    async repairConnection() {
+      if (!dependencies.repairOwners) throw new Error("Local companion repair is unavailable.");
+      await dependencies.repairOwners();
+    },
+
     async readStatus() {
       await readPersistentState();
-      return toStatus(await readSessionState());
+      return readAcknowledgementState(await readSessionState());
     },
 
     createConnectionRequest(approvalMode) {
@@ -433,10 +814,31 @@ export function createLocalAgentBridgeClient(
         if (!await dependencies.requestPermission()) {
           throw new Error("Loopback access was not granted.");
         }
+        try {
+          await dependencies.ensureOwnersReady?.();
+        } catch (error) {
+          await dependencies.removePermission().catch(() => false);
+          throw error;
+        }
         const persistent = await ensurePersistentState();
         let session = await ensureSessionState();
         if (session.instanceId && session.token) return toStatus(session);
-        if (session.pending) return toStatus(session);
+        if (
+          session.pending &&
+          dependencies.now().getTime() >= Date.parse(session.pending.expiresAt)
+        ) {
+          const { pending: _expiredPending, ...remainingSession } = session;
+          await saveSessionState(remainingSession);
+          session = remainingSession;
+        }
+        if (session.pending) {
+          if (session.pending.approvalMode !== approvalMode) {
+            throw new Error(
+              "A connection invitation with a different approval mode is already pending.",
+            );
+          }
+          return toStatus(session);
+        }
         if (approvalMode === "ask" && session.trustKey) {
           await clearSessionCredentials(session, true);
           session = (await readSessionState()) ?? await ensureSessionState();
@@ -498,21 +900,32 @@ export function createLocalAgentBridgeClient(
               requestId,
               approvalKey,
               approvalMode,
-              parsed.expiresAt,
             ),
           };
           await saveSessionState({
             browserSessionId: session.browserSessionId,
             ...(session.trustKey ? { trustKey: session.trustKey } : {}),
             ...(session.latestSnapshot ? { latestSnapshot: session.latestSnapshot } : {}),
+            ...(session.panelSnapshot ? { panelSnapshot: session.panelSnapshot } : {}),
+            ...(session.sessionSnapshot ? { sessionSnapshot: session.sessionSnapshot } : {}),
+            ...(session.activeSnapshotSource
+              ? { activeSnapshotSource: session.activeSnapshotSource }
+              : {}),
+            ...(session.clearPending ? { clearPending: true } : {}),
             pending,
           });
           return parsed.status === "approved"
-            ? refreshConnectionInternal()
+            ? refreshConnectionAndPendingClearInternal()
             : toStatus({
                 browserSessionId: session.browserSessionId,
                 ...(session.trustKey ? { trustKey: session.trustKey } : {}),
                 ...(session.latestSnapshot ? { latestSnapshot: session.latestSnapshot } : {}),
+                ...(session.panelSnapshot ? { panelSnapshot: session.panelSnapshot } : {}),
+                ...(session.sessionSnapshot ? { sessionSnapshot: session.sessionSnapshot } : {}),
+                ...(session.activeSnapshotSource
+                  ? { activeSnapshotSource: session.activeSnapshotSource }
+                  : {}),
+                ...(session.clearPending ? { clearPending: true } : {}),
                 pending,
               });
         } catch (error) {
@@ -524,23 +937,35 @@ export function createLocalAgentBridgeClient(
     },
 
     refreshConnection() {
-      return enqueue(refreshConnectionInternal);
+      return enqueue(refreshConnectionAndPendingClearInternal);
     },
 
-    refreshConnectionAndPublish() {
+    refreshConnectionAndHeartbeat() {
       return enqueue(async () => {
         await refreshConnectionInternal();
         const state = await readSessionState();
         if (state?.instanceId && state.token) {
-          await publishInternal(state, state.latestSnapshot
-            ? downgradeCachedSnapshot(state.latestSnapshot)
-            : {
-            page: null,
-            attachmentCount: 0,
-            agentCopy: null,
-          });
+          if (state.clearPending) {
+            await clearSharedCaptureInternal(state);
+          } else if (
+            state.latestSnapshot &&
+            state.publishedSnapshot &&
+            samePublishInput(state.latestSnapshot, state.publishedSnapshot)
+          ) {
+            await heartbeatInternal(state);
+          } else if (state.latestSnapshot) {
+            const result = await publishInternal(
+              state,
+              downgradeCachedSnapshot(state.latestSnapshot),
+            );
+            if (result.status === "unchanged") {
+              await heartbeatInternal((await readSessionState()) ?? state);
+            }
+          } else {
+            await heartbeatInternal(state);
+          }
         }
-        return toStatus(await readSessionState());
+        return readAcknowledgementState(await readSessionState());
       });
     },
 
@@ -548,13 +973,146 @@ export function createLocalAgentBridgeClient(
       return enqueue(async () => {
         const state = await readSessionState();
         if (!state?.pending && (!state?.instanceId || !state.token)) return false;
+        if (state.clearPending) return false;
         if (!isPublishInput(input)) return false;
+        const merged = mergePanelContextPublishInput(state.sessionSnapshot, input);
+        if (!isPublishInput(merged)) return false;
         const latestState = {
           ...state,
-          latestSnapshot: structuredClone(input),
+          latestSnapshot: structuredClone(merged),
+          panelSnapshot: structuredClone(merged),
+          activeSnapshotSource: "panel" as const,
         };
         await saveSessionState(latestState);
-        return publishInternal(latestState, input);
+        const result = await publishInternal(latestState, merged);
+        return result.status !== "failed" && result.complete;
+      });
+    },
+
+    publishSessionContext(input) {
+      return enqueue(async () => {
+        const state = await readSessionState();
+        if (!state?.pending && (!state?.instanceId || !state.token)) return false;
+        if (state.clearPending || !isPublishInput(input)) return false;
+        const merged = mergeSessionContextPublishInput(state.panelSnapshot, input);
+        if (!isPublishInput(merged)) return false;
+        const latestState = {
+          ...state,
+          latestSnapshot: structuredClone(merged),
+          sessionSnapshot: structuredClone(input),
+          activeSnapshotSource: "session" as const,
+        };
+        await saveSessionState(latestState);
+        const result = await publishInternal(latestState, merged);
+        return result.status !== "failed" && result.complete;
+      });
+    },
+
+    clearSessionContext() {
+      return enqueue(async () => {
+        const state = await readSessionState();
+        if (!state) return false;
+        const {
+          sessionSnapshot: _sessionSnapshot,
+          ...withoutSessionSnapshot
+        } = state;
+        if (state.activeSnapshotSource !== "session") {
+          await saveSessionState(withoutSessionSnapshot);
+          return true;
+        }
+        if (state.panelSnapshot) {
+          const fallback: LocalAgentBridgeSessionState = {
+            ...withoutSessionSnapshot,
+            latestSnapshot: structuredClone(state.panelSnapshot),
+            activeSnapshotSource: "panel",
+          };
+          await saveSessionState(fallback);
+          if (!state.instanceId || !state.token) return Boolean(state.pending);
+          const result = await publishInternal(fallback, state.panelSnapshot);
+          return result.status !== "failed" && result.complete;
+        }
+        const {
+          latestSnapshot: _latestSnapshot,
+          panelSnapshot: _panelSnapshot,
+          activeSnapshotSource: _activeSnapshotSource,
+          publishedSnapshot: _publishedSnapshot,
+          ...withoutSnapshots
+        } = withoutSessionSnapshot;
+        const tombstone: LocalAgentBridgeSessionState = {
+          ...withoutSnapshots,
+          clearPending: true,
+        };
+        await saveSessionState(tombstone);
+        if (!state.instanceId || !state.token) return Boolean(state.pending);
+        return clearSharedCaptureInternal(tombstone);
+      });
+    },
+
+    clearPanelContext() {
+      return enqueue(async () => {
+        const state = await readSessionState();
+        if (!state) return false;
+        const {
+          panelSnapshot: _panelSnapshot,
+          ...withoutPanelSnapshot
+        } = state;
+        if (
+          state.activeSnapshotSource !== "panel" &&
+          state.activeSnapshotSource !== "unknown"
+        ) {
+          await saveSessionState(withoutPanelSnapshot);
+          return true;
+        }
+        if (state.sessionSnapshot) {
+          const fallback: LocalAgentBridgeSessionState = {
+            ...withoutPanelSnapshot,
+            latestSnapshot: structuredClone(state.sessionSnapshot),
+            activeSnapshotSource: "session",
+          };
+          await saveSessionState(fallback);
+          if (!state.instanceId || !state.token) return Boolean(state.pending);
+          const result = await publishInternal(fallback, state.sessionSnapshot);
+          return result.status !== "failed" && result.complete;
+        }
+        const {
+          latestSnapshot: _latestSnapshot,
+          sessionSnapshot: _sessionSnapshot,
+          activeSnapshotSource: _activeSnapshotSource,
+          publishedSnapshot: _publishedSnapshot,
+          ...withoutSnapshots
+        } = withoutPanelSnapshot;
+        const tombstone: LocalAgentBridgeSessionState = {
+          ...withoutSnapshots,
+          clearPending: true,
+        };
+        await saveSessionState(tombstone);
+        if (!state.instanceId || !state.token) return Boolean(state.pending);
+        return clearSharedCaptureInternal(tombstone);
+      });
+    },
+
+    clearSharedCapture() {
+      return enqueue(async () => {
+        const state = await readSessionState();
+        if (!state) return false;
+        const {
+          latestSnapshot: _latestSnapshot,
+          panelSnapshot: _panelSnapshot,
+          sessionSnapshot: _sessionSnapshot,
+          activeSnapshotSource: _activeSnapshotSource,
+          publishedSnapshot: _publishedSnapshot,
+          ...withoutSnapshots
+        } = state;
+        const tombstone: LocalAgentBridgeSessionState = {
+          ...withoutSnapshots,
+          clearPending: true,
+        };
+        await saveSessionState(tombstone);
+        if (!state.instanceId || !state.token) {
+          if (!state.pending) return false;
+          return true;
+        }
+        return clearSharedCaptureInternal(tombstone);
       });
     },
 
@@ -562,7 +1120,7 @@ export function createLocalAgentBridgeClient(
       return enqueue(async () => {
         const state = await readSessionState();
         try {
-          if (state) await clearSessionCredentials(state, true);
+          if (state) await clearSessionCredentials(state, true, false, false);
           if (state?.instanceId && state.token) {
             await dependencies.fetch(
               `${UI_ATTACH_LOCAL_BRIDGE_ORIGIN}${UI_ATTACH_LOCAL_BRIDGE_SNAPSHOT_PATH}`,
@@ -601,6 +1159,9 @@ function toStatus(state: LocalAgentBridgeSessionState | null): LocalAgentBridgeS
       approvalMode: null,
       requestText: null,
       expiresAt: null,
+      sharedTargetCount: state.publishedSnapshot?.attachmentCount ?? null,
+      sharedSequence: state.publishedSnapshot ? state.sequence ?? null : null,
+      readAcknowledgementState: "unavailable",
     };
   }
   if (state?.pending) {
@@ -611,6 +1172,8 @@ function toStatus(state: LocalAgentBridgeSessionState | null): LocalAgentBridgeS
       approvalMode: state.pending.approvalMode,
       requestText: state.pending.requestText,
       expiresAt: state.pending.expiresAt,
+      sharedTargetCount: null,
+      sharedSequence: null,
     };
   }
   return disconnectedStatus();
@@ -624,6 +1187,8 @@ function disconnectedStatus(): LocalAgentBridgeStatus {
     approvalMode: null,
     requestText: null,
     expiresAt: null,
+    sharedTargetCount: null,
+    sharedSequence: null,
   };
 }
 
@@ -631,21 +1196,9 @@ function createConnectionRequestText(
   requestId: string,
   approvalKey: string,
   approvalMode: LocalBridgeApprovalMode,
-  expiresAt: string,
 ): string {
-  return [
-    "# MeanThis Connection Request",
-    "",
-    `Request ID: ${requestId}`,
-    `Approval mode: ${approvalMode}`,
-    `Approval key: ${approvalKey}`,
-    `Approval: ${approvalMode === "browser_session" ? "Trust this browser session" : "Ask every time"}`,
-    `Expires at: ${expiresAt}`,
-    "",
-    "Agent action: approve this short-lived local capability with:",
-    `meanthis bridge approve --request ${requestId} --mode ${approvalMode} --key ${approvalKey} --json`,
-    "Keep this request on this device.",
-  ].join("\n");
+  const code = createLocalBridgeConnectionCode({ requestId, approvalMode, approvalKey });
+  return `meanthis bridge accept ${code} --json`;
 }
 
 interface ConnectionResponseData {
@@ -734,15 +1287,56 @@ function isPersistentState(value: unknown): value is LocalAgentBridgePersistentS
 function isSessionState(value: unknown): value is LocalAgentBridgeSessionState {
   if (!isRecord(value) || !isUuidV4(value.browserSessionId)) return false;
   if ("latestSnapshot" in value && !isPublishInput(value.latestSnapshot)) return false;
+  if ("panelSnapshot" in value && !isPublishInput(value.panelSnapshot)) return false;
+  if ("sessionSnapshot" in value && !isPublishInput(value.sessionSnapshot)) return false;
+  if (
+    "activeSnapshotSource" in value &&
+    value.activeSnapshotSource !== "panel" &&
+    value.activeSnapshotSource !== "session" &&
+    value.activeSnapshotSource !== "unknown"
+  ) return false;
+  const hasPanelSnapshot = Object.hasOwn(value, "panelSnapshot");
+  const hasSessionSnapshot = Object.hasOwn(value, "sessionSnapshot");
+  const hasActiveSnapshotSource = Object.hasOwn(value, "activeSnapshotSource");
+  if (!hasActiveSnapshotSource && (hasPanelSnapshot || hasSessionSnapshot)) return false;
+  if (hasActiveSnapshotSource) {
+    if (!("latestSnapshot" in value)) return false;
+    if (value.activeSnapshotSource === "panel" && (
+      !hasPanelSnapshot ||
+      !samePublishInput(value.latestSnapshot as LocalAgentBridgePublishInput,
+        value.panelSnapshot as LocalAgentBridgePublishInput)
+    )) return false;
+    if (value.activeSnapshotSource === "session" && !hasSessionSnapshot) return false;
+    if (value.activeSnapshotSource === "unknown" && (
+      !hasPanelSnapshot ||
+      hasSessionSnapshot ||
+      !samePublishInput(value.latestSnapshot as LocalAgentBridgePublishInput,
+        value.panelSnapshot as LocalAgentBridgePublishInput)
+    )) return false;
+  }
+  if ("publishedSnapshot" in value && !isPublishInput(value.publishedSnapshot)) return false;
+  if ("clearPending" in value && value.clearPending !== true) return false;
   if (
     "snapshotObservationCapability" in value &&
     value.snapshotObservationCapability !== "v1" &&
-    value.snapshotObservationCapability !== "none"
+    value.snapshotObservationCapability !== "none" &&
+    value.snapshotObservationCapability !== "unknown"
   ) return false;
   if (
     "structuredCaptureCapability" in value &&
+    value.structuredCaptureCapability !== "v3" &&
+    value.structuredCaptureCapability !== "v2" &&
     value.structuredCaptureCapability !== "v1" &&
-    value.structuredCaptureCapability !== "none"
+    value.structuredCaptureCapability !== "none" &&
+    value.structuredCaptureCapability !== "unknown"
+  ) return false;
+  if (
+    "structuredCaptureV2UpgradeProbeUsed" in value &&
+    value.structuredCaptureV2UpgradeProbeUsed !== true
+  ) return false;
+  if (
+    "structuredCaptureV3UpgradeProbeUsed" in value &&
+    value.structuredCaptureV3UpgradeProbeUsed !== true
   ) return false;
   if (hasSessionKeys(value, ["browserSessionId"])) return true;
   if (hasSessionKeys(value, ["browserSessionId", "trustKey"])) {
@@ -774,13 +1368,152 @@ function hasSessionKeys(value: Record<string, unknown>, expected: string[]): boo
   return hasExactKeys(value, [
     ...expected,
     ...(Object.hasOwn(value, "latestSnapshot") ? ["latestSnapshot"] : []),
+    ...(Object.hasOwn(value, "panelSnapshot") ? ["panelSnapshot"] : []),
+    ...(Object.hasOwn(value, "sessionSnapshot") ? ["sessionSnapshot"] : []),
+    ...(Object.hasOwn(value, "activeSnapshotSource") ? ["activeSnapshotSource"] : []),
+    ...(Object.hasOwn(value, "publishedSnapshot") ? ["publishedSnapshot"] : []),
+    ...(Object.hasOwn(value, "clearPending") ? ["clearPending"] : []),
     ...(Object.hasOwn(value, "snapshotObservationCapability")
       ? ["snapshotObservationCapability"]
       : []),
     ...(Object.hasOwn(value, "structuredCaptureCapability")
       ? ["structuredCaptureCapability"]
       : []),
+    ...(Object.hasOwn(value, "structuredCaptureV2UpgradeProbeUsed")
+      ? ["structuredCaptureV2UpgradeProbeUsed"]
+      : []),
+    ...(Object.hasOwn(value, "structuredCaptureV3UpgradeProbeUsed")
+      ? ["structuredCaptureV3UpgradeProbeUsed"]
+      : []),
   ]);
+}
+
+function normalizeLegacySnapshotState(
+  state: LocalAgentBridgeSessionState,
+): LocalAgentBridgeSessionState {
+  if (
+    !state.latestSnapshot ||
+    state.panelSnapshot ||
+    state.sessionSnapshot ||
+    state.activeSnapshotSource
+  ) return state;
+  return {
+    ...state,
+    panelSnapshot: structuredClone(state.latestSnapshot),
+    activeSnapshotSource: "unknown",
+  };
+}
+
+function samePublishInput(
+  left: LocalAgentBridgePublishInput,
+  right: LocalAgentBridgePublishInput,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mergeSessionContextPublishInput(
+  current: LocalAgentBridgePublishInput | undefined,
+  next: LocalAgentBridgePublishInput,
+): LocalAgentBridgePublishInput {
+  if (!current || !sameSharedCaptureIdentity(current, next)) return next;
+  return {
+    ...next,
+    ...(current.observations ? { observations: current.observations } : {}),
+    ...(current.activity ? { activity: current.activity } : {}),
+  };
+}
+
+function mergePanelContextPublishInput(
+  currentSession: LocalAgentBridgePublishInput | undefined,
+  nextPanel: LocalAgentBridgePublishInput,
+): LocalAgentBridgePublishInput {
+  if (!currentSession || !sameSharedCaptureIdentity(currentSession, nextPanel)) return nextPanel;
+  const {
+    page: _sessionPage,
+    observations: _sessionObservations,
+    activity: _sessionActivity,
+    ...sessionCanonical
+  } = currentSession;
+  return {
+    ...sessionCanonical,
+    page: nextPanel.page,
+    ...(nextPanel.observations ? { observations: nextPanel.observations } : {}),
+    ...(nextPanel.activity ? { activity: nextPanel.activity } : {}),
+  };
+}
+
+function sameSharedCaptureIdentity(
+  left: LocalAgentBridgePublishInput,
+  right: LocalAgentBridgePublishInput,
+): boolean {
+  if (!left.capture || !right.capture || left.attachmentCount !== right.attachmentCount) return false;
+  if (JSON.stringify(left.page) !== JSON.stringify(right.page)) return false;
+  if (left.capture.captureId !== right.capture.captureId) return false;
+  if (left.capture.targets.length !== right.capture.targets.length) return false;
+  return left.capture.targets.every((target, index) => {
+    const candidate = right.capture!.targets[index];
+    return candidate?.targetId === target.targetId &&
+      candidate.attachmentId === target.attachmentId;
+  });
+}
+
+function toEffectivePublishInput(
+  input: LocalAgentBridgePublishInput,
+  capabilities: {
+    observations: LocalAgentBridgeCapabilityState;
+    structuredCapture: LocalAgentBridgeCapabilityState;
+  },
+): EffectivePublishInput {
+  const requiredStructuredCapture = requiredStructuredCaptureVersion(input.capture);
+  const structuredCaptureSupported = supportsStructuredCapture(
+    capabilities.structuredCapture,
+    requiredStructuredCapture,
+  );
+  return {
+    input: {
+      page: input.page,
+      attachmentCount: input.attachmentCount,
+      agentCopy: input.agentCopy,
+      ...(structuredCaptureSupported && input.capture
+        ? { capture: input.capture }
+        : {}),
+      ...(capabilities.observations === "v1" && input.observations
+        ? { observations: input.observations }
+        : {}),
+      ...(input.activity ? { activity: input.activity } : {}),
+    },
+    complete: (!input.capture || (requiredStructuredCapture === "v1"
+      ? capabilities.structuredCapture !== "unknown"
+      : structuredCaptureSupported)) &&
+      (!input.observations || capabilities.observations !== "unknown"),
+  };
+}
+
+function requiredStructuredCaptureVersion(
+  capture: LocalBridgeCaptureV1 | undefined,
+): LocalAgentBridgeStructuredCaptureVersion {
+  if (capture?.metadataDiagnostics) return "v3";
+  if (capture?.annotationLifecycleVersion === "v1") return "v2";
+  return "v1";
+}
+
+function isStructuredCaptureVersion(
+  value: LocalAgentBridgeCapabilityState | undefined,
+): value is LocalAgentBridgeStructuredCaptureVersion {
+  return value === "v1" || value === "v2" || value === "v3";
+}
+
+function supportsStructuredCapture(
+  actual: LocalAgentBridgeCapabilityState,
+  required: LocalAgentBridgeStructuredCaptureVersion,
+): boolean {
+  if (!isStructuredCaptureVersion(actual)) return false;
+  const rank: Record<LocalAgentBridgeStructuredCaptureVersion, number> = {
+    v1: 1,
+    v2: 2,
+    v3: 3,
+  };
+  return rank[actual] >= rank[required];
 }
 
 function isPublishInput(value: unknown): value is LocalAgentBridgePublishInput {
@@ -813,7 +1546,7 @@ function isPublishInput(value: unknown): value is LocalAgentBridgePublishInput {
 }
 
 function isPendingRequest(value: unknown): value is LocalAgentBridgePendingRequest {
-  return isRecord(value) &&
+  if (!isRecord(value) ||
     hasExactKeys(value, [
       "requestId",
       "requestSecret",
@@ -821,17 +1554,23 @@ function isPendingRequest(value: unknown): value is LocalAgentBridgePendingReque
       "approvalMode",
       "expiresAt",
       "requestText",
-    ]) &&
-    isUuidV4(value.requestId) &&
-    typeof value.requestSecret === "string" &&
-    /^[A-Za-z0-9_-]{43}$/.test(value.requestSecret) &&
-    isSecretKey(value.approvalKey) &&
-    (value.approvalMode === "ask" || value.approvalMode === "browser_session") &&
-    isCanonicalIsoDate(value.expiresAt) &&
-    typeof value.requestText === "string" &&
-    value.requestText.length <= 1_024 &&
-    !value.requestText.includes(value.requestSecret) &&
-    value.requestText.includes(value.approvalKey);
+    ]) === false ||
+    !isUuidV4(value.requestId) ||
+    typeof value.requestSecret !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.requestSecret) ||
+    !isSecretKey(value.approvalKey) ||
+    (value.approvalMode !== "ask" && value.approvalMode !== "browser_session") ||
+    !isCanonicalIsoDate(value.expiresAt) ||
+    typeof value.requestText !== "string" ||
+    value.requestText.length > 1_024 ||
+    value.requestText.includes(value.requestSecret)
+  ) return false;
+  const match = /^meanthis bridge accept ([A-Za-z0-9]{68}) --json$/.exec(value.requestText);
+  const connection = parseLocalBridgeConnectionCode(match?.[1]);
+  return connection !== null &&
+    connection.requestId === value.requestId &&
+    connection.approvalMode === value.approvalMode &&
+    connection.approvalKey === value.approvalKey;
 }
 
 async function verifyConnectionApproval(
@@ -941,5 +1680,15 @@ async function readJson(response: Response): Promise<unknown> {
     return await response.json() as unknown;
   } catch {
     return null;
+  }
+}
+
+async function readJsonResult(response: Response): Promise<{ ok: boolean; value: unknown }> {
+  try {
+    const text = await response.text();
+    if (!text.trim()) return { ok: false, value: null };
+    return { ok: true, value: JSON.parse(text) as unknown };
+  } catch {
+    return { ok: false, value: null };
   }
 }

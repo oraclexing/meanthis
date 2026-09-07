@@ -6,6 +6,8 @@
 
 用于 UI attachment 的确定性浏览器端 DOM 提取器。它会捕获元素事实、accessibility metadata、bounds、computed styles、周边上下文、locator candidates 和 disclosure audit metadata。默认 disclosure mode 为 `agent_safe`。
 
+Computed style capture 使用严格 allowlist。除 `display`、`color` 与 `backgroundColor` 外，新 attachment 还可以携带有界的可选布局事实，包括定位、box sizing、尺寸、间距、flex 对齐、overflow、排版与圆角。每个可选值最多 512 个 UTF-8 bytes；未知 style key 会使验证失败。Extractor 不会收集 `cssText`、custom properties、背景图片或 URL、transition/animation 值，也不会复制完整 stylesheet。这些值是 capture-time browser observation，不是已经核验的 source CSS claim。
+
 如果经过 instrumentation 的元素同时带有 `data-ui-attach-build-id` 与 `data-ui-attach-source-id`，extractor 会把它们复制到实验性的、不透明 `sourceAnchor`。不完整或格式错误的 anchor 会被忽略。Extractor 不会读取携带 path 的 source attribute，也不会把页面值当成已验证结果。
 
 ## 资源限制

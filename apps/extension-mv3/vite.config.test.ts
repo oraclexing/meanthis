@@ -59,6 +59,21 @@ describe("extension Vite config", () => {
     expect(projected.optional_host_permissions).toEqual(
       expect.arrayContaining(["http://*/*", "https://*/*"]),
     );
+    expect(projected).not.toHaveProperty("externally_connectable");
+  });
+
+  test("projects the authenticated reload bridge only on the development surface", async () => {
+    const baseManifest = JSON.parse(
+      await readFile(new URL("./public/manifest.json", import.meta.url), "utf8"),
+    );
+    const { projectExtensionManifest } = await import("./scripts/extension-surface-profile.mjs");
+    const projected = projectExtensionManifest(baseManifest, "development");
+
+    expect(projected.externally_connectable).toEqual({
+      matches: ["http://127.0.0.1/*"],
+    });
+    expect(projected.host_permissions).toEqual(["http://127.0.0.1/*"]);
+    expect(projected.optional_host_permissions).toEqual(["http://*/*", "https://*/*"]);
   });
 
   test("projects consumer locale catalogs with optional bridge copy", async () => {
@@ -83,6 +98,7 @@ describe("extension Vite config", () => {
       background: expect.stringContaining("background.ts"),
       options: expect.stringContaining("options.html"),
       panel: expect.stringContaining("panel.html"),
+      widget: expect.stringContaining("widget.html"),
     });
     expect(input).not.toHaveProperty("content");
   });
@@ -94,6 +110,17 @@ describe("extension Vite config", () => {
     if (!output || Array.isArray(output) || typeof output.chunkFileNames !== "function") {
       throw new Error("Expected a stable extension chunk filename function");
     }
+    if (typeof output.manualChunks !== "function") {
+      throw new Error("Expected a stable extension manual chunk function");
+    }
+    expect(output.manualChunks("D:/checkout/apps/extension-mv3/src/messages.ts", {} as never))
+      .toBe("messages");
+    expect(output.manualChunks("D:/checkout/packages/prompt/src/index.ts", {} as never))
+      .toBe("src");
+    expect(output.manualChunks("D:/checkout/packages/schema/src/local-bridge.ts", {} as never))
+      .toBe("src");
+    expect(output.manualChunks("D:/checkout/apps/extension-mv3/src/unrelated.ts", {} as never))
+      .toBeUndefined();
     type ChunkInfo = Parameters<typeof output.chunkFileNames>[0];
     expect(
       output.chunkFileNames({

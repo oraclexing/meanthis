@@ -56,20 +56,20 @@
               <ol id="local-bridge-steps" class="bridge-steps" aria-label="Connection steps" data-i18n-aria-label="bridge_steps_aria">
                 <li data-bridge-step="trust" data-state="upcoming">
                   <span class="bridge-step-copy">
-                    <strong data-i18n="bridge_step_choose_trust">Choose trust</strong>
-                    <span data-i18n="bridge_step_choose_trust_help">Choose one-time approval or this browser session.</span>
+                    <strong data-i18n="bridge_step_choose_trust">Choose access scope</strong>
+                    <span data-i18n="bridge_step_choose_trust_help">Allow one connection or trust this browser session.</span>
                   </span>
                 </li>
                 <li data-bridge-step="request" data-state="upcoming">
                   <span class="bridge-step-copy">
-                    <strong data-i18n="bridge_step_create_request">Create request</strong>
-                    <span data-i18n="bridge_step_create_request_help">MeanThis copies a short-lived local request.</span>
+                    <strong data-i18n="bridge_step_create_request">Create invitation</strong>
+                    <span data-i18n="bridge_step_create_request_help">MeanThis copies a two-minute local invitation.</span>
                   </span>
                 </li>
                 <li data-bridge-step="approve" data-state="upcoming">
                   <span class="bridge-step-copy">
-                    <strong data-i18n="bridge_step_agent_approve">Approve in your agent</strong>
-                    <span data-i18n="bridge_step_agent_approve_help">Paste the request into the agent on this device.</span>
+                    <strong data-i18n="bridge_step_agent_approve">Agent accepts</strong>
+                    <span data-i18n="bridge_step_agent_approve_help">Paste the invitation into the agent on this device.</span>
                   </span>
                 </li>
                 <li data-bridge-step="connected" data-state="upcoming">
@@ -80,33 +80,49 @@
                 </li>
               </ol>
               <label id="local-bridge-trust-field" class="field compact" for="local-bridge-approval-mode">
-                <span data-i18n="trust">Trust</span>
+                <span data-i18n="trust">Access scope</span>
                 <select id="local-bridge-approval-mode">
-                  <option value="ask" data-i18n="ask_every_time">Ask every time</option>
+                  <option value="ask" data-i18n="ask_every_time">Allow one connection</option>
                   <option value="browser_session" data-i18n="trust_browser_session">Trust this browser session</option>
                 </select>
               </label>
-              <p id="local-bridge-trust-help" class="muted" data-i18n="bridge_trust_ask_help">Ask for approval each time.</p>
+              <p id="local-bridge-trust-help" class="muted" data-i18n="bridge_trust_ask_help">Create a new invitation for each connection.</p>
               <div class="actions">
-                <button id="local-bridge-request" class="utility-action" type="button" data-i18n="create_copy_request">Create &amp; copy request</button>
+                <button id="local-bridge-request" class="utility-action" type="button" aria-busy="false" data-i18n="create_copy_request">Create &amp; copy invitation</button>
                 <button id="local-bridge-disconnect" class="utility-action destructive-action" type="button" data-i18n="disconnect" hidden>Disconnect</button>
               </div>
               <details id="local-bridge-details" class="bridge-details" hidden>
                 <summary data-i18n="connection_details">Connection details</summary>
                 <div class="bridge-details-content">
-                  <p class="muted" data-i18n="local_bridge_security_detail">Short-lived approval material stays on this device.</p>
+                  <p class="muted" data-i18n="local_bridge_security_detail">The short-lived invitation stays on this device.</p>
                   <textarea
                     id="local-bridge-request-text"
                     rows="7"
                     readonly
                     hidden
-                    aria-label="Local agent connection request"
+                    aria-label="Local agent connection invitation"
                     data-i18n-aria-label="local_connection_request_aria"
                   ></textarea>
                   <p id="local-bridge-instance" class="muted" hidden></p>
                 </div>
               </details>
-              <p id="local-bridge-status" class="muted bridge-status" role="status" aria-live="polite" data-i18n="ready_to_connect">Ready to connect. Start by choosing trust.</p>
+              <p id="local-bridge-status" class="muted bridge-status" role="status" aria-live="polite" data-i18n="ready_to_connect">Ready to connect. Choose an access scope.</p>
+              <p
+                id="local-bridge-read-acknowledgement-status"
+                class="muted bridge-read-acknowledgement"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                hidden
+              ></p>
+              <p
+                id="local-bridge-read-acknowledgement-limitations"
+                class="muted bridge-read-acknowledgement-limitations"
+                aria-live="polite"
+                aria-atomic="true"
+                hidden
+                data-i18n="local_bridge_read_ack_limitations"
+              >This does not mean the Agent understood or executed it.</p>
               </div>
             </details>
         </div>
@@ -132,16 +148,35 @@
         aria-labelledby="page-access-recovery-heading"
         hidden
       >
-        <div class="toolbar-cue" aria-hidden="true">
-          <span class="toolbar-cue-label" data-i18n="page_access_toolbar_cue">Browser toolbar</span>
-          <span class="toolbar-cue-action">
-            <img src="/icons/meanthis-32.png" alt="" />
-            <span>MeanThis</span>
-          </span>
-        </div>
         <div class="page-access-recovery-copy">
           <h2 id="page-access-recovery-heading" data-i18n="page_access_recovery_heading">Reconnect this page</h2>
-          <p id="page-access-recovery-reason" data-i18n="page_access_permission_reason">For your privacy, the browser only lets MeanThis read a page after you select MeanThis from the toolbar on that page.</p>
+          <p id="page-access-recovery-reason" data-i18n="page_access_permission_reason">MeanThis does not have access to this page yet. Choose automatic access below, or grant temporary access from the toolbar.</p>
+          <div id="page-access-automatic" class="page-access-automatic">
+            <p id="page-access-automatic-explanation" class="muted" data-i18n="page_access_automatic_explanation">Chrome will keep MeanThis authorized for ordinary HTTP(S) pages. MeanThis captures only after you choose Add elements or another explicit capture action.</p>
+            <button
+              id="page-access-enable-automatic"
+              class="page-access-enable-automatic"
+              type="button"
+              aria-busy="false"
+              data-i18n="page_access_enable_automatic"
+            >Enable automatic access to web pages</button>
+            <p
+              id="page-access-automatic-status"
+              class="muted page-access-automatic-status"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              hidden
+            ></p>
+          </div>
+          <p id="page-access-temporary-path" class="muted page-access-temporary-path" data-i18n="page_access_temporary_path">For temporary access to only this page:</p>
+          <div class="toolbar-cue" aria-hidden="true">
+            <span class="toolbar-cue-label" data-i18n="page_access_toolbar_cue">Browser toolbar</span>
+            <span class="toolbar-cue-action">
+              <img src="/icons/meanthis-32.png" alt="" />
+              <span>MeanThis</span>
+            </span>
+          </div>
           <ol class="page-access-recovery-steps">
             <li id="page-access-recovery-first-step" data-i18n="page_access_step_keep_active">Keep this page active.</li>
             <li data-i18n="page_access_step_toolbar">Select MeanThis in the browser toolbar.</li>
@@ -187,13 +222,6 @@
           <button id="retry-intent" class="utility-action" type="button" data-i18n="retry_save">Retry save</button>
           <button id="discard-intent" class="utility-action destructive-action" type="button" data-i18n="discard_changes">Discard changes</button>
         </div>
-        <details id="advanced-session-tools" class="advanced-disclosure" data-developer-tooling hidden>
-          <summary data-i18n="advanced_session_tools">Advanced session tools</summary>
-          <div class="advanced-content">
-            <p class="muted" data-i18n="source_export_help">Export the source-bound session for diagnostics or checkout-based tooling.</p>
-            <button id="export-session" class="utility-action" type="button" data-i18n="export_source_session">Export source session</button>
-          </div>
-        </details>
       </section>
 
       <section id="capture" class="capture" hidden>
@@ -236,6 +264,64 @@
               </div>
             </dl>
           </details>
+          <details id="relation-settings" class="task-shortcut-disclosure" hidden>
+            <summary data-i18n="layout_relationship_optional">Use a task note shortcut (optional)</summary>
+            <div class="task-shortcut-content">
+              <div
+                id="relation-composer"
+                class="relation-composer optional-settings-group"
+                hidden
+              >
+                <div class="relation-composer-content">
+                  <p class="muted relation-help" data-i18n="relation_help">A shortcut writes a task note only for the current task element. The reference element is not given its own task.</p>
+                  <p
+                    id="relation-role-summary"
+                    class="relation-role-summary"
+                    hidden
+                  ></p>
+                  <div class="relation-controls">
+                    <label class="relation-field">
+                      <span data-i18n="relationship">Shortcut</span>
+                      <select id="relation-action" aria-label="Task note shortcut" data-i18n-aria-label="relationship">
+                        <option value="below" data-i18n="below">Below</option>
+                        <option value="above" data-i18n="above">Above</option>
+                        <option value="left-of" data-i18n="left_of">Left of</option>
+                        <option value="right-of" data-i18n="right_of">Right of</option>
+                        <option value="align-left" data-i18n="align_left">Align left</option>
+                        <option value="match-width" data-i18n="match_width">Match width</option>
+                      </select>
+                    </label>
+                    <label class="relation-field">
+                      <span data-i18n="relative_to">Relative to</span>
+                      <select id="relation-reference" aria-label="Reference element" data-i18n-aria-label="reference_element_aria"></select>
+                    </label>
+                  </div>
+                  <button
+                    id="apply-relation"
+                    class="relation-apply utility-action"
+                    type="button"
+                    data-i18n="use_in_task_note"
+                  >Generate and fill</button>
+                  <p
+                    id="relation-apply-status"
+                    class="relation-apply-status"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    hidden
+                  ></p>
+                  <button
+                    id="change-generated-relation"
+                    class="relation-change utility-action"
+                    type="button"
+                    hidden
+                    disabled
+                    data-i18n="change_relationship"
+                  >Change shortcut</button>
+                </div>
+              </div>
+            </div>
+          </details>
           <textarea id="intent" rows="3" aria-describedby="selected-target-summary" placeholder="Describe the result you want" data-i18n-placeholder="intent_placeholder"></textarea>
         </div>
 
@@ -245,65 +331,6 @@
         </div>
 
         <p id="handoff-scope-summary" class="handoff-scope-summary muted" role="status" aria-live="polite"></p>
-
-        <details id="relation-settings" class="advanced-disclosure secondary-settings" hidden>
-          <summary data-i18n="layout_relationship_optional">Task note shortcuts (optional)</summary>
-          <div class="advanced-content secondary-settings-content">
-            <div
-              id="relation-composer"
-              class="relation-composer optional-settings-group"
-              hidden
-            >
-              <div class="relation-composer-content">
-                <p class="muted relation-help" data-i18n="relation_help">A shortcut writes a task note only for the current task element. The reference element is not given its own task.</p>
-                <p
-                  id="relation-role-summary"
-                  class="relation-role-summary"
-                  hidden
-                ></p>
-                <div class="relation-controls">
-                  <label class="relation-field">
-                    <span data-i18n="relationship">Shortcut</span>
-                    <select id="relation-action" aria-label="Task note shortcut" data-i18n-aria-label="relationship">
-                      <option value="below" data-i18n="below">Below</option>
-                      <option value="above" data-i18n="above">Above</option>
-                      <option value="left-of" data-i18n="left_of">Left of</option>
-                      <option value="right-of" data-i18n="right_of">Right of</option>
-                      <option value="align-left" data-i18n="align_left">Align left</option>
-                      <option value="match-width" data-i18n="match_width">Match width</option>
-                    </select>
-                  </label>
-                  <label class="relation-field">
-                    <span data-i18n="relative_to">Relative to</span>
-                    <select id="relation-reference" aria-label="Reference element" data-i18n-aria-label="reference_element_aria"></select>
-                  </label>
-                </div>
-                <button
-                  id="apply-relation"
-                  class="relation-apply utility-action"
-                  type="button"
-                  data-i18n="use_in_task_note"
-                >Fill task note</button>
-                <p
-                  id="relation-apply-status"
-                  class="relation-apply-status"
-                  role="status"
-                  aria-live="polite"
-                  aria-atomic="true"
-                  hidden
-                ></p>
-                <button
-                  id="change-generated-relation"
-                  class="relation-change utility-action"
-                  type="button"
-                  hidden
-                  disabled
-                  data-i18n="change_relationship"
-                >Change shortcut</button>
-              </div>
-            </div>
-          </div>
-        </details>
 
         <div class="actions primary-actions">
           <button id="copy-summary" class="copy-action primary-action" type="button" data-i18n="copy_for_agent">Copy for agent</button>
@@ -373,6 +400,10 @@
           <summary data-i18n="advanced_attachment_data">Developer diagnostics</summary>
           <div class="advanced-content">
             <p class="muted" data-i18n="developer_diagnostics_help">Raw metadata and separate Markdown/JSON copies for debugging integrations.</p>
+            <div class="developer-source-export">
+              <p class="muted" data-i18n="source_export_help">Export the complete source-bound session JSON for diagnostics and local checkout tools. Normal use does not require this.</p>
+              <button id="export-session" class="utility-action" type="button" data-i18n="export_source_session">Export source session</button>
+            </div>
             <div class="summary">
               <span class="label" data-i18n="selected_element">Selected element</span>
               <strong id="element-summary" data-i18n="no_element">No element</strong>

@@ -1,6 +1,7 @@
 import { UI_ATTACHMENT_SCHEMA_VERSION, type UIAttachment } from "@meanthis/schema";
 import { describe, expect, it } from "vitest";
 import {
+  serializeAttachmentFeedbackBundle,
   serializeAttachmentCompact,
   serializeAttachmentCompactHandoff,
   serializeAttachmentHandoff,
@@ -28,6 +29,22 @@ const attachment: UIAttachment = {
     display: "inline-flex",
     color: "rgb(255, 255, 255)",
     backgroundColor: "rgb(31, 99, 255)",
+    position: "relative",
+    boxSizing: "border-box",
+    width: "90px",
+    height: "40px",
+    margin: "4px",
+    padding: "6px 8px",
+    gap: "10px",
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    overflowX: "visible",
+    overflowY: "hidden",
+    fontSize: "14px",
+    fontWeight: "600",
+    lineHeight: "20px",
+    borderRadius: "8px",
   },
   context: {
     parentSummary: "form settings",
@@ -67,9 +84,246 @@ const attachment: UIAttachment = {
     includedSensitiveFields: [],
   },
   artifacts: { screenshotCrop: null, overlayImage: null },
+  selectionPoint: {
+    kind: "element_relative_pointer",
+    xRatio: 0.25,
+    yRatio: 0.75,
+  },
 };
 
 describe("prompt serializers", () => {
+  it("renders one truthful reference bundle at four progressively richer output levels", () => {
+    const framedAttachment: UIAttachment = {
+      ...attachment,
+      sourceAnchor: {
+        schemaVersion: "0.1.0",
+        kind: "ui-attach.opaque-source-anchor",
+        buildId: "build-demo",
+        sourceId: "source-save-button",
+      },
+      boundary: {
+        kind: "embedded_frame",
+        innerDom: "not_captured",
+        originRelation: "cross_origin",
+        frameOrigin: "https://frame.example.test",
+        framePathname: "/editor",
+        dominantViewport: false,
+      },
+    };
+    const entries = [
+      {
+        label: "A",
+        taskNote: "Move this action below the profile form.",
+        attachment: framedAttachment,
+      },
+      {
+        label: "B",
+        taskNote: "Use the secondary style.",
+        attachment: {
+          ...attachment,
+          id: "att_cancel",
+          element: {
+            ...attachment.element,
+            text: "Cancel",
+            accessibleName: "Cancel",
+          },
+        },
+      },
+    ];
+
+    const compact = serializeAttachmentFeedbackBundle(entries, { detail: "compact" });
+    const standard = serializeAttachmentFeedbackBundle(entries, { detail: "standard" });
+    const detailed = serializeAttachmentFeedbackBundle(entries, { detail: "detailed" });
+    const forensic = serializeAttachmentFeedbackBundle(entries, { detail: "forensic" });
+
+    for (const output of [compact, standard, detailed, forensic]) {
+      expect(output).toContain("# MeanThis Page References");
+      expect(output).toContain("Target A");
+      expect(output).toContain("Move this action below the profile form.");
+      expect(output).toContain("Target B");
+      expect(output).toContain("Use the secondary style.");
+      expect(output).toContain("page.getByRole(\"button\", { name: \"Save changes\" })");
+      expect(output).toContain("embedded frame host only");
+      expect(output.match(/Only `Task note` text is requested work/gu)).toHaveLength(1);
+    }
+
+    expect(compact).toContain("capture-time, unverified, uniqueness unknown");
+    expect(compact).not.toContain("Attachment ID");
+    expect(compact).not.toContain("Bounds:");
+    expect(compact).not.toContain("Nearby text");
+    expect(compact).not.toContain("Source Anchor Tool Input");
+    expect(compact).not.toContain("Policy audit");
+    expect(compact).not.toContain("Selection point");
+
+    expect(standard).toContain("Role: button");
+    expect(standard).toContain("Location hint:");
+    expect(standard).toContain("Selection point: 25% from left, 75% from top (element-relative pointer position)");
+    expect(standard).toContain("Source Anchor Tool Input");
+    expect(standard).not.toContain("- Source:");
+    expect(standard).not.toContain("Bounds:");
+    expect(standard).not.toContain("Nearby text");
+
+    expect(detailed).toContain("Bounds: x=12 y=34 width=90 height=40");
+    expect(detailed).toContain("State: visible, enabled");
+    expect(detailed).toContain("Style excerpt:");
+    expect(detailed).toContain("position=relative");
+    expect(detailed).toContain("padding=6px 8px");
+    expect(detailed).toContain("font-size=14px");
+    expect(standard).not.toContain("position=relative");
+    expect(detailed).toContain("Nearby text (context only): Profile; Cancel");
+    expect(detailed).toContain("Selector hints:");
+    expect(detailed).not.toContain("Policy audit");
+
+    expect(forensic).toContain("Attachment ID: att_save");
+    expect(forensic).toContain("Captured at: 2026-07-02T00:00:00.000Z");
+    expect(forensic).toContain("Locator candidates:");
+    expect(forensic).toContain("Policy audit (reference only):");
+    expect(forensic).toContain("requested work=task note only");
+    expect(forensic).toContain("Policy-transformed fields: none");
+    expect(compact.length).toBeLessThan(standard.length);
+    expect(standard.length).toBeLessThan(detailed.length);
+    expect(detailed.length).toBeLessThan(forensic.length);
+  });
+
+  it("keeps policy-sanitized source URLs and non-interactive state labels honest", () => {
+    const redactedParagraph: UIAttachment = {
+      ...attachment,
+      source: {
+        ...attachment.source,
+        url: "https://example.test/settings?token=secret#private",
+      },
+      element: {
+        ...attachment.element,
+        tagName: "p",
+        role: null,
+        text: "Account summary",
+        accessibleName: "Account summary",
+      },
+      policy: {
+        ...attachment.policy,
+        redactedFields: ["source.url"],
+        sensitiveHints: ["source.url"],
+      },
+    };
+
+    const detailed = serializeAttachmentFeedbackBundle([
+      { label: "A", taskNote: "", attachment: redactedParagraph },
+    ], { detail: "detailed" });
+    const forensic = serializeAttachmentFeedbackBundle([
+      { label: "A", taskNote: "", attachment: redactedParagraph },
+    ], { detail: "forensic" });
+
+    for (const output of [detailed, forensic]) {
+      expect(output).toContain("Page (policy-sanitized; sensitive parts omitted)");
+      expect(output).not.toContain("token=secret");
+      expect(output).not.toContain("#private");
+      expect(output).toContain("State: visible, enabled not applicable");
+    }
+    expect(forensic).toContain(
+      "Captured source (policy-sanitized; sensitive parts omitted):",
+    );
+    expect(forensic).toContain("failure reason: none recorded");
+    expect(forensic).toContain("requested work=none (no task note)");
+    expect(forensic).toContain(
+      "Policy-transformed fields: source.url (displayed values are sanitized; original sensitive parts are omitted)",
+    );
+  });
+
+  it("serializes repeated comments on one target without duplicating target evidence", () => {
+    const output = serializeAttachmentFeedbackBundle([{
+      label: "A",
+      attachment: { ...attachment, selectionPoint: undefined },
+      annotations: [
+        {
+          label: "1",
+          taskNote: "Move the value closer to the label.",
+          selectionPoint: {
+            kind: "element_relative_pointer",
+            xRatio: 0.2,
+            yRatio: 0.5,
+          },
+        },
+        {
+          label: "2",
+          taskNote: "Keep this end aligned with the card edge.",
+          selectionPoint: {
+            kind: "element_relative_pointer",
+            xRatio: 0.8,
+            yRatio: 0.5,
+          },
+        },
+      ],
+    }], { detail: "detailed" });
+
+    expect(output.match(/Target A/gu)).toHaveLength(1);
+    expect(output.match(/Locator \(/gu)).toHaveLength(1);
+    expect(output).toContain("Annotation 1");
+    expect(output).toContain("Annotation 2");
+    expect(output).toContain("20% from left");
+    expect(output).toContain("80% from left");
+    expect(output).toContain("Move the value closer to the label.");
+    expect(output).toContain("Keep this end aligned with the card edge.");
+
+    const flatSessionOutput = serializeAttachmentFeedbackBundle([
+      {
+        label: "A",
+        taskNote: "First extension comment.",
+        attachment: {
+          ...attachment,
+          selectionPoint: {
+            kind: "element_relative_pointer",
+            xRatio: 0.25,
+            yRatio: 0.5,
+          },
+        },
+      },
+      {
+        label: "B",
+        taskNote: "Second extension comment.",
+        attachment: {
+          ...attachment,
+          selectionPoint: {
+            kind: "element_relative_pointer",
+            xRatio: 0.75,
+            yRatio: 0.5,
+          },
+        },
+      },
+    ], { detail: "standard" });
+    expect(flatSessionOutput.match(/Target A/gu)).toHaveLength(1);
+    expect(flatSessionOutput).not.toContain("Target B");
+    expect(flatSessionOutput).toContain("Annotation 1 task note: First extension comment.");
+    expect(flatSessionOutput).toContain("Annotation 2 task note: Second extension comment.");
+  });
+
+  it("serializes annotation lifecycle as reference metadata without turning it into requested work", () => {
+    const output = serializeAttachmentFeedbackBundle([{
+      label: "A",
+      attachment,
+      annotations: [{
+        label: "1",
+        taskNote: "Update this button.",
+        annotationLifecycle: {
+          state: "resolved",
+          resolvedAt: "2026-08-31T00:00:00.000Z",
+        },
+      }],
+    }], { detail: "standard" });
+
+    expect(output).toContain("Annotation lifecycle: resolved");
+    expect(output).toContain("resolvedAt=2026-08-31T00:00:00.000Z");
+    expect(output).toContain("reference metadata; not requested work");
+    expect(output).toContain("Update this button.");
+    expect(output).not.toContain("User Intent");
+
+    const legacy = serializeAttachmentFeedbackBundle([{
+      label: "A",
+      attachment,
+      annotations: [{ label: "1", taskNote: "" }],
+    }]);
+    expect(legacy).not.toContain("Annotation lifecycle:");
+  });
+
   it("serializes a short agent-first summary before full details are needed", () => {
     const replayedAttachment: UIAttachment = {
       ...attachment,

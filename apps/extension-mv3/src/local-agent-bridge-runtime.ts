@@ -1,4 +1,8 @@
-import { isLocalBridgeSnapshot, type LocalBridgeApprovalMode } from "@meanthis/schema";
+import {
+  isLocalBridgeSnapshot,
+  parseAnnotationLifecycleOperationReceipt,
+  type LocalBridgeApprovalMode,
+} from "@meanthis/schema";
 import {
   LOCAL_AGENT_BRIDGE_PERMISSION_ORIGIN,
   type LocalAgentBridgeClient,
@@ -7,8 +11,25 @@ import {
 } from "./local-agent-bridge";
 import type { BackgroundRuntimeFeature } from "./background-controller";
 import type { SessionCommandResponse } from "./messages";
+import {
+  LocalAgentBridgeBootstrapError,
+  type LocalAgentBridgeBootstrapErrorCode,
+} from "./local-agent-bridge-bootstrap";
+import {
+  parseAnnotationLifecycleOperationApproval,
+  parseAnnotationLifecycleOperationReference,
+  type AnnotationLifecycleOperationApprovalV1,
+  type AnnotationLifecycleOperationReferenceV1,
+} from "./annotation-lifecycle-control-client";
 
 export const LOCAL_AGENT_BRIDGE_RUNTIME_TYPE = "ui-attach:local-agent-bridge";
+
+export class LocalAgentBridgeRuntimeError extends Error {
+  constructor(readonly code: LocalAgentBridgeBootstrapErrorCode) {
+    super("The local MeanThis companion is unavailable.");
+    this.name = "LocalAgentBridgeRuntimeError";
+  }
+}
 
 export type LocalAgentBridgeRuntimeCommand =
   | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "read-status" }
@@ -18,16 +39,76 @@ export type LocalAgentBridgeRuntimeCommand =
       approvalMode: LocalBridgeApprovalMode;
     }
   | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "refresh-connection" }
-  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "refresh-connection-and-publish" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "repair-connection" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "refresh-connection-and-heartbeat" }
   | {
       type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE;
       action: "publish";
       input: LocalAgentBridgePublishInput;
     }
-  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "disconnect" };
+  | {
+      type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE;
+      action: "publish-session-context";
+      input: LocalAgentBridgePublishInput;
+  }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "clear-session-context" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "clear-panel-context" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "clear-shared-capture" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "disconnect" }
+  | { type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE; action: "control-read-authority" | "control-read-next" }
+  | {
+      type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE;
+      action: "control-claim" | "control-reject";
+      reference: AnnotationLifecycleOperationReferenceV1;
+    }
+  | {
+      type: typeof LOCAL_AGENT_BRIDGE_RUNTIME_TYPE;
+      action: "control-finalize";
+      reference: AnnotationLifecycleOperationReferenceV1;
+      approval: AnnotationLifecycleOperationApprovalV1;
+      receipt: unknown;
+    };
 
 export function createBrowserLocalAgentBridgeProxy(): LocalAgentBridgeClient {
   return {
+    annotationLifecycleControl: {
+      async readAuthority() {
+        return await sendCommand({
+          type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+          action: "control-read-authority",
+        }) as Awaited<ReturnType<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["readAuthority"]>>;
+      },
+      async readNext() {
+        return await sendCommand({
+          type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+          action: "control-read-next",
+        }) as Awaited<ReturnType<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["readNext"]>>;
+      },
+      async claim(reference) {
+        return await sendCommand({
+          type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+          action: "control-claim",
+          reference,
+        }) as Awaited<ReturnType<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["claim"]>>;
+      },
+      async reject(reference) {
+        return await sendCommand({
+          type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+          action: "control-reject",
+          reference,
+        }) as Awaited<ReturnType<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["reject"]>>;
+      },
+      async finalize(reference, approval, receipt) {
+        return await sendCommand({
+          type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+          action: "control-finalize",
+          reference,
+          approval,
+          receipt,
+        }) as Awaited<ReturnType<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["finalize"]>>;
+      },
+    },
+
     readStatus: () => sendStatusCommand({
       type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
       action: "read-status",
@@ -58,9 +139,17 @@ export function createBrowserLocalAgentBridgeProxy(): LocalAgentBridgeClient {
       action: "refresh-connection",
     }),
 
-    refreshConnectionAndPublish: () => sendStatusCommand({
+    async repairConnection() {
+      const data = await sendCommand({
+        type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+        action: "repair-connection",
+      });
+      if (data !== null) throw new Error("Local agent bridge returned an invalid result.");
+    },
+
+    refreshConnectionAndHeartbeat: () => sendStatusCommand({
       type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
-      action: "refresh-connection-and-publish",
+      action: "refresh-connection-and-heartbeat",
     }),
 
     publish(input) {
@@ -70,6 +159,29 @@ export function createBrowserLocalAgentBridgeProxy(): LocalAgentBridgeClient {
         input,
       });
     },
+
+    publishSessionContext(input) {
+      return sendBooleanCommand({
+        type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+        action: "publish-session-context",
+        input,
+      });
+    },
+
+    clearSessionContext: () => sendBooleanCommand({
+      type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+      action: "clear-session-context",
+    }),
+
+    clearPanelContext: () => sendBooleanCommand({
+      type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+      action: "clear-panel-context",
+    }),
+
+    clearSharedCapture: () => sendBooleanCommand({
+      type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+      action: "clear-shared-capture",
+    }),
 
     async disconnect() {
       const response = await sendCommand({
@@ -84,25 +196,72 @@ export function createBrowserLocalAgentBridgeProxy(): LocalAgentBridgeClient {
 export function parseLocalAgentBridgeRuntimeCommand(
   value: unknown,
 ): LocalAgentBridgeRuntimeCommand | null {
-  if (!isRecord(value) || value.type !== LOCAL_AGENT_BRIDGE_RUNTIME_TYPE) return null;
-  switch (value.action) {
+  const type = readOwnDataProperty(value, "type");
+  const action = readOwnDataProperty(value, "action");
+  if (!type.present || type.value !== LOCAL_AGENT_BRIDGE_RUNTIME_TYPE ||
+      !action.present || typeof action.value !== "string") return null;
+  switch (action.value) {
     case "read-status":
     case "refresh-connection":
-    case "refresh-connection-and-publish":
+    case "repair-connection":
+    case "refresh-connection-and-heartbeat":
+    case "clear-session-context":
+    case "clear-panel-context":
+    case "clear-shared-capture":
     case "disconnect":
-      return hasExactKeys(value, ["type", "action"])
-        ? value as LocalAgentBridgeRuntimeCommand
+    case "control-read-authority":
+    case "control-read-next": {
+      const record = readExactDataRecord(value, ["type", "action"]);
+      return record
+        ? record as unknown as LocalAgentBridgeRuntimeCommand
         : null;
+    }
     case "create-connection-request":
-      return hasExactKeys(value, ["type", "action", "approvalMode"]) &&
-        (value.approvalMode === "ask" || value.approvalMode === "browser_session")
-        ? value as LocalAgentBridgeRuntimeCommand
+    {
+      const record = readExactDataRecord(value, ["type", "action", "approvalMode"]);
+      return record && (record.approvalMode === "ask" || record.approvalMode === "browser_session")
+        ? record as unknown as LocalAgentBridgeRuntimeCommand
         : null;
+    }
     case "publish":
-      return hasExactKeys(value, ["type", "action", "input"]) &&
-        isPublishInput(value.input)
-        ? value as LocalAgentBridgeRuntimeCommand
+    case "publish-session-context": {
+      const record = readExactDataRecord(value, ["type", "action", "input"]);
+      return record && isPublishInput(record.input)
+        ? record as unknown as LocalAgentBridgeRuntimeCommand
         : null;
+    }
+    case "control-claim":
+    case "control-reject": {
+      const record = readExactDataRecord(value, ["type", "action", "reference"]);
+      const reference = record
+        ? parseAnnotationLifecycleOperationReference(record.reference)
+        : null;
+      return record && reference
+        ? { type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE, action: action.value, reference }
+        : null;
+    }
+    case "control-finalize": {
+      const record = readExactDataRecord(
+        value,
+        ["type", "action", "reference", "approval", "receipt"],
+      );
+      const reference = record
+        ? parseAnnotationLifecycleOperationReference(record.reference)
+        : null;
+      const approval = record ? parseAnnotationLifecycleOperationApproval(record.approval) : null;
+      const receipt = record
+        ? parseAnnotationLifecycleOperationReceipt(record.receipt)
+        : { ok: false as const };
+      return record && reference && approval && receipt.ok
+        ? {
+            type: LOCAL_AGENT_BRIDGE_RUNTIME_TYPE,
+            action: "control-finalize",
+            reference,
+            approval,
+            receipt: receipt.value,
+          }
+        : null;
+    }
     default:
       return null;
   }
@@ -128,16 +287,90 @@ export function createLocalAgentBridgeRuntimeFeature(
         };
       }
       switch (command.action) {
+        case "control-read-authority":
+          if (!client.annotationLifecycleControl) {
+            throw new Error("Annotation lifecycle control is unavailable.");
+          }
+          return {
+            ok: true,
+            data: await client.annotationLifecycleControl.readAuthority(),
+          };
+        case "control-read-next":
+          return {
+            ok: true,
+            data: await client.annotationLifecycleControl?.readNext() ?? null,
+          };
+        case "control-claim":
+          if (!client.annotationLifecycleControl) {
+            throw new Error("Annotation lifecycle control is unavailable.");
+          }
+          return {
+            ok: true,
+            data: await client.annotationLifecycleControl.claim(command.reference),
+          };
+        case "control-reject":
+          if (!client.annotationLifecycleControl) {
+            throw new Error("Annotation lifecycle control is unavailable.");
+          }
+          return {
+            ok: true,
+            data: await client.annotationLifecycleControl.reject(command.reference),
+          };
+        case "control-finalize":
+          if (!client.annotationLifecycleControl) {
+            throw new Error("Annotation lifecycle control is unavailable.");
+          }
+          return {
+            ok: true,
+            data: await client.annotationLifecycleControl.finalize(
+              command.reference,
+              command.approval,
+              command.receipt as Parameters<NonNullable<LocalAgentBridgeClient["annotationLifecycleControl"]>["finalize"]>[2],
+            ),
+          };
         case "read-status":
           return { ok: true, data: await client.readStatus() };
         case "create-connection-request":
-          return { ok: true, data: await client.createConnectionRequest(command.approvalMode) };
+          try {
+            return { ok: true, data: await client.createConnectionRequest(command.approvalMode) };
+          } catch (error) {
+            if (error instanceof LocalAgentBridgeBootstrapError) {
+              return {
+                ok: false,
+                code: error.code,
+                error: "The local MeanThis companion is unavailable.",
+              };
+            }
+            throw error;
+          }
         case "refresh-connection":
           return { ok: true, data: await client.refreshConnection() };
-        case "refresh-connection-and-publish":
-          return { ok: true, data: await client.refreshConnectionAndPublish() };
+        case "repair-connection":
+          try {
+            await client.repairConnection?.();
+            return { ok: true, data: null };
+          } catch (error) {
+            if (error instanceof LocalAgentBridgeBootstrapError) {
+              return {
+                ok: false,
+                code: error.code,
+                error: "The local MeanThis companion is unavailable.",
+              };
+            }
+            throw error;
+          }
+        case "refresh-connection-and-heartbeat":
+          return { ok: true, data: await client.refreshConnectionAndHeartbeat() };
         case "publish":
           return { ok: true, data: await client.publish(command.input) };
+        case "publish-session-context":
+          return { ok: true, data: await client.publishSessionContext(command.input) };
+        case "clear-session-context":
+          return { ok: true, data: await client.clearSessionContext() };
+        case "clear-panel-context":
+          return { ok: true, data: await client.clearPanelContext() };
+        case "clear-shared-capture":
+          return { ok: true, data: await client.clearSharedCapture?.() ?? false };
         case "disconnect":
           await client.disconnect();
           return { ok: true, data: null };
@@ -164,6 +397,14 @@ async function sendBooleanCommand(
 
 async function sendCommand(command: LocalAgentBridgeRuntimeCommand): Promise<unknown> {
   const response = await chrome.runtime.sendMessage(command);
+  if (isRecord(response) && response.ok === false &&
+      (response.code === "COMPANION_UNAVAILABLE" ||
+        response.code === "BRIDGE_REPAIR_REQUIRED" ||
+        response.code === "BRIDGE_SETUP_REQUIRED" ||
+        response.code === "BRIDGE_ACTION_REQUIRED" ||
+        response.code === "BRIDGE_START_FAILED")) {
+    throw new LocalAgentBridgeRuntimeError(response.code);
+  }
   if (!isRecord(response) || response.ok !== true || !hasExactKeys(response, ["ok", "data"])) {
     throw new Error("Local agent bridge action failed.");
   }
@@ -178,6 +419,11 @@ function isStatus(value: unknown): value is LocalAgentBridgeStatus {
     "approvalMode",
     "requestText",
     "expiresAt",
+    "sharedTargetCount",
+    "sharedSequence",
+    ...(Object.hasOwn(value, "readAcknowledgementState")
+      ? ["readAcknowledgementState"]
+      : []),
   ])) {
     return false;
   }
@@ -186,7 +432,17 @@ function isStatus(value: unknown): value is LocalAgentBridgeStatus {
     typeof value.pending === "boolean" &&
     (value.approvalMode === "ask" || value.approvalMode === "browser_session" || value.approvalMode === null) &&
     (typeof value.requestText === "string" || value.requestText === null) &&
-    (typeof value.expiresAt === "string" || value.expiresAt === null);
+    (typeof value.expiresAt === "string" || value.expiresAt === null) &&
+    (value.sharedTargetCount === null || isNonNegativeSafeInteger(value.sharedTargetCount)) &&
+    (value.sharedSequence === null || isNonNegativeSafeInteger(value.sharedSequence)) &&
+    (!Object.hasOwn(value, "readAcknowledgementState") ||
+      value.readAcknowledgementState === "waiting" ||
+      value.readAcknowledgementState === "current" ||
+      value.readAcknowledgementState === "unavailable");
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isPublishInput(value: unknown): value is LocalAgentBridgePublishInput {
@@ -200,11 +456,18 @@ function isPublishInput(value: unknown): value is LocalAgentBridgePublishInput {
   ])) {
     return false;
   }
+  const validationPublishedAt = isRecord(value.observations) &&
+      typeof value.observations.observedAt === "string"
+    ? value.observations.observedAt
+    : "2026-01-01T00:00:00.000Z";
   return isLocalBridgeSnapshot({
     schemaVersion: "0.1.0",
     kind: "ui-attach.local-bridge-snapshot",
     sequence: 1,
-    publishedAt: "2026-01-01T00:00:00.000Z",
+    // The background assigns the real publication time after this command crosses
+    // the runtime boundary. Use the observation time here to validate structure
+    // without coupling valid live-page evidence to a fixed calendar date.
+    publishedAt: validationPublishedAt,
     page: value.page,
     attachmentCount: value.attachmentCount,
     agentCopy: value.agentCopy,
@@ -221,4 +484,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function readOwnDataProperty(
+  value: unknown,
+  key: string,
+): { present: false } | { present: true; value: unknown } {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return { present: false };
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, "value") &&
+        descriptor.value !== undefined
+      ? { present: true, value: descriptor.value }
+      : { present: false };
+  } catch {
+    return { present: false };
+  }
+}
+
+function readExactDataRecord(
+  value: unknown,
+  expected: readonly string[],
+): Record<string, unknown> | null {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length !== expected.length || keys.some((key) =>
+      typeof key !== "string" || !expected.includes(key)
+    )) return null;
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of expected) {
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value") ||
+          descriptor.value === undefined) return null;
+      result[key] = descriptor.value;
+    }
+    return result;
+  } catch {
+    return null;
+  }
 }

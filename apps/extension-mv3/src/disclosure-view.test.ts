@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { UIAttachment } from "@meanthis/schema";
+import { isUIAttachment, type UIAttachment } from "@meanthis/schema";
 import type { OriginCaptureRecord } from "./capture-store";
 import { deriveCaptureRecordDisclosure } from "./disclosure-view";
 
@@ -34,6 +34,81 @@ describe("deriveCaptureRecordDisclosure", () => {
       ok: false,
       status: "Capture again with full_debug disclosure to include full debug details.",
     });
+  });
+
+  test("recovers a legacy capture whose optional content parts exceed UTF-8 byte limits", () => {
+    const attachment = createAttachment("agent_safe");
+    attachment.element.contentParts = [{
+      kind: "text",
+      tagName: "span",
+      role: null,
+      text: "汉".repeat(6_000),
+      accessibleName: null,
+    }];
+    const record = createRecord(attachment);
+    const expectedAttachment = structuredClone(attachment);
+    delete expectedAttachment.element.contentParts;
+    const expectedResult = deriveCaptureRecordDisclosure(
+      createRecord(expectedAttachment),
+      "agent_safe",
+    );
+
+    expect(isUIAttachment(attachment)).toBe(false);
+    expect(isUIAttachment(expectedAttachment)).toBe(true);
+
+    const result = deriveCaptureRecordDisclosure(record, "agent_safe");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result).toEqual(expectedResult);
+    expect(record.attachment.element.contentParts).toHaveLength(1);
+  });
+
+  test("preserves valid optional content parts", () => {
+    const attachment = createAttachment("agent_safe");
+    attachment.element.contentParts = [{
+      kind: "text",
+      tagName: "span",
+      role: null,
+      text: "邀请成员",
+      accessibleName: null,
+    }];
+    const record = createRecord(attachment);
+    const originalRecord = structuredClone(record);
+
+    expect(isUIAttachment(attachment)).toBe(true);
+
+    const result = deriveCaptureRecordDisclosure(record, "agent_safe");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.record.attachment.element.contentParts).toEqual(
+      attachment.element.contentParts,
+    );
+    expect(record).toEqual(originalRecord);
+  });
+
+  test("fails closed when removing legacy content parts does not fix the attachment", () => {
+    const attachment = createAttachment("agent_safe");
+    attachment.element.contentParts = [{
+      kind: "text",
+      tagName: "span",
+      role: null,
+      text: "汉".repeat(6_000),
+      accessibleName: null,
+    }];
+    attachment.element.bbox.width = -1;
+    const record = createRecord(attachment);
+
+    expect(isUIAttachment(attachment)).toBe(false);
+
+    const result = deriveCaptureRecordDisclosure(record, "agent_safe");
+
+    expect(result.ok).toBe(false);
   });
 });
 

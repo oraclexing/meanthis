@@ -9,6 +9,7 @@ import { CAPTURE_SESSION_FILE_MAX_BYTES } from "@meanthis/hub-core";
 const cliDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const rootDir = join(cliDir, "..", "..");
 const cliEntry = join(cliDir, "dist", "index.js");
+const brokerEntry = join(cliDir, "dist", "local-bridge-mcp-stdio-broker.js");
 const twoAttachmentFixture = join(cliDir, "fixtures", "two-attachment.capture-session.json");
 const agentSafeFixture = join(cliDir, "fixtures", "agent-safe.capture-session.json");
 
@@ -24,8 +25,29 @@ async function verifyCli() {
   require(
     help.stdout.includes("meanthis bridge --help")
       && help.stdout.includes("meanthis mcp")
+      && help.stdout.includes("meanthis mcp-http [--port <1-65535>]")
+      && help.stdout.includes("meanthis capture --help")
       && help.stdout.includes("bridge config --host"),
-    "Top-level help must expose bridge setup and MCP commands.",
+    "Top-level help must expose bridge setup, capture fallback, and both MCP transports.",
+  );
+
+  const bridgeHelp = runCli(["bridge", "--help"]);
+  require(bridgeHelp.status === 0, "Bridge help must exit 0.");
+  require(bridgeHelp.stderr === "", "Bridge help must not write stderr.");
+  require(
+    bridgeHelp.stdout.includes("meanthis bridge rotate-agent-token --host codex --json")
+      && bridgeHelp.stdout.includes("Explicitly rotate both local credentials")
+      && !/MEANTHIS_MCP_HTTP_TOKEN|Authorization|Bearer /u.test(bridgeHelp.stdout),
+    "Bridge help must expose the secret-free Agent credential recovery command.",
+  );
+
+  const mcpHttpHelp = runCli(["mcp-http", "--help"]);
+  require(mcpHttpHelp.status === 0, "MCP HTTP help must exit 0.");
+  require(mcpHttpHelp.stderr === "", "MCP HTTP help must not write stderr.");
+  require(
+    mcpHttpHelp.stdout.includes("meanthis mcp-http [--port <1-65535>]")
+      && mcpHttpHelp.stdout.includes("MEANTHIS_MCP_HTTP_TOKEN"),
+    "MCP HTTP help must describe the foreground diagnostic command and bearer env contract.",
   );
 
   const cursorConfig = runCli(["bridge", "config", "--host", "cursor", "--json"]);
@@ -35,12 +57,22 @@ async function verifyCli() {
   require(
     cursorConfigOutput.kind === "ui-attach.bridge-config"
       && cursorConfigOutput.data?.descriptor?.transport?.type === "stdio"
+      && cursorConfigOutput.data?.descriptor?.transport?.command === process.execPath
+      && JSON.stringify(cursorConfigOutput.data?.descriptor?.transport?.args)
+        === JSON.stringify([brokerEntry])
+      && cursorConfigOutput.data?.descriptor?.transport?.env === null
+      && cursorConfigOutput.data?.descriptor?.transport?.cwd === null
       && cursorConfigOutput.data?.setup?.host === "cursor"
-      && cursorConfigOutput.data?.setup?.installation === "generated_only"
+      && cursorConfigOutput.data?.setup?.installation === "manual"
       && cursorConfigOutput.data?.setup?.verification === "manual_required"
-      && cursorConfigOutput.data?.setup?.config?.mcpServers?.meanthis?.command
-        === process.execPath,
-    "Cursor configuration must derive from the shared stdio descriptor.",
+      && cursorConfigOutput.data?.setup?.manual?.transport === "stdio"
+      && cursorConfigOutput.data?.setup?.manual?.command === process.execPath
+      && JSON.stringify(cursorConfigOutput.data?.setup?.manual?.args)
+        === JSON.stringify([brokerEntry])
+      && cursorConfigOutput.data?.setup?.manual?.env === null
+      && cursorConfigOutput.data?.setup?.manual?.cwd === null
+      && !/MEANTHIS_MCP_HTTP_TOKEN|Authorization|Bearer /u.test(cursorConfig.stdout),
+    "Cursor configuration must derive from the exact secret-free thin stdio broker descriptor.",
   );
 
   const sourceHash = await hashFile(twoAttachmentFixture);
@@ -107,6 +139,48 @@ async function verifyCli() {
     mcpError.kind === "ui-attach.error" &&
       mcpError.error?.code === "INVALID_ARGUMENTS",
     "Invalid MCP invocation must report INVALID_ARGUMENTS.",
+  );
+
+  const invalidMcpHttp = runCli(["mcp-http", "--port", "0"]);
+  require(invalidMcpHttp.status === 2, "Invalid MCP HTTP invocation must exit 2.");
+  require(invalidMcpHttp.stdout === "", "Invalid MCP HTTP invocation must not write stdout.");
+  const mcpHttpError = parseSingleJsonLine(
+    invalidMcpHttp.stderr,
+    "Invalid MCP HTTP stderr",
+  );
+  require(
+    mcpHttpError.kind === "ui-attach.error"
+      && mcpHttpError.error?.code === "INVALID_ARGUMENTS",
+    "Invalid MCP HTTP invocation must report INVALID_ARGUMENTS.",
+  );
+
+  const hostileInheritedToken = Buffer.alloc(32, 8).toString("base64url");
+  const invalidBroker = spawnSync(
+    process.execPath,
+    [brokerEntry, "unexpected"],
+    {
+      cwd: rootDir,
+      encoding: "utf8",
+      shell: false,
+      env: { ...process.env, MEANTHIS_MCP_HTTP_TOKEN: hostileInheritedToken },
+    },
+  );
+  if (invalidBroker.error) throw invalidBroker.error;
+  require(invalidBroker.status === 1, "Broker arguments must fail closed with exit 1.");
+  require(invalidBroker.stdout === "", "Broker argument failure must not write stdout.");
+  require(
+    !invalidBroker.stderr.includes(hostileInheritedToken),
+    "Broker argument failure must not expose an inherited bearer.",
+  );
+  const brokerError = parseSingleJsonLine(
+    invalidBroker.stderr,
+    "Broker argument failure stderr",
+  );
+  require(
+    brokerError.kind === "ui-attach.error"
+      && brokerError.error?.code === "MCP_STDIO_BROKER_UNAVAILABLE"
+      && brokerError.error?.message === "MeanThis MCP stdio broker unavailable.",
+    "Broker argument failure must report only its generic unavailable error.",
   );
 
   const invalidBridge = runCli(["bridge", "install", "--json"]);

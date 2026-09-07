@@ -11,6 +11,7 @@
     { "path": "../../packages/prompt" },
     { "path": "../../packages/hub-core" },
     { "path": "../../packages/replay" },
+    { "path": "../../packages/web-picker" },
     { "path": "../../packages/web-extractor" }
   ],
   "include": ["src/**/*.ts"],

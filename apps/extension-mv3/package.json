@@ -16,6 +16,7 @@
     "@meanthis/prompt": "0.1.0",
     "@meanthis/replay": "0.1.0",
     "@meanthis/schema": "0.1.0",
+    "@meanthis/web-picker": "0.1.0",
     "@meanthis/web-extractor": "0.1.0"
   },
   "devDependencies": {

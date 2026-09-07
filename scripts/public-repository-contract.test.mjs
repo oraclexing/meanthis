@@ -56,7 +56,11 @@ describe("public repository contract", () => {
     expect(agentInstallChinese).toContain("meanthis bridge doctor --json");
     expect(rootManifest.scripts["setup:bridge:codex"])
       .toContain("meanthis bridge install --host codex --json");
-    expect(rootManifest.scripts["start:bridge"]).toBe("meanthis bridge start --json");
+    expect(rootManifest.scripts["start:bridge"]).toBe(
+      agentDocsRoot === root
+        ? "meanthis bridge start --json"
+        : "node apps/cli/dist/index.js bridge start --json",
+    );
     expect(privacy).toContain("permalink: /privacy/");
     expect(privacyChinese).toContain("permalink: /zh/privacy/");
     expect(privacy).toContain("Chrome Web Store User Data Policy");
@@ -92,7 +96,6 @@ describe("public repository contract", () => {
       "benchmarks",
       "docs/dogfood",
       "docs/plans",
-      "packages/html-ops",
       "tools/upstream-conformance",
       "tools/vite-source-map",
     ]) expect(existsSync(join(root, ...path.split("/"))), path).toBe(false);

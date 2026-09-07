@@ -6,6 +6,7 @@ import type {
   UIAttachmentBoundary,
   UIAttachmentDisclosureMode,
   UIAttachmentLocator,
+  UIAttachmentSelectionPoint,
 } from "@meanthis/schema";
 import { extractElementAttachment } from "@meanthis/web-extractor";
 import type { OriginCaptureRecord } from "./capture-store";
@@ -29,6 +30,7 @@ export interface CaptureElementTargetOptions {
   tabId?: number;
   frameId?: number;
   disclosureMode?: UIAttachmentDisclosureMode;
+  selectionPoint?: UIAttachmentSelectionPoint | null;
 }
 
 export async function captureElementTarget(
@@ -45,7 +47,7 @@ export async function captureElementTarget(
     };
   }
 
-  const extractedAttachment = withExtensionPolicy(
+  const policyAttachment = withExtensionPolicy(
     withEmbeddedFrameBoundary(
       extractElementAttachment(target, {
         locationHref: options.locationHref,
@@ -58,6 +60,9 @@ export async function captureElementTarget(
     scope.origin,
     scope.redactedFields,
   );
+  const extractedAttachment = options.selectionPoint
+    ? { ...policyAttachment, selectionPoint: { ...options.selectionPoint } }
+    : policyAttachment;
   const replayPage = createDomReplayPage(target.ownerDocument);
   const replayResult = await verifyAttachmentLocator(replayPage, extractedAttachment);
   const stableIdentityAttempts = await verifyStableIdentity(

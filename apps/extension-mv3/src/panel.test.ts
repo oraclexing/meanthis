@@ -10,6 +10,7 @@ import type {
   TimeDisplayPreference,
 } from "./settings-preferences";
 import type { PanelHandoffFormatPreferences } from "./panel-handoff-format";
+import type { AutomaticPageAccessController } from "./automatic-page-access";
 import type {
   PanelSessionController,
   PanelSessionSnapshot,
@@ -17,8 +18,9 @@ import type {
 import type { OriginCaptureRecord } from "./capture-store";
 import type { FirstCaptureDisclosureStore } from "./first-capture-disclosure";
 import { ENGLISH_MESSAGES } from "./i18n";
+import { createCaptureObservation } from "./create-capture-observation";
 import type { SessionFileResult, StoredSessionHandoffData } from "./session-file";
-import type { StoredOriginSessionSummary } from "./session-store";
+import type { ActiveSessionReadback, StoredOriginSessionSummary } from "./session-store";
 import {
   createCaptureRecord,
   createSessionFile,
@@ -39,6 +41,75 @@ describe("extension session panel", () => {
     vi.setSystemTime(new Date("2026-07-11T12:34:56.789Z"));
     document.body.innerHTML = createPanelDom();
     document.documentElement.removeAttribute("data-theme");
+  });
+
+  test("explicitly compares the selected target and copies facts without replacing its capture", async () => {
+    const record = { ...createCaptureRecord("save", "Save changes", "agent_safe"), tabId: 1, frameId: 0 };
+    const file = createSessionFile([record]);
+    const controller = createFakeController({ file, legacyRecord: record, selectedItemId: "att_save" });
+    const current = structuredClone(record.attachment);
+    current.element.text = "Updated button";
+    const captureComparison = vi.fn(async () => ({ status: "observed" as const, observation: createCaptureObservation(current)! }));
+    const clipboard = { writeText: vi.fn(async () => undefined) };
+    await initializePanel(createPanelDependencies(controller, { captureComparison, clipboard }));
+    expect(captureComparison).not.toHaveBeenCalled();
+    query<HTMLButtonElement>("#capture-comparison-check").click();
+    await flushMicrotasks();
+    expect(captureComparison).toHaveBeenCalledOnce();
+    expect(query("#capture-comparison-changes").textContent).toContain("Updated button");
+    query<HTMLButtonElement>("#capture-comparison-copy").click();
+    await flushMicrotasks();
+    expect(clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining("Updated button"));
+    expect(controller.getSnapshot().file).toEqual(file);
+    expect(controller.removeItem).not.toHaveBeenCalled();
+    expect(controller.setIntent).not.toHaveBeenCalled();
+  });
+
+  test("allows copying a new comparison while an earlier clipboard write settles", async () => {
+    const record = { ...createCaptureRecord("save", "Save changes", "agent_safe"), tabId: 1, frameId: 0 };
+    const controller = createFakeController({ file: createSessionFile([record]), legacyRecord: record, selectedItemId: "att_save" });
+    const pendingCopy = createDeferred<void>();
+    const captureComparison = vi.fn(async () => ({ status: "observed" as const, observation: createCaptureObservation(record.attachment)! }));
+    const clipboard = { writeText: vi.fn(() => pendingCopy.promise) };
+    await initializePanel(createPanelDependencies(controller, { captureComparison, clipboard }));
+    query<HTMLButtonElement>("#capture-comparison-check").click();
+    await flushMicrotasks();
+    query<HTMLButtonElement>("#capture-comparison-copy").click();
+    query<HTMLButtonElement>("#capture-comparison-check").click();
+    await flushMicrotasks();
+    pendingCopy.resolve();
+    await flushMicrotasks();
+    expect(query<HTMLButtonElement>("#capture-comparison-copy").disabled).toBe(false);
+  });
+
+  test.each(["missing", "ambiguous", "stale", "unavailable"] as const)("does not offer comparison facts for a %s target", async (status) => {
+    const record = { ...createCaptureRecord("save", "Save changes", "agent_safe"), tabId: 1, frameId: 0 };
+    const file = createSessionFile([record]);
+    const controller = createFakeController({ file, legacyRecord: record, selectedItemId: "att_save" });
+    const captureComparison = vi.fn(async () => ({ status, observation: null }));
+    await initializePanel(createPanelDependencies(controller, { captureComparison }));
+    query<HTMLButtonElement>("#capture-comparison-check").click();
+    await flushMicrotasks();
+    expect(query<HTMLButtonElement>("#capture-comparison-copy").hidden).toBe(true);
+    expect(query("#capture-comparison-changes").textContent).toBe("");
+    expect(query("#capture-comparison-status").textContent).not.toBe("");
+    expect(controller.getSnapshot().file).toEqual(file);
+  });
+
+  test("discards a late target observation when the session epoch changes", async () => {
+    const record = { ...createCaptureRecord("save", "Save changes", "agent_safe"), tabId: 1, frameId: 0 };
+    const controller = createFakeController({ file: createSessionFile([record]), legacyRecord: record, selectedItemId: "att_save" });
+    const current = structuredClone(record.attachment);
+    current.element.text = "Stale result must not appear";
+    let release!: (value: { status: "observed"; observation: NonNullable<ReturnType<typeof createCaptureObservation>> }) => void;
+    const captureComparison = vi.fn(() => new Promise<{ status: "observed"; observation: NonNullable<ReturnType<typeof createCaptureObservation>> }>((resolve) => { release = resolve; }));
+    await initializePanel(createPanelDependencies(controller, { captureComparison }));
+    query<HTMLButtonElement>("#capture-comparison-check").click();
+    controller.__setSnapshot({ epoch: "replacement-epoch" });
+    release({ status: "observed", observation: createCaptureObservation(current)! });
+    await flushMicrotasks();
+    expect(query("#capture-comparison-changes").textContent).not.toContain("Stale result");
+    expect(query<HTMLButtonElement>("#capture-comparison-copy").hidden).toBe(true);
   });
 
   test("does not initialize or schedule local bridge work without a bridge dependency", async () => {
@@ -94,7 +165,7 @@ describe("extension session panel", () => {
     };
     await initializePanel(createPanelDependencies(createFakeController(), {
       firstCaptureDisclosure,
-      testClickCapture: {
+      elementSelection: {
         read: async () => false,
         save: async (enabled) => { savedSelectionStates.push(enabled); },
       },
@@ -128,7 +199,7 @@ describe("extension session panel", () => {
     };
     await initializePanel(createPanelDependencies(createFakeController(), {
       firstCaptureDisclosure,
-      testClickCapture: {
+      elementSelection: {
         read: async () => selectionEnabled,
         save: async (enabled) => {
           selectionEnabled = enabled;
@@ -163,7 +234,7 @@ describe("extension session panel", () => {
     };
     await initializePanel(createPanelDependencies(createFakeController(), {
       firstCaptureDisclosure,
-      testClickCapture: {
+      elementSelection: {
         read: async () => false,
         save: async (enabled) => { savedSelectionStates.push(enabled); },
       },
@@ -195,7 +266,7 @@ describe("extension session panel", () => {
     const runtimeListeners: Array<(message: unknown) => void> = [];
     const controller = createFakeController();
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read: async () => currentSelectionState,
         save: async (enabled) => {
           currentSelectionState = enabled;
@@ -235,6 +306,9 @@ describe("extension session panel", () => {
       "Selection enabled. Click page elements to add them. Press Escape when done.",
     );
 
+    controller.__setSnapshot({
+      status: { kind: "ready", message: "Capture session ready." },
+    });
     currentSelectionState = false;
     runtimeListeners[0]({
       type: "ui-attach:element-selection-updated",
@@ -246,15 +320,38 @@ describe("extension session panel", () => {
     expect(query("#status").textContent).toBe(
       "Selection stopped. Review the captured elements or select Add elements to continue.",
     );
-    expect(toggle.classList.contains("primary-action")).toBe(true);
-    expect(toggle.classList.contains("utility-action")).toBe(false);
-    expect(copy.classList.contains("primary-action")).toBe(true);
+
+    controller.__setSnapshot({
+      status: { kind: "ready", message: "Selected element preview ready." },
+    });
+    expect(query("#status").textContent).toBe(
+      "Selection stopped. Review the captured elements or select Add elements to continue.",
+    );
 
     controller.__setSnapshot({
       file: createSessionFile([record]),
       legacyRecord: record,
       selectedItemId: record.attachment.id,
+      status: { kind: "ready", message: "Selected element preview ready." },
     });
+    expect(query("#status").textContent).toBe("Capture ready.");
+
+    runtimeListeners[0]({
+      type: "ui-attach:element-selection-updated",
+      enabled: false,
+    });
+    await flushMicrotasks();
+    expect(query("#status").textContent).toBe(
+      "Selection stopped. Review the captured elements or select Add elements to continue.",
+    );
+    controller.__setSnapshot({
+      status: { kind: "error", message: "Deterministic panel error." },
+    });
+    expect(query("#status").textContent).toBe("Deterministic panel error.");
+    expect(toggle.classList.contains("primary-action")).toBe(true);
+    expect(toggle.classList.contains("utility-action")).toBe(false);
+    expect(copy.classList.contains("primary-action")).toBe(true);
+
     expect(toggle.classList.contains("primary-action")).toBe(true);
     expect(toggle.classList.contains("utility-action")).toBe(false);
     expect(copy.classList.contains("primary-action")).toBe(true);
@@ -273,7 +370,7 @@ describe("extension session panel", () => {
     const savedSelectionStates: boolean[] = [];
     let keydownListener: ((event: KeyboardEvent) => void) | undefined;
     await initializePanel(createPanelDependencies(createFakeController(), {
-      testClickCapture: {
+      elementSelection: {
         read: async () => currentSelectionState,
         save: async (enabled) => {
           currentSelectionState = enabled;
@@ -305,6 +402,31 @@ describe("extension session panel", () => {
     expect(escape.defaultPrevented).toBe(true);
   });
 
+  test("does not let a stopped-selection notification hide a pending clear", async () => {
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    await initializePanel(createPanelDependencies(createFakeController({
+      clearPending: true,
+      activeClearOperationId: "clear-1",
+      status: { kind: "ready", message: "Capture session ready." },
+    }), {
+      elementSelection: {
+        read: async () => false,
+        save: async () => undefined,
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+    }));
+
+    runtimeListeners[0]({
+      type: "ui-attach:element-selection-updated",
+      enabled: false,
+    });
+    await flushMicrotasks();
+
+    expect(query("#status").textContent).toBe(
+      "Selected elements are still being cleared. Retry before capturing or exporting.",
+    );
+  });
+
   test("renders dynamic selection state in the browser UI language", async () => {
     let enabled = false;
     const messages: Record<string, string> = {
@@ -313,7 +435,7 @@ describe("extension session panel", () => {
       selection_enabled: "选择已开启。点击页面元素即可添加，完成后按 Escape。",
       unsupported_page: "不支持此页面。请打开普通 HTTP(S) 页面来捕获 UI。",
     };
-    await initializePanel(createPanelDependencies(createFakeController({
+    const controller = createFakeController({
       activeSupported: false,
       activePage: null,
       origin: null,
@@ -321,15 +443,29 @@ describe("extension session panel", () => {
         kind: "empty",
         message: "This page is not supported. Open an HTTP(S) page to capture UI.",
       },
-    }), {
+    });
+    await initializePanel(createPanelDependencies(controller, {
       i18n: {
         language: "zh-CN",
         t: (key: string) => messages[key] ?? key,
       },
-      testClickCapture: {
+      elementSelection: {
         read: async () => enabled,
         save: async (next) => {
           enabled = next;
+          if (next) {
+            controller.__setSnapshot({
+              activeSupported: true,
+              activePage: {
+                tabId: 1,
+                frameId: 0,
+                origin: ORIGIN,
+                pathname: "/settings",
+              },
+              origin: ORIGIN,
+              status: { kind: "ready", message: "Capture session ready." },
+            });
+          }
         },
       },
     }));
@@ -386,7 +522,7 @@ describe("extension session panel", () => {
       },
     });
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read: async () => accessGranted,
         save: async () => {
           if (!saveAllowed) throw new Error("Page access is required before selection.");
@@ -401,7 +537,7 @@ describe("extension session panel", () => {
     expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(false);
     expect(query("#page-access-recovery-heading").textContent).toBe("Reconnect this page");
     expect(query("#page-access-recovery-reason").textContent).toContain(
-      "only lets MeanThis read a page after you select MeanThis from the toolbar",
+      "Choose automatic access below, or grant temporary access from the toolbar",
     );
     expect(
       Array.from(document.querySelectorAll("#page-access-recovery li"), (item) => item.textContent),
@@ -411,6 +547,16 @@ describe("extension session panel", () => {
       "Select Add elements again.",
     ]);
     expect(query("#status").textContent).toBe("Page access is required before selection.");
+    expect(query<HTMLElement>("#page-access-automatic").hidden).toBe(false);
+    expect(query("#page-access-automatic-explanation").textContent).toContain(
+      "Chrome will keep MeanThis authorized for ordinary HTTP(S) pages",
+    );
+    expect(query("#page-access-automatic-explanation").textContent).toContain(
+      "Add elements or another explicit capture action",
+    );
+    expect(query<HTMLButtonElement>("#page-access-enable-automatic").textContent).toBe(
+      "Enable automatic access to web pages",
+    );
 
     controller.__setSnapshot({
       status: { kind: "ready", message: "Capture ready." },
@@ -431,6 +577,216 @@ describe("extension session panel", () => {
     expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(true);
   });
 
+  test("enables persistent ordinary-page access directly from permission recovery", async () => {
+    const operations: string[] = [];
+    const controller = createFakeController();
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    const automaticPageAccess: AutomaticPageAccessController = {
+      read: vi.fn(async () => false),
+      setEnabled: vi.fn(async () => {
+        operations.push("permissions:request");
+        return true;
+      }),
+    };
+    await initializePanel(createPanelDependencies(controller, {
+      automaticPageAccess,
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+      frameScopes: {
+        list: vi.fn(async () => {
+          operations.push("frame-scopes:refresh");
+          return { tabId: 1, selectedFrameId: 0, scopes: [] };
+        }),
+        select: vi.fn(async () => false),
+      },
+    }));
+    operations.length = 0;
+    controller.refreshActiveOrigin = vi.fn(async () => {
+      operations.push("active-origin:refresh");
+    });
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    operations.length = 0;
+
+    query<HTMLButtonElement>("#page-access-enable-automatic").click();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(automaticPageAccess.setEnabled).toHaveBeenCalledWith(true);
+    expect(operations).toEqual([
+      "permissions:request",
+      "active-origin:refresh",
+      "frame-scopes:refresh",
+    ]);
+    expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(true);
+    expect(query<HTMLButtonElement>("#element-selection-toggle").disabled).toBe(false);
+  });
+
+  test.each([
+    {
+      name: "denial",
+      setEnabled: async () => false,
+      expected: "Automatic page access was not granted. Use the toolbar for temporary access, or try again.",
+    },
+    {
+      name: "failure",
+      setEnabled: async () => {
+        throw new Error("secret permission failure");
+      },
+      expected: "Automatic page access could not be enabled. Use the toolbar for temporary access, or try again.",
+    },
+  ])("keeps permission recovery after automatic-access $name without leaking errors", async ({
+    setEnabled,
+    expected,
+  }) => {
+    const controller = createFakeController();
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    await initializePanel(createPanelDependencies(controller, {
+      automaticPageAccess: {
+        read: vi.fn(async () => false),
+        setEnabled: vi.fn(setEnabled),
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+    }));
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    vi.mocked(controller.refreshActiveOrigin).mockClear();
+
+    const action = query<HTMLButtonElement>("#page-access-enable-automatic");
+    action.click();
+    await flushMicrotasks();
+
+    expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(false);
+    expect(action.disabled).toBe(false);
+    expect(query<HTMLElement>("#page-access-automatic-status").hidden).toBe(false);
+    expect(query("#page-access-automatic-status").textContent).toBe(expected);
+    expect(query("#page-access-automatic-status").textContent).not.toContain("secret");
+    expect(controller.refreshActiveOrigin).not.toHaveBeenCalled();
+  });
+
+  test("prevents duplicate automatic-access requests while permission is pending", async () => {
+    const grant = createDeferred<boolean>();
+    const controller = createFakeController();
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    const setEnabled = vi.fn(() => grant.promise);
+    await initializePanel(createPanelDependencies(controller, {
+      automaticPageAccess: {
+        read: vi.fn(async () => false),
+        setEnabled,
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+    }));
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+
+    const action = query<HTMLButtonElement>("#page-access-enable-automatic");
+    action.click();
+    action.click();
+    await flushMicrotasks();
+
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+    expect(action.disabled).toBe(true);
+    expect(action.getAttribute("aria-busy")).toBe("true");
+    expect(action.textContent).toBe("Enabling automatic access…");
+
+    grant.resolve(false);
+    await flushMicrotasks();
+
+    expect(action.disabled).toBe(false);
+    expect(action.getAttribute("aria-busy")).toBe("false");
+  });
+
+  test("does not let a pending grant overwrite a newer access-required navigation", async () => {
+    const grant = createDeferred<boolean>();
+    const controller = createFakeController();
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    await initializePanel(createPanelDependencies(controller, {
+      automaticPageAccess: {
+        read: vi.fn(async () => false),
+        setEnabled: vi.fn(() => grant.promise),
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+    }));
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    vi.mocked(controller.refreshActiveOrigin).mockClear();
+
+    const action = query<HTMLButtonElement>("#page-access-enable-automatic");
+    action.click();
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    grant.resolve(true);
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.refreshActiveOrigin).toHaveBeenCalledTimes(1);
+    expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(false);
+    expect(query<HTMLButtonElement>("#element-selection-toggle").disabled).toBe(true);
+    expect(query<HTMLElement>("#page-access-automatic-status").hidden).toBe(true);
+  });
+
+  test("keeps access fail-closed when refresh resolves without a supported active origin", async () => {
+    const controller = createFakeController({
+      activeSupported: false,
+      origin: null,
+      activePage: null,
+      file: null,
+      legacyRecord: null,
+      selectedItemId: null,
+    });
+    const runtimeListeners: Array<(message: unknown) => void> = [];
+    await initializePanel(createPanelDependencies(controller, {
+      automaticPageAccess: {
+        read: vi.fn(async () => false),
+        setEnabled: vi.fn(async () => true),
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
+    }));
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    vi.mocked(controller.refreshActiveOrigin).mockClear();
+
+    query<HTMLButtonElement>("#page-access-enable-automatic").click();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.refreshActiveOrigin).toHaveBeenCalledTimes(1);
+    expect(query<HTMLElement>("#page-access-recovery").hidden).toBe(false);
+    expect(query<HTMLButtonElement>("#element-selection-toggle").disabled).toBe(true);
+    expect(query("#page-access-automatic-status").textContent).toBe(
+      "Automatic access is on, but MeanThis still cannot access this page. Reload it or use the toolbar for temporary access.",
+    );
+  });
+
   test("uses a reload-first recovery when the content script becomes unavailable", async () => {
     let contentReachable = false;
     const controller = createFakeController({
@@ -441,7 +797,7 @@ describe("extension session panel", () => {
       selectedItemId: null,
     });
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read: async () => contentReachable,
         save: async () => {
           if (!contentReachable) {
@@ -459,6 +815,7 @@ describe("extension session panel", () => {
     expect(query("#page-access-recovery-heading").textContent).toBe("Reload and reconnect");
     expect(query("#page-access-recovery-reason").textContent).toContain("lost access");
     expect(query("#page-access-recovery-first-step").textContent).toBe("Reload this page.");
+    expect(query<HTMLElement>("#page-access-automatic").hidden).toBe(true);
 
     controller.__setSnapshot({
       status: { kind: "ready", message: "Capture ready." },
@@ -492,10 +849,7 @@ describe("extension session panel", () => {
     expect(parsed.querySelector("#capture-mode")).toBeNull();
     expect(parsed.querySelector("#theme-preference")).toBeNull();
     expect(PANEL_CSS).toMatch(/\.settings-button\s*{[^}]*width:\s*36px;[^}]*height:\s*36px;/s);
-    expect(advancedSession?.open).toBe(false);
-    expect(advancedSession?.hidden).toBe(true);
-    expect(advancedSession?.hasAttribute("data-developer-tooling")).toBe(true);
-    expect(advancedSession?.querySelector("#export-session")).not.toBeNull();
+    expect(advancedSession).toBeNull();
     expect(parsed.querySelector("#clear-session")?.textContent?.trim()).toBe("Clear selected elements");
     expect(parsed.querySelector("#clear-session")?.classList.contains("session-reset")).toBe(true);
     expect(parsed.querySelector('[data-i18n="session"]')?.textContent?.trim()).toBe(
@@ -504,6 +858,8 @@ describe("extension session panel", () => {
     expect(advancedData?.open).toBe(false);
     expect(advancedData?.hidden).toBe(true);
     expect(advancedData?.hasAttribute("data-developer-tooling")).toBe(true);
+    expect(advancedData?.querySelector("#export-session")).not.toBeNull();
+    expect(advancedData?.querySelector('[data-i18n="source_export_help"]')).not.toBeNull();
     expect(advancedData?.querySelector("#markdown")).not.toBeNull();
     expect(advancedData?.querySelector("#json")).not.toBeNull();
     expect(optionalSettings?.open).toBe(false);
@@ -579,18 +935,20 @@ describe("extension session panel", () => {
     expect(PANEL_CSS).toMatch(/\.actions button:not\(\.session-reset\)\s*{[^}]*width:\s*100%/s);
   });
 
-  test("separates layout help from copy options", () => {
+  test("integrates task note shortcuts with the selected task editor", () => {
     const parsed = new DOMParser().parseFromString(PANEL_HTML, "text/html");
     const relationSettings = parsed.querySelector<HTMLDetailsElement>("#relation-settings");
     const handoffSettings = parsed.querySelector<HTMLDetailsElement>("#optional-settings");
     const relationComposer = parsed.querySelector<HTMLElement>("#relation-composer");
     const handoffOptions = parsed.querySelector<HTMLElement>("#handoff-options");
+    const taskField = parsed.querySelector<HTMLElement>(".task-field");
+    const intent = parsed.querySelector<HTMLTextAreaElement>("#intent");
 
     expect(relationSettings?.tagName).toBe("DETAILS");
     expect(relationSettings?.open).toBe(false);
     expect(relationSettings?.hidden).toBe(true);
     expect(relationSettings?.querySelector(":scope > summary")?.textContent?.trim()).toBe(
-      "Task note shortcuts (optional)",
+      "Use a task note shortcut (optional)",
     );
     expect(handoffSettings?.tagName).toBe("DETAILS");
     expect(handoffSettings?.open).toBe(false);
@@ -603,6 +961,9 @@ describe("extension session panel", () => {
     expect(handoffOptions?.tagName).toBe("DIV");
     expect(handoffOptions?.querySelector("#handoff-options-heading")).toBeNull();
     expect(relationSettings?.contains(relationComposer ?? null)).toBe(true);
+    expect(taskField?.contains(relationSettings ?? null)).toBe(true);
+    expect(relationSettings?.compareDocumentPosition(intent!))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(relationSettings?.contains(handoffOptions ?? null)).toBe(false);
     expect(handoffSettings?.contains(relationComposer ?? null)).toBe(false);
     expect(handoffSettings?.contains(handoffOptions ?? null)).toBe(true);
@@ -618,7 +979,7 @@ describe("extension session panel", () => {
     }));
 
     expect(query<HTMLDetailsElement>("#advanced-data").hidden).toBe(true);
-    expect(query<HTMLDetailsElement>("#advanced-session-tools").hidden).toBe(true);
+    expect(document.querySelector("#advanced-session-tools")).toBeNull();
 
     document.body.innerHTML = createPanelDom();
     const developmentController = createFakeController();
@@ -627,7 +988,7 @@ describe("extension session panel", () => {
     }));
 
     expect(query<HTMLDetailsElement>("#advanced-data").hidden).toBe(false);
-    expect(query<HTMLDetailsElement>("#advanced-session-tools").hidden).toBe(false);
+    expect(query<HTMLDetailsElement>("#advanced-data").contains(query("#export-session"))).toBe(true);
   });
 
   test("keeps saved-site history visible while the active origin changes", async () => {
@@ -735,6 +1096,135 @@ describe("extension session panel", () => {
     await vi.waitFor(() => expect(query("#saved-sites-count").textContent).toBe("1"));
     expect(query("#saved-sites-status").textContent).toBe("Saved capture cleared.");
     expect(controller.refreshActiveOrigin).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries a pending inactive saved origin with its exact id and no generator call", async () => {
+    const pending = {
+      ...storedOrigin("https://admin.example.test", "epoch-admin", 0),
+      clearPending: true,
+      activeClearOperationId: "clear-stored-pending",
+    };
+    const stored = [pending];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const randomUUID = vi.fn(() => "clear-generated");
+    const controller = createFakeController({
+      activeSupported: false,
+      activePage: null,
+      origin: null,
+      file: null,
+      legacyRecord: null,
+      selectedItemId: null,
+    });
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      randomUUID,
+      confirm: () => true,
+    }));
+
+    query<HTMLButtonElement>("[data-clear-saved-origin='https://admin.example.test']").click();
+    await flushMicrotasks();
+
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(storedSessions.clear).toHaveBeenCalledWith(
+      "https://admin.example.test",
+      "epoch-admin",
+      "clear-stored-pending",
+    );
+  });
+
+  test.each([
+    ["idle with non-null id", () => malformedStoredSummary("idle-non-null")],
+    ["pending with null id", () => malformedStoredSummary("pending-null")],
+    ["pending with whitespace id", () => malformedStoredSummary("pending-whitespace")],
+    ["pending with overbound id", () => malformedStoredSummary("pending-overbound")],
+    ["inherited clear pair", () => malformedStoredSummary("inherited")],
+    ["extra summary field", () => malformedStoredSummary("extra")],
+  ])("fails stored-session inventory closed for %s", async (_label, createSummary) => {
+    const randomUUID = vi.fn(() => "clear-generated");
+    const clear = vi.fn();
+    await initializePanel(createPanelDependencies(createFakeController(), {
+      randomUUID,
+      storedSessions: {
+        list: vi.fn(async () => ({
+          ok: true as const,
+          data: [createSummary()] as StoredOriginSessionSummary[],
+        })),
+        review: vi.fn(),
+        clear,
+        clearAll: vi.fn(),
+      },
+    }));
+
+    expect(query("#saved-sites-count").textContent).toBe("?");
+    expect(query("#saved-sites-list").textContent).toBe(
+      "Saved captures are unavailable. Try again.",
+    );
+    expect(queryOptional("[data-clear-saved-origin]")).toBeNull();
+    expect(query("#saved-sites-status").textContent).not.toBe("Saved capture cleared.");
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["idle with non-null id", () => malformedClearReadback("idle-non-null")],
+    ["pending with null id", () => malformedClearReadback("pending-null")],
+    ["pending with whitespace id", () => malformedClearReadback("pending-whitespace")],
+    ["pending with overbound id", () => malformedClearReadback("pending-overbound")],
+    ["inherited clear pair", () => malformedClearReadback("inherited")],
+    ["extra readback field", () => malformedClearReadback("extra")],
+  ])("rejects malformed stored clear response for %s", async (_label, createReadback) => {
+    const pending = {
+      ...storedOrigin("https://admin.example.test", "epoch-admin", 0),
+      clearPending: true,
+      activeClearOperationId: "clear-stored-pending",
+    };
+    const randomUUID = vi.fn(() => "clear-generated");
+    const controller = createFakeController({
+      activeSupported: false,
+      activePage: null,
+      origin: null,
+      file: null,
+      legacyRecord: null,
+      selectedItemId: null,
+    });
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: [structuredClone(pending)] })),
+      review: vi.fn(),
+      clear: vi.fn(async () => ({
+        ok: true as const,
+        data: createReadback() as ActiveSessionReadback,
+      })),
+      clearAll: vi.fn(),
+    };
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      randomUUID,
+      confirm: () => true,
+    }));
+
+    query<HTMLButtonElement>("[data-clear-saved-origin='https://admin.example.test']").click();
+    await flushMicrotasks();
+
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(storedSessions.clear).toHaveBeenCalledWith(
+      "https://admin.example.test",
+      "epoch-admin",
+      "clear-stored-pending",
+    );
+    expect(controller.refreshActiveOrigin).not.toHaveBeenCalled();
+    expect(storedSessions.list).toHaveBeenCalledOnce();
+    expect(query("#saved-sites-status").textContent).toBe(
+      "Saved-capture action failed. Try again.",
+    );
+    expect(query("#saved-sites-status").textContent).not.toBe("Saved capture cleared.");
   });
 
   test("reserves the viewport scrollbar gutter so full-width capture controls do not resize", () => {
@@ -874,12 +1364,12 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
     let selectionEnabled = true;
-    const testClickCapture = {
+    const elementSelection = {
       read: vi.fn(async () => selectionEnabled),
       save: vi.fn(async (enabled: boolean) => { selectionEnabled = enabled; }),
     };
@@ -945,7 +1435,7 @@ describe("extension session panel", () => {
     await initializePanel(createPanelDependencies(controller, {
       storedSessions,
       openSavedRoute,
-      testClickCapture,
+      elementSelection,
       localBridge,
     }));
     query<HTMLButtonElement>(`[data-review-saved-origin="${ORIGIN}"]`).click();
@@ -967,7 +1457,7 @@ describe("extension session panel", () => {
 
     embeddedRestore.click();
     await flushMicrotasks();
-    expect(testClickCapture.save).toHaveBeenCalledWith(false);
+    expect(elementSelection.save).toHaveBeenCalledWith(false);
     await vi.waitFor(() => expect(restoreRoute).toHaveBeenCalledWith({
       origin: ORIGIN,
       pathname: "/embedded",
@@ -1004,7 +1494,7 @@ describe("extension session panel", () => {
 
     query<HTMLButtonElement>('[data-restore-saved-pathname="/settings"]').click();
     await flushMicrotasks();
-    expect(testClickCapture.save).toHaveBeenCalledWith(false);
+    expect(elementSelection.save).toHaveBeenCalledWith(false);
     expect(query("#element-selection-toggle").getAttribute("aria-pressed")).toBe("false");
     await vi.waitFor(() => expect(restoreRoute).toHaveBeenCalledWith({
       origin: ORIGIN,
@@ -1239,6 +1729,24 @@ describe("extension session panel", () => {
       "Restored 2 targets. You can continue editing task notes or copy for agent. " +
       "0 missing · 0 ambiguous.",
     );
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: true,
+      enabled: false,
+      origin: null,
+    });
+    await flushMicrotasks();
+    controller.__setSnapshot({
+      status: { kind: "ready", message: "Capture ready." },
+    });
+    expect(query("#status").textContent).toBe("Page access is required before selection.");
+    runtimeListeners[0]({
+      type: "ui-attach:active-origin-changed",
+      accessRequired: false,
+      enabled: true,
+      origin: ORIGIN,
+    });
+    await flushMicrotasks();
     expect(document.activeElement).toBe(query("#status"));
     expect(controller.refreshActiveOrigin).toHaveBeenCalledWith();
     expect(save.tabId).toBe(7);
@@ -1287,7 +1795,7 @@ describe("extension session panel", () => {
 
     await initializePanel(createPanelDependencies(createFakeController(), {
       storedSessions,
-      testClickCapture: {
+      elementSelection: {
         read: async () => true,
         save: saveSelection,
       },
@@ -1348,7 +1856,7 @@ describe("extension session panel", () => {
 
     await initializePanel(createPanelDependencies(createFakeController(), {
       storedSessions,
-      testClickCapture: { read: async () => false, save: async () => undefined },
+      elementSelection: { read: async () => false, save: async () => undefined },
       addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
     }));
     query<HTMLButtonElement>(`[data-review-saved-origin="${ORIGIN}"]`).click();
@@ -1389,7 +1897,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => disconnectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(),
-      refreshConnectionAndPublish: vi.fn(),
+      refreshConnectionAndHeartbeat: vi.fn(),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(),
     };
@@ -1897,6 +2405,8 @@ describe("extension session panel", () => {
     expect(intent).not.toBeNull();
     expect(sessionList?.parentElement?.classList.contains("session-list-frame")).toBe(true);
     expect(selectedTargetSummary).not.toBeNull();
+    expect(parsed.querySelector("#legacy-content-refresh")).toBeNull();
+    expect(parsed.querySelector("#refresh-selected-item")).toBeNull();
     expect(selectedTargetDetails?.tagName).toBe("DETAILS");
     expect(selectedTargetDetails?.open).toBe(false);
     expect(parsed.querySelector("#selected-target")).toBeNull();
@@ -1921,7 +2431,7 @@ describe("extension session panel", () => {
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(selectedTargetDetails!.compareDocumentPosition(intent!))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(intent!.compareDocumentPosition(relationSettings!))
+    expect(relationSettings!.compareDocumentPosition(intent!))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(relationSettings!.compareDocumentPosition(copySummary!))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
@@ -1947,6 +2457,7 @@ describe("extension session panel", () => {
     expect(PANEL_CSS).toMatch(/\.session-select\[aria-pressed="true"\]:not\(:disabled\):hover\s*{[^}]*background:\s*var\(--color-session-selected-hover-bg\)/s);
     expect(PANEL_CSS).toMatch(/\.session-label\s*{[^}]*-webkit-line-clamp:\s*2/s);
     expect(PANEL_CSS).toMatch(/\.selected-target-summary\s*{[^}]*overflow-wrap:\s*anywhere/s);
+    expect(PANEL_CSS).not.toMatch(/\.legacy-content-refresh\s*{/s);
     expect(PANEL_CSS).toMatch(/\.selected-target-details\s*>\s*summary:focus-visible\s*{[^}]*outline:\s*2px\s+solid\s+var\(--color-focus\)/s);
     expect(PANEL_CSS).not.toMatch(/\.primary-actions\s*{[^}]*position:\s*sticky/s);
     expect(PANEL_CSS).toMatch(/\.advanced-disclosure\s*>\s*summary:focus-visible\s*{[^}]*outline:\s*2px\s+solid\s+var\(--color-focus\)/s);
@@ -2074,7 +2585,7 @@ describe("extension session panel", () => {
       .mockResolvedValueOnce(true);
     const controller = createFakeController();
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read,
         save: async () => savePending,
       },
@@ -2106,7 +2617,7 @@ describe("extension session panel", () => {
       .mockResolvedValueOnce(true)
       .mockRejectedValueOnce(new Error("worker stopped"));
     await initializePanel(createPanelDependencies(createFakeController(), {
-      testClickCapture: {
+      elementSelection: {
         read,
         save: async () => undefined,
       },
@@ -2134,7 +2645,7 @@ describe("extension session panel", () => {
       intent: "",
     });
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read: async () => currentSelectionState,
         save: async (enabled) => { currentSelectionState = enabled; },
       },
@@ -2149,7 +2660,7 @@ describe("extension session panel", () => {
     document.body.innerHTML = createPanelDom();
     const actionable = "MeanThis cannot reach this page. Reload it, then select Add elements again.";
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read: async () => false,
         save: async () => { throw new Error(actionable); },
       },
@@ -2869,7 +3380,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -2885,7 +3396,11 @@ describe("extension session panel", () => {
       selectedItemId: "att_save",
     });
 
-    await initializePanel(createPanelDependencies(controller, { currentRebind, localBridge }));
+    await initializePanel(createPanelDependencies(controller, {
+      currentRebind,
+      localBridge,
+      setInterval: (callback, delay) => window.setInterval(callback, delay),
+    }));
     await flushMicrotasks();
     expect(localBridge.publish.mock.calls.at(-1)?.[0]).not.toHaveProperty("observations");
 
@@ -2929,6 +3444,23 @@ describe("extension session panel", () => {
       observationTargetsValid: "true",
     });
 
+    const publishCountBeforeUnchangedObservation = localBridge.publish.mock.calls.length;
+    vi.setSystemTime(new Date("2026-07-11T12:35:40.789Z"));
+    vi.advanceTimersByTime(1_000);
+    await flushMicrotasks();
+    resolveRebind({
+      origin: ORIGIN,
+      pathname: "/settings",
+      documentId: "document-01234567",
+      items: [
+        { itemId: "att_save", status: "restored" },
+        { itemId: "att_cancel", status: "missing" },
+        { itemId: "att_account", status: "restored" },
+      ],
+    });
+    await flushMicrotasks();
+    expect(localBridge.publish).toHaveBeenCalledTimes(publishCountBeforeUnchangedObservation);
+
     controller.__setSnapshot({ selectedItemId: "att_account", legacyRecord: account });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -2936,6 +3468,7 @@ describe("extension session panel", () => {
       page: { route: `${ORIGIN}/settings` },
       attachmentCount: 2,
       observations: {
+        observedAt: "2026-07-11T12:35:41.789Z",
         targets: [
           { attachmentId: "att_save", status: "restored" },
           { attachmentId: "att_account", status: "restored" },
@@ -2945,13 +3478,124 @@ describe("extension session panel", () => {
     expect(query("#local-bridge-status").dataset.observationState).toBe("published");
   });
 
+  test("publishes capture-time scope while an expanded current-page rebind is pending", async () => {
+    const save = { ...createCaptureRecord("save", "Save changes"), tabId: 7, frameId: 0 };
+    const cancel = { ...createCaptureRecord("cancel", "Cancel"), tabId: 7, frameId: 0 };
+    const rebindResolvers: Array<(value: {
+      origin: string;
+      pathname: string;
+      documentId: string;
+      items: Array<{ itemId: string; status: "restored" }>;
+    }) => void> = [];
+    const currentRebind = {
+      read: vi.fn(() => new Promise<{
+        origin: string;
+        pathname: string;
+        documentId: string;
+        items: Array<{ itemId: string; status: "restored" }>;
+      }>((resolve) => { rebindResolvers.push(resolve); })),
+    };
+    let overlaySyncCallCount = 0;
+    let resolveExpandedOverlaySync!: () => void;
+    const syncOverlays = vi.fn(() => {
+      overlaySyncCallCount += 1;
+      return overlaySyncCallCount === 1
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => { resolveExpandedOverlaySync = resolve; });
+    });
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      activePage: { tabId: 7, frameId: 0, origin: ORIGIN, pathname: "/settings" },
+      file: createSessionFile([save]),
+      legacyRecord: save,
+      selectedItemId: "att_save",
+    });
+
+    await initializePanel(createPanelDependencies(controller, {
+      currentRebind,
+      localBridge,
+      syncOverlays,
+    }));
+    rebindResolvers.shift()?.({
+      origin: ORIGIN,
+      pathname: "/settings",
+      documentId: "document-01234567",
+      items: [{ itemId: "att_save", status: "restored" }],
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    controller.__setSnapshot({
+      file: createSessionFile([save, cancel]),
+      legacyRecord: cancel,
+      selectedItemId: "att_cancel",
+    });
+    await flushMicrotasks();
+    expect(localBridge.publish).toHaveBeenCalledOnce();
+    expect(localBridge.publish.mock.calls[0]?.[0]).toMatchObject({
+      attachmentCount: 2,
+      capture: { authority: "capture_time" },
+    });
+    expect(localBridge.publish.mock.calls[0]?.[0]).not.toHaveProperty("observations");
+    expect(query("#local-bridge-status").dataset.observationState).toBe("scope_pending");
+
+    rebindResolvers.shift()?.({
+      origin: ORIGIN,
+      pathname: "/settings",
+      documentId: "document-01234567",
+      items: [{ itemId: "att_save", status: "restored" }],
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toMatchObject({
+      attachmentCount: 2,
+      capture: { authority: "capture_time" },
+    });
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).not.toHaveProperty("observations");
+
+    resolveExpandedOverlaySync();
+    await flushMicrotasks();
+    expect(currentRebind.read).toHaveBeenCalledTimes(3);
+
+    rebindResolvers.shift()?.({
+      origin: ORIGIN,
+      pathname: "/settings",
+      documentId: "document-01234567",
+      items: [
+        { itemId: "att_save", status: "restored" },
+        { itemId: "att_cancel", status: "restored" },
+      ],
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toMatchObject({
+      attachmentCount: 2,
+      capture: { authority: "live_page" },
+      observations: {
+        targets: [
+          { attachmentId: "att_save", status: "restored" },
+          { attachmentId: "att_cancel", status: "restored" },
+        ],
+      },
+    });
+  });
+
   test("omits completion observations when the active document identity is unavailable", async () => {
     const save = { ...createCaptureRecord("save", "Save changes"), tabId: 7, frameId: 0 };
     const localBridge = {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -2986,7 +3630,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -3799,6 +4443,7 @@ describe("extension session panel", () => {
     hidePanel?.();
     await flushMicrotasks();
     expect(previewOverlay).toHaveBeenLastCalledWith(ORIGIN, null);
+    expect(controller.flushIntent).toHaveBeenCalledOnce();
   });
 
   test("previews focused relationship selections and clears them on blur or rerender", async () => {
@@ -3988,6 +4633,7 @@ describe("extension session panel", () => {
       },
       {
         clearPending: true,
+        activeClearOperationId: "clear-edit-blocked",
         status: { kind: "saving", message: "A session clear is already in progress." },
       },
       {
@@ -4252,7 +4898,7 @@ describe("extension session panel", () => {
         select,
       },
       frameScopeAutoStart: { read: async () => false },
-      testClickCapture: { read: async () => true, save: async () => undefined },
+      elementSelection: { read: async () => true, save: async () => undefined },
     }));
 
     query<HTMLDetailsElement>("#capture-scope").open = true;
@@ -4357,7 +5003,7 @@ describe("extension session panel", () => {
       addWindowKeyDownListener(listener) {
         keydownListener = listener;
       },
-      testClickCapture: { read: async () => true, save: async () => undefined },
+      elementSelection: { read: async () => true, save: async () => undefined },
     }));
 
     const scope = query<HTMLDetailsElement>("#capture-scope");
@@ -4372,6 +5018,7 @@ describe("extension session panel", () => {
   test("keeps clear retry available while clear-pending state blocks remove and export", async () => {
     const controller = createFakeController({
       clearPending: true,
+      activeClearOperationId: "clear-panel-pending",
       status: { kind: "ready", message: "Capture session ready." },
     });
     await initializePanel(createPanelDependencies(controller));
@@ -4384,10 +5031,30 @@ describe("extension session panel", () => {
     expect(query<HTMLButtonElement>("#remove-selected-item").disabled).toBe(true);
   });
 
+  test("retries an active pending clear with its exact id and no generator call", async () => {
+    const controller = createFakeController({
+      clearPending: true,
+      activeClearOperationId: "clear-panel-pending",
+      status: { kind: "saving", message: "A session clear is already in progress." },
+    });
+    const randomUUID = vi.fn(() => "clear-generated");
+    await initializePanel(createPanelDependencies(controller, {
+      confirm: () => true,
+      randomUUID,
+    }));
+
+    query<HTMLButtonElement>("#clear-session").click();
+    await flushMicrotasks();
+
+    expect(randomUUID).not.toHaveBeenCalled();
+    expect(controller.clearSession).toHaveBeenCalledWith("clear-panel-pending");
+  });
+
   test("keeps clear retry enabled for a supported clear-pending origin with no rows", async () => {
     const controller = createFakeController({
       activeSupported: true,
       clearPending: true,
+      activeClearOperationId: "clear-zero-row-pending",
       origin: ORIGIN,
       epoch: "epoch-1",
       file: null,
@@ -4486,6 +5153,7 @@ describe("extension session panel", () => {
 
   test("denied view upgrade keeps the selected preview visible with denial status", async () => {
     const file = createSessionFile([createCaptureRecord("save", "Save changes", "agent_safe")]);
+    const runtimeListeners: Array<(message: unknown) => void> = [];
     const controller = createFakeController({
       file,
       legacyRecord: file.session.attachments[0].sourceRecord as OriginCaptureRecord,
@@ -4498,6 +5166,11 @@ describe("extension session panel", () => {
       previewCopy: {
         read: async () => ({ independent: true, mode: "full_debug" }),
       },
+      elementSelection: {
+        read: async () => false,
+        save: async () => undefined,
+      },
+      addRuntimeMessageListener: (listener) => runtimeListeners.push(listener),
     }));
 
     expect(query<HTMLElement>("#capture").hidden).toBe(false);
@@ -4508,6 +5181,15 @@ describe("extension session panel", () => {
     expect(
       controller.getSnapshot().file?.session.attachments[0].sourceRecord.attachment.policy.disclosureMode,
     ).toBe("agent_safe");
+
+    runtimeListeners[0]({
+      type: "ui-attach:element-selection-updated",
+      enabled: false,
+    });
+    await flushMicrotasks();
+    expect(query("#status").textContent).toBe(
+      "Capture again with full_debug disclosure to include full debug details.",
+    );
 
     query<HTMLButtonElement>("#copy-summary").click();
     await flushMicrotasks();
@@ -4875,7 +5557,7 @@ describe("extension session panel", () => {
     expect(staticToggle?.disabled).toBe(true);
 
     const initialization = initializePanel(createPanelDependencies(createFakeController(), {
-      testClickCapture: {
+      elementSelection: {
         read: () => selectionRead,
         save: vi.fn(async () => undefined),
       },
@@ -4900,7 +5582,7 @@ describe("extension session panel", () => {
     const runtimeListeners: Array<(message: unknown) => void> = [];
     const toggle = query<HTMLButtonElement>("#element-selection-toggle");
     const initialization = initializePanel(createPanelDependencies(createFakeController(), {
-      testClickCapture: {
+      elementSelection: {
         read: () => selectionRead,
         save: vi.fn(async () => undefined),
       },
@@ -4930,7 +5612,7 @@ describe("extension session panel", () => {
       .mockResolvedValue(false);
 
     await initializePanel(createPanelDependencies(controller, {
-      testClickCapture: {
+      elementSelection: {
         read,
         save: vi.fn(async () => undefined),
       },
@@ -5032,6 +5714,22 @@ describe("extension session panel", () => {
           kind: "error",
           message: "Panel action failed. Try again.",
         },
+      });
+    } finally {
+      (globalThis as typeof globalThis & { chrome?: unknown }).chrome = previousChrome;
+    }
+  });
+
+  test("routes saved-origin deletion through the stored command without page authority", async () => {
+    const previousChrome = (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
+    const sendMessage = vi.fn(async () => ({ ok: true, data: emptyReadback(ORIGIN) }));
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = { runtime: { sendMessage } };
+    try {
+      const deps = createBrowserPanelDependencies();
+      await deps.storedSessions!.clear(ORIGIN, "saved-epoch", "saved-operation");
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "ui-attach:session-clear-stored-origin", origin: ORIGIN,
+        epoch: "saved-epoch", operationId: "saved-operation",
       });
     } finally {
       (globalThis as typeof globalThis & { chrome?: unknown }).chrome = previousChrome;
@@ -5357,20 +6055,17 @@ describe("extension session panel", () => {
     };
     try {
       const deps = createBrowserPanelDependencies() as PanelDependencies & {
-        testClickCapture: { save(enabled: boolean): Promise<void> };
+        elementSelection: { save(enabled: boolean): Promise<void> };
       };
-      await expect(deps.testClickCapture.save(true)).rejects.toThrow(expected);
+      await expect(deps.elementSelection.save(true)).rejects.toThrow(expected);
     } finally {
       (globalThis as typeof globalThis & { chrome?: unknown }).chrome = previousChrome;
     }
   });
 
   test("creates and copies a local bridge request only from the explicit panel action", async () => {
-    const requestText = [
-      "# MeanThis Connection Request",
-      "Request ID: 95e3e7b1-6f74-44ae-8954-e11f7f2a7c58",
-      "Approval key: DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
-    ].join("\n");
+    const requestText = "meanthis bridge accept " +
+      "AQAMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDJXj57FvdESuiVThH38qfFg --json";
     const localBridge = {
       readStatus: vi.fn(async () => disconnectedBridgeStatus()),
       createConnectionRequest: vi.fn(async () => ({
@@ -5381,7 +6076,7 @@ describe("extension session panel", () => {
         expiresAt: "2026-07-17T04:32:00.000Z",
       })),
       refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5391,13 +6086,15 @@ describe("extension session panel", () => {
     expect(localBridge.createConnectionRequest).not.toHaveBeenCalled();
     expect(bridgeStepStates()).toEqual(["current", "upcoming", "upcoming", "upcoming"]);
     expect(query("#local-bridge-status").textContent).toBe(
-      "Ready to connect. Start by choosing trust.",
+      "Ready to connect. Choose an access scope.",
     );
-    expect(query("#local-bridge-trust-help").textContent).toBe("Ask for approval each time.");
+    expect(query("#local-bridge-trust-help").textContent).toBe(
+      "Create a new invitation for each connection.",
+    );
     expect(query<HTMLElement>("#local-bridge-trust-help").hidden).toBe(false);
     changeSelect("#local-bridge-approval-mode", "browser_session");
     expect(query("#local-bridge-trust-help").textContent).toBe(
-      "Keep approval until this browser session ends.",
+      "After one accepted invitation, reconnect while this browser session and bridge owner remain active.",
     );
     query<HTMLButtonElement>("#local-bridge-request").click();
     await flushMicrotasks();
@@ -5406,7 +6103,7 @@ describe("extension session panel", () => {
 
     expect(localBridge.createConnectionRequest).toHaveBeenCalledWith("browser_session");
     expect(clipboard.writeText).toHaveBeenCalledWith(requestText);
-    expect(query("#local-bridge-status").textContent).toContain("Request copied");
+    expect(query("#local-bridge-status").textContent).toContain("Invitation copied");
     expect(query<HTMLTextAreaElement>("#local-bridge-request-text").value).toBe(requestText);
     expect(query<HTMLTextAreaElement>("#local-bridge-request-text").hidden).toBe(false);
     expect(query<HTMLButtonElement>("#local-bridge-disconnect").hidden).toBe(false);
@@ -5430,12 +6127,128 @@ describe("extension session panel", () => {
     expect(query<HTMLButtonElement>("#local-bridge-request").hidden).toBe(false);
   });
 
+  test("announces local bridge startup immediately while invitation creation is pending", async () => {
+    let releaseRequest!: () => void;
+    const requestGate = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const localBridge = {
+      readStatus: vi.fn(async () => disconnectedBridgeStatus()),
+      createConnectionRequest: vi.fn(async () => {
+        await requestGate;
+        return {
+          ...disconnectedBridgeStatus(),
+          pending: true,
+          approvalMode: "ask" as const,
+          requestText: "bounded invitation",
+          expiresAt: "2026-07-17T04:32:00.000Z",
+        };
+      }),
+      refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(createFakeController(), { localBridge }));
+
+    const request = query<HTMLButtonElement>("#local-bridge-request");
+    request.click();
+
+    expect(request.disabled).toBe(true);
+    expect(request.getAttribute("aria-busy")).toBe("true");
+    expect(request.textContent).toBe("Preparing local connection…");
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Checking and starting the local service. The first start may take a few seconds.",
+    );
+    expect(bridgeStepStates()).toEqual(["complete", "current", "upcoming", "upcoming"]);
+
+    releaseRequest();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(request.getAttribute("aria-busy")).toBe("false");
+    expect(request.textContent).toBe("Copy invitation again");
+  });
+
+  test("offers an explicit credential repair without asking the user to run a command", async () => {
+    const repairRequired = Object.assign(new Error("bounded"), {
+      code: "BRIDGE_REPAIR_REQUIRED",
+    });
+    let releaseRepair!: () => void;
+    const repairGate = new Promise<void>((resolve) => {
+      releaseRepair = resolve;
+    });
+    const localBridge = {
+      readStatus: vi.fn(async () => disconnectedBridgeStatus()),
+      createConnectionRequest: vi.fn(async () => { throw repairRequired; }),
+      repairConnection: vi.fn(async () => repairGate),
+      refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const confirm = vi.fn(() => true);
+    await initializePanel(createPanelDependencies(createFakeController(), { localBridge, confirm }));
+
+    query<HTMLButtonElement>("#local-bridge-request").click();
+    await flushMicrotasks();
+
+    expect(query<HTMLButtonElement>("#local-bridge-request").getAttribute("aria-busy")).toBe("true");
+    expect(query("#local-bridge-request").textContent).toBe(
+      "Repairing and starting the local connection…",
+    );
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Completing the approved local repair or setup and starting the service. This may take a few seconds.",
+    );
+
+    releaseRepair();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Rotate the local MeanThis credentials"));
+    expect(localBridge.repairConnection).toHaveBeenCalledOnce();
+    expect(query("#local-bridge-status").textContent).toBe(
+      "The local connection was repaired. Select Create invitation again.",
+    );
+  });
+
+  test("formats a pending invitation expiry with the selected time preference", async () => {
+    const localBridge = {
+      readStatus: vi.fn(async () => ({
+        ...disconnectedBridgeStatus(),
+        pending: true,
+        approvalMode: "ask" as const,
+        requestText: "bounded invitation",
+        expiresAt: "2026-07-17T04:32:00.000Z",
+      })),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+
+    await initializePanel(createPanelDependencies(createFakeController(), {
+      localBridge,
+      timeDisplay: { read: async () => "utc" },
+    }));
+
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Waiting for the agent to accept. This invitation expires at 2026-07-17 04:32 UTC.",
+    );
+    expect(query("#local-bridge-status").textContent).not.toContain("T04:32:00.000Z");
+  });
+
   test("publishes an agent-safe bridge handoff even while the panel views full debug", async () => {
     const localBridge = {
-      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      readStatus: vi.fn(async () => connectedBridgeStatus({
+        sharedTargetCount: 2,
+        sharedSequence: 7,
+      })),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5477,12 +6290,408 @@ describe("extension session panel", () => {
     expect(JSON.stringify(published?.capture)).not.toContain("sk-test-1234567890");
     expect(bridgeStepStates()).toEqual(["complete", "complete", "complete", "current"]);
     expect(query("#local-bridge-status").textContent).toBe(
-      "Connected. Agent-safe page context is available to the local agent.",
+      "Connected. The local agent can read 2 selected elements.",
     );
+    expect(query("#local-bridge-status").dataset).toMatchObject({
+      sharedTargetCount: "2",
+      sharedSequence: "7",
+    });
     expect(query<HTMLElement>("#local-bridge-trust-field").hidden).toBe(true);
     expect(query<HTMLElement>("#local-bridge-trust-help").hidden).toBe(true);
     expect(query<HTMLDetailsElement>("#local-bridge-details").hidden).toBe(false);
     expect(query("#local-bridge-instance").textContent).toContain("instance-0123456789ab");
+  });
+
+  test.each([
+    ["waiting", "Waiting for the Agent client to retrieve the current share."],
+    ["current", "The Agent client confirmed retrieval of the current share."],
+    ["unavailable", "Unable to confirm whether the Agent client retrieved the current share."],
+  ] as const)("renders the read acknowledgement state %s with stable selectors", async (state, text) => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus({
+        sharedTargetCount: 1,
+        sharedSequence: 4,
+        readAcknowledgementState: state,
+      })),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => false),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(createFakeController(), { localBridge }));
+
+    const acknowledgement = query<HTMLElement>("#local-bridge-read-acknowledgement-status");
+    const limitations = query<HTMLElement>("#local-bridge-read-acknowledgement-limitations");
+    expect(acknowledgement.hidden).toBe(false);
+    expect(acknowledgement.dataset.state).toBe(state);
+    expect(acknowledgement.dataset.readAcknowledgementState).toBe(state);
+    expect(acknowledgement.dataset.sharedSequence).toBe("4");
+    expect(acknowledgement.textContent).toBe(text);
+    expect(limitations.hidden).toBe(false);
+    expect(limitations.dataset.state).toBe(state);
+    expect(limitations.dataset.readAcknowledgementState).toBe(state);
+    expect(limitations.dataset.sharedSequence).toBe("4");
+    expect(limitations.textContent).toBe("This does not mean the Agent understood or executed it.");
+    expect(acknowledgement.textContent).not.toMatch(/digest|captureId|path|instance-/i);
+  });
+
+  test("hides the acknowledgement when a connected bridge has no published sequence", async () => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus({
+        readAcknowledgementState: "current",
+      })),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => false),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(createFakeController(), { localBridge }));
+
+    expect(query<HTMLElement>("#local-bridge-read-acknowledgement-status").hidden).toBe(true);
+    expect(query<HTMLElement>("#local-bridge-read-acknowledgement-limitations").hidden).toBe(true);
+  });
+
+  test("publishes the focused page when a connected panel starts without capture targets", async () => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      epoch: null,
+      file: null,
+      legacyRecord: null,
+      selectedItemId: null,
+      intent: "",
+      status: { kind: "empty", message: "No session for this origin." },
+    });
+
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toEqual({
+      page: {
+        pageInstanceId: "chromium-tab:1:frame:0",
+        route: `${ORIGIN}/settings`,
+      },
+      attachmentCount: 0,
+      agentCopy: null,
+    });
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    {
+      name: "a sensitive route",
+      snapshot: {
+        epoch: null,
+        file: null,
+        legacyRecord: null,
+        selectedItemId: null,
+        activePage: {
+          tabId: 1,
+          frameId: 0,
+          origin: ORIGIN,
+          pathname: "/users/ada@example.test",
+        },
+      },
+    },
+    {
+      name: "an unavailable active page",
+      snapshot: { activePage: null },
+    },
+    {
+      name: "an unavailable authoritative readback",
+      snapshot: {
+        status: { kind: "error" as const, message: "Readback unavailable." },
+      },
+    },
+    {
+      name: "a pending canonical clear",
+      snapshot: {
+        clearPending: true,
+        activeClearOperationId: "clear-1",
+      },
+    },
+  ])("does not publish stale capture or page-only context for $name", async ({ snapshot }) => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn(async () => true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+
+    await initializePanel(createPanelDependencies(createFakeController(snapshot), { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish).not.toHaveBeenCalled();
+    expect(localBridge.clearPanelContext).toHaveBeenCalled();
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    {
+      name: "the focused route becomes sensitive",
+      snapshot: {
+        activePage: {
+          tabId: 1,
+          frameId: 0,
+          origin: ORIGIN,
+          pathname: "/users/ada@example.test",
+        },
+      },
+    },
+    {
+      name: "the authoritative readback becomes unavailable",
+      snapshot: {
+        status: { kind: "error" as const, message: "Readback unavailable." },
+      },
+    },
+  ])("revokes previously shared panel context when $name", async ({ snapshot }) => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn(async () => true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController();
+
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toMatchObject({
+      attachmentCount: 2,
+    });
+    localBridge.publish.mockClear();
+    localBridge.clearPanelContext.mockClear();
+
+    controller.__setSnapshot(snapshot);
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish).not.toHaveBeenCalled();
+    expect(localBridge.clearPanelContext).toHaveBeenCalledOnce();
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test("retries a rejected panel-context revocation after bridge liveness recovers", async () => {
+    const intervals: Array<{ callback: () => void; delay: number }> = [];
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController();
+    await initializePanel(createPanelDependencies(controller, {
+      localBridge,
+      setInterval: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+    }));
+    await flushMicrotasks();
+
+    controller.__setSnapshot({ activePage: null });
+    await flushMicrotasks();
+    expect(localBridge.clearPanelContext).toHaveBeenCalledOnce();
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected. The local capture state has not finished syncing; MeanThis is retrying automatically.",
+    );
+
+    const heartbeat = intervals.find((interval) => interval.delay === 10_000);
+    expect(heartbeat).toBeDefined();
+    heartbeat?.callback();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.refreshConnectionAndHeartbeat).toHaveBeenCalledOnce();
+    expect(localBridge.clearPanelContext).toHaveBeenCalledTimes(2);
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test("serializes panel-context revocation before publishing the newest safe page", async () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const account = createCaptureRecord("account", "Account");
+    account.pageUrl = `${ORIGIN}/account`;
+    account.attachment.source.url = account.pageUrl;
+    const clearing = createDeferred<boolean>();
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn(() => clearing.promise),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      file: createSessionFile([save, account]),
+      legacyRecord: save,
+      selectedItemId: save.attachment.id,
+    });
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    controller.__setSnapshot({
+      activePage: {
+        tabId: 1,
+        frameId: 0,
+        origin: ORIGIN,
+        pathname: "/users/ada@example.test",
+      },
+    });
+    await flushMicrotasks();
+    expect(localBridge.clearPanelContext).toHaveBeenCalledOnce();
+
+    controller.__setSnapshot({
+      activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/account" },
+      selectedItemId: account.attachment.id,
+      legacyRecord: account,
+    });
+    await flushMicrotasks();
+    expect(localBridge.publish).not.toHaveBeenCalled();
+
+    clearing.resolve(true);
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish).toHaveBeenCalledOnce();
+    expect(localBridge.publish.mock.calls[0]?.[0]).toMatchObject({
+      page: { route: `${ORIGIN}/account` },
+      attachmentCount: 1,
+      capture: { targets: [{ attachmentId: "att_account" }] },
+    });
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test("downgrades a legacy capture from another pathname to the focused page only", async () => {
+    const legacyRecord = createCaptureRecord("legacy", "Legacy target");
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/account" },
+      file: null,
+      legacyRecord,
+      selectedItemId: null,
+      intent: "",
+    });
+
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toEqual({
+      page: {
+        pageInstanceId: "chromium-tab:1:frame:0",
+        route: `${ORIGIN}/account`,
+      },
+      attachmentCount: 0,
+      agentCopy: null,
+    });
+    expect(JSON.stringify(localBridge.publish.mock.calls)).not.toContain("att_legacy");
+  });
+
+  test("shows a failed bridge publication and retries on the next snapshot", async () => {
+    const controller = createFakeController();
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn().mockRejectedValue(new Error("runtime command rejected")),
+      disconnect: vi.fn(async () => undefined),
+    };
+
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected. The local capture state has not finished syncing; MeanThis is retrying automatically.",
+    );
+
+    const failedPublishCount = localBridge.publish.mock.calls.length;
+    localBridge.publish.mockResolvedValue(true);
+    controller.__setSnapshot({
+      status: { kind: "ready", message: "Capture session refreshed." },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(localBridge.publish.mock.calls.length).toBeGreaterThan(failedPublishCount);
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected. Agent-safe page context is available to the local agent.",
+    );
+  });
+
+  test("retries a failed bridge publication after liveness recovers without another snapshot", async () => {
+    const intervals: Array<{ callback: () => void; delay: number }> = [];
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn().mockRejectedValue(new Error("local agent unavailable")),
+      disconnect: vi.fn(async () => undefined),
+    };
+
+    await initializePanel(createPanelDependencies(createFakeController(), {
+      localBridge,
+      setInterval: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+    }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const failedPublishCount = localBridge.publish.mock.calls.length;
+    expect(failedPublishCount).toBeGreaterThan(0);
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected. The local capture state has not finished syncing; MeanThis is retrying automatically.",
+    );
+
+    localBridge.publish.mockResolvedValue(true);
+    const heartbeat = intervals.find((interval) => interval.delay === 10_000);
+    expect(heartbeat).toBeDefined();
+    heartbeat?.callback();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.refreshConnectionAndHeartbeat).toHaveBeenCalledOnce();
+    expect(localBridge.publish.mock.calls.length).toBeGreaterThan(failedPublishCount);
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected. Agent-safe page context is available to the local agent.",
+    );
   });
 
   test("keeps local bridge publication exact when the visible handoff uses compact", async () => {
@@ -5491,7 +6700,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5515,6 +6724,43 @@ describe("extension session panel", () => {
     expect(published?.agentCopy).not.toContain("# MeanThis Compact Capture Bundle");
   });
 
+  test("publishes structured targets when the canonical bridge handoff is too large", async () => {
+    const records = ["first", "second", "third"].map((seed) => {
+      const record = createCaptureRecord(seed, `${seed} article`);
+      record.attachment.element.text = "动态正文 ".repeat(3_500);
+      record.attachment.element.accessibleName = "动态正文 ".repeat(3_500);
+      record.attachment.element.contentParts = [{
+        kind: "text",
+        tagName: "p",
+        role: null,
+        text: "结构化正文".repeat(800),
+        accessibleName: null,
+      }];
+      return record;
+    });
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      file: createSessionFile(records),
+      legacyRecord: records[2],
+      selectedItemId: records[2]!.attachment.id,
+    });
+
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const published = localBridge.publish.mock.calls.at(-1)?.[0];
+    expect(published).toMatchObject({ attachmentCount: 3, agentCopy: null });
+    expect(published?.capture?.targets).toHaveLength(3);
+  });
+
   test("publishes an agent-safe bridge handoff for one full-debug element", async () => {
     const record = createCaptureRecord("save", "Save changes", "full_debug");
     const file = createSessionFile([record]);
@@ -5522,7 +6768,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5552,6 +6798,112 @@ describe("extension session panel", () => {
     expect(JSON.stringify(published?.capture)).not.toContain("sk-test-1234567890");
   });
 
+  test("publishes the current page selection without requiring an active editor row", async () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const cancel = createCaptureRecord("cancel", "Cancel");
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+
+    await initializePanel(createPanelDependencies(createFakeController({
+      file: createSessionFile([save, cancel]),
+      legacyRecord: null,
+      selectedItemId: null,
+      intent: "",
+    }), { localBridge }));
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toMatchObject({
+      attachmentCount: 2,
+      capture: {
+        targets: [
+          { attachmentId: "att_save" },
+          { attachmentId: "att_cancel" },
+        ],
+      },
+    });
+  });
+
+  test("does not publish persisted task note drafts during deliberate typing pauses", async () => {
+    const controller = createFakeController();
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(controller, {
+      localBridge,
+      setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+    }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    const intent = query<HTMLTextAreaElement>("#intent");
+    const draftValues = ["Move", "Move C", "Move C below A."];
+    for (const value of draftValues) {
+      intent.value = value;
+      intent.dispatchEvent(new Event("input"));
+      controller.__setSnapshot({ intent: value, intentDirty: false });
+      await flushMicrotasks();
+      vi.advanceTimersByTime(2_000);
+      await flushMicrotasks();
+      expect(localBridge.publish).not.toHaveBeenCalled();
+    }
+
+    intent.dispatchEvent(new Event("blur"));
+    await flushMicrotasks();
+
+    expect(localBridge.publish).toHaveBeenCalledOnce();
+    expect(
+      localBridge.publish.mock.calls[0]?.[0].capture?.targets.find(
+        (target) => target.attachmentId === "att_cancel",
+      )?.taskNote,
+    ).toBe("Move C below A.");
+  });
+
+  test("waits for the persisted task note snapshot after editing loses focus", async () => {
+    const controller = createFakeController();
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    const intent = query<HTMLTextAreaElement>("#intent");
+    intent.value = "Move C below A.";
+    intent.dispatchEvent(new Event("input"));
+    intent.dispatchEvent(new Event("blur"));
+    await flushMicrotasks();
+
+    expect(controller.flushIntent).toHaveBeenCalledOnce();
+    expect(localBridge.publish).not.toHaveBeenCalled();
+
+    controller.__setSnapshot({ intent: "Move C below A.", intentDirty: false });
+    await flushMicrotasks();
+
+    expect(localBridge.publish).toHaveBeenCalledOnce();
+    expect(
+      localBridge.publish.mock.calls[0]?.[0].capture?.targets.find(
+        (target) => target.attachmentId === "att_cancel",
+      )?.taskNote,
+    ).toBe("Move C below A.");
+  });
+
   test("coalesces queued bridge snapshots while keeping routing and scope aligned", async () => {
     const save = { ...createCaptureRecord("save", "Save changes"), tabId: 7, frameId: 0 };
     const cancel = { ...createCaptureRecord("cancel", "Cancel"), tabId: 7, frameId: 0 };
@@ -5569,7 +6921,7 @@ describe("extension session panel", () => {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5613,17 +6965,18 @@ describe("extension session panel", () => {
     });
     let releaseSlowPublish!: (value: boolean) => void;
     const slowPublish = new Promise<boolean>((resolve) => { releaseSlowPublish = resolve; });
+    const pendingStatus = {
+      ...disconnectedBridgeStatus(),
+      pending: true,
+      approvalMode: "ask" as const,
+      requestText: "request",
+      expiresAt: "2026-07-17T04:32:00.000Z",
+    };
     const localBridge = {
-      readStatus: vi.fn(async () => disconnectedBridgeStatus()),
-      createConnectionRequest: vi.fn(async () => ({
-        ...disconnectedBridgeStatus(),
-        pending: true,
-        approvalMode: "ask" as const,
-        requestText: "request",
-        expiresAt: "2026-07-17T04:32:00.000Z",
-      })),
+      readStatus: vi.fn(async () => pendingStatus),
+      createConnectionRequest: vi.fn(async () => pendingStatus),
       refreshConnection: vi.fn(async () => disconnectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => disconnectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
       publish: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
@@ -5663,18 +7016,19 @@ describe("extension session panel", () => {
     expect(clipboard.writeText).toHaveBeenCalledWith("request");
   });
 
-  test("fails the whole bridge projection closed when page identity is unavailable", async () => {
+  test("does not let a transient missing page identity overwrite the shared capture", async () => {
     const save = { ...createCaptureRecord("save", "Save changes"), tabId: 7, frameId: 0 };
     const localBridge = {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
       createConnectionRequest: vi.fn(),
       refreshConnection: vi.fn(async () => connectedBridgeStatus()),
-      refreshConnectionAndPublish: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
       publish: vi.fn(async () => true),
+      clearPanelContext: vi.fn(async () => true),
       disconnect: vi.fn(async () => undefined),
     };
     const controller = createFakeController({
-      activePage: null,
+      activePage: { tabId: 7, frameId: 0, origin: ORIGIN, pathname: "/settings" },
       file: createSessionFile([save]),
       legacyRecord: save,
       selectedItemId: "att_save",
@@ -5682,12 +7036,133 @@ describe("extension session panel", () => {
 
     await initializePanel(createPanelDependencies(controller, { localBridge }));
     await flushMicrotasks();
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toMatchObject({ attachmentCount: 1 });
+    localBridge.publish.mockClear();
+
+    controller.__setSnapshot({ activePage: null });
+    await flushMicrotasks();
+
+    expect(localBridge.publish).not.toHaveBeenCalled();
+    expect(localBridge.clearPanelContext).toHaveBeenCalledOnce();
+    expect(query("#local-bridge-status").textContent).toBe(
+      "Connected, but the current selection is not available to share yet. Reopen its page and MeanThis will retry automatically.",
+    );
+  });
+
+  test("uses the periodic bridge timer only for liveness, not unchanged snapshot publication", async () => {
+    const intervals: Array<{ callback: () => void; delay: number }> = [];
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(createFakeController(), {
+      localBridge,
+      setInterval: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+    }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    const heartbeat = intervals.find((interval) => interval.delay === 10_000);
+    expect(heartbeat).toBeDefined();
+    heartbeat?.callback();
+    await flushMicrotasks();
+
+    expect(localBridge.refreshConnectionAndHeartbeat).toHaveBeenCalledOnce();
+    expect(localBridge.publish).not.toHaveBeenCalled();
+  });
+
+  test("replaces a cleared nonempty selection with focused page context", async () => {
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController();
+    controller.clearSession = vi.fn(async () => {
+      controller.__setSnapshot({
+        clearPending: false,
+        activeClearOperationId: null,
+        epoch: null,
+        file: null,
+        legacyRecord: null,
+        selectedItemId: null,
+        intent: "",
+        status: { kind: "empty", message: "No session for this origin." },
+      });
+    });
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    query<HTMLButtonElement>("#clear-session").click();
+    await flushMicrotasks();
+    await flushMicrotasks();
 
     expect(localBridge.publish.mock.calls.at(-1)?.[0]).toEqual({
-      page: null,
+      page: {
+        pageInstanceId: "chromium-tab:1:frame:0",
+        route: `${ORIGIN}/settings`,
+      },
       attachmentCount: 0,
       agentCopy: null,
     });
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
+  });
+
+  test("replaces the last removed item with focused page context", async () => {
+    const onlyRecord = createCaptureRecord("only", "Only target");
+    const localBridge = {
+      readStatus: vi.fn(async () => connectedBridgeStatus()),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(async () => connectedBridgeStatus()),
+      refreshConnectionAndHeartbeat: vi.fn(async () => connectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      clearSharedCapture: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    const controller = createFakeController({
+      file: createSessionFile([onlyRecord]),
+      legacyRecord: onlyRecord,
+      selectedItemId: onlyRecord.attachment.id,
+    });
+    controller.removeItem = vi.fn(async () => {
+      controller.__setSnapshot({
+        file: createSessionFile([]),
+        legacyRecord: null,
+        selectedItemId: null,
+        intent: "",
+        status: { kind: "empty", message: "No session for this origin." },
+      });
+    });
+    await initializePanel(createPanelDependencies(controller, { localBridge }));
+    await flushMicrotasks();
+    localBridge.publish.mockClear();
+
+    query<HTMLButtonElement>("#remove-selected-item").click();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.removeItem).toHaveBeenCalledWith("att_only");
+    expect(localBridge.publish.mock.calls.at(-1)?.[0]).toEqual({
+      page: {
+        pageInstanceId: "chromium-tab:1:frame:0",
+        route: `${ORIGIN}/settings`,
+      },
+      attachmentCount: 0,
+      agentCopy: null,
+    });
+    expect(localBridge.clearSharedCapture).not.toHaveBeenCalled();
   });
 });
 
@@ -5757,6 +7232,7 @@ function createSnapshot(overrides: SnapshotOverrides): PanelSessionSnapshot {
   return {
     activeSupported: true,
     clearPending: false,
+    activeClearOperationId: null,
     sessionMutationPending: false,
     origin: ORIGIN,
     activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/settings" },
@@ -5792,7 +7268,7 @@ function createPanelDependencies(
     captureMode?: {
       read(): Promise<UIAttachmentDisclosureMode>;
     };
-    testClickCapture?: {
+    elementSelection?: {
       read(): Promise<boolean>;
       save(enabled: boolean): Promise<void>;
     };
@@ -5803,6 +7279,7 @@ function createPanelDependencies(
     timeDisplay?: { read(): Promise<TimeDisplayPreference> };
     relationShortcuts?: { read(): Promise<RelationShortcutPreference[]> };
     frameScopeAutoStart?: { read(): Promise<boolean> };
+    automaticPageAccess?: AutomaticPageAccessController;
     handoffFormatPreferences?: {
       read(): Promise<PanelHandoffFormatPreferences>;
       save(
@@ -5836,6 +7313,10 @@ function createPanelDependencies(
     },
     timeDisplay: overrides.timeDisplay ?? { read: async () => "utc" },
     relationShortcuts: overrides.relationShortcuts ?? { read: async () => [] },
+    automaticPageAccess: overrides.automaticPageAccess ?? {
+      read: async () => false,
+      setEnabled: async () => false,
+    },
     ...overrides,
   } as PanelDependencies;
 }
@@ -5855,10 +7336,16 @@ function disconnectedBridgeStatus() {
     approvalMode: null,
     requestText: null,
     expiresAt: null,
+    sharedTargetCount: null,
+    sharedSequence: null,
   };
 }
 
-function connectedBridgeStatus() {
+function connectedBridgeStatus(overrides: {
+  sharedTargetCount?: number | null;
+  sharedSequence?: number | null;
+  readAcknowledgementState?: "waiting" | "current" | "unavailable";
+} = {}) {
   return {
     connected: true,
     instanceId: "instance-0123456789ab",
@@ -5866,6 +7353,9 @@ function connectedBridgeStatus() {
     approvalMode: null,
     requestText: null,
     expiresAt: null,
+    sharedTargetCount: null,
+    sharedSequence: null,
+    ...overrides,
   };
 }
 
@@ -5935,11 +7425,19 @@ function createPanelDom(): string {
         <p id="local-bridge-instance" hidden></p>
       </details>
       <p id="local-bridge-status">Not connected.</p>
+      <p id="local-bridge-read-acknowledgement-status" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+      <p id="local-bridge-read-acknowledgement-limitations" aria-live="polite" aria-atomic="true" hidden data-i18n="local_bridge_read_ack_limitations"></p>
       <span id="origin"></span>
       <p id="status" role="status" aria-live="polite"></p>
       <section id="page-access-recovery" hidden>
         <h2 id="page-access-recovery-heading"></h2>
         <p id="page-access-recovery-reason"></p>
+        <div id="page-access-automatic">
+          <p id="page-access-automatic-explanation">Chrome will keep MeanThis authorized for ordinary HTTP(S) pages. MeanThis captures only after you choose Add elements or another explicit capture action.</p>
+          <button id="page-access-enable-automatic" type="button">Enable automatic access to web pages</button>
+          <p id="page-access-automatic-status" role="status" aria-live="polite" hidden></p>
+        </div>
+        <p id="page-access-temporary-path">For temporary access to only this page:</p>
         <ol>
           <li id="page-access-recovery-first-step"></li>
           <li>Select MeanThis in the browser toolbar.</li>
@@ -5961,10 +7459,6 @@ function createPanelDom(): string {
           <div id="session-list"></div>
         </div>
         <button id="clear-session" class="session-reset" type="button">Clear selected elements</button>
-        <details id="advanced-session-tools" data-developer-tooling hidden>
-          <summary>Advanced session tools</summary>
-          <button id="export-session" type="button">Export source session</button>
-        </details>
         <div id="intent-recovery" hidden>
           <button id="retry-intent" type="button">Retry save</button>
           <button id="discard-intent" type="button">Discard changes</button>
@@ -6002,31 +7496,33 @@ function createPanelDom(): string {
           </dl>
         </details>
         <button id="remove-selected-item" type="button" data-i18n="remove_selected_element">Remove selected element</button>
-        <textarea id="intent"></textarea>
+        <div class="task-field">
+          <details id="relation-settings" hidden>
+            <summary>Use a task note shortcut (optional)</summary>
+            <div id="relation-composer" hidden>
+              <p id="relation-role-summary" hidden></p>
+              <select id="relation-action">
+                <option value="below">Below</option>
+                <option value="above">Above</option>
+                <option value="left-of">Left of</option>
+                <option value="right-of">Right of</option>
+                <option value="align-left">Align left</option>
+                <option value="match-width">Match width</option>
+              </select>
+              <select id="relation-reference"></select>
+              <button id="apply-relation" type="button">Generate and fill</button>
+              <p id="relation-apply-status" hidden></p>
+              <button id="change-generated-relation" type="button" hidden disabled>Change shortcut</button>
+            </div>
+          </details>
+          <textarea id="intent"></textarea>
+        </div>
         <p id="handoff-scope-summary"></p>
         <button id="copy-summary" type="button">Copy for agent</button>
         <div id="agent-handoff-copy-feedback" role="status" aria-live="polite" aria-atomic="true">
           <p id="agent-handoff-copy-status" hidden></p>
           <p id="agent-handoff-copy-next-step" hidden></p>
         </div>
-        <details id="relation-settings" hidden>
-          <summary>Task note shortcuts (optional)</summary>
-          <div id="relation-composer" hidden>
-            <p id="relation-role-summary" hidden></p>
-            <select id="relation-action">
-              <option value="below">Below</option>
-              <option value="above">Above</option>
-              <option value="left-of">Left of</option>
-              <option value="right-of">Right of</option>
-              <option value="align-left">Align left</option>
-              <option value="match-width">Match width</option>
-            </select>
-            <select id="relation-reference"></select>
-            <button id="apply-relation" type="button">Fill task note</button>
-            <p id="relation-apply-status" hidden></p>
-            <button id="change-generated-relation" type="button" hidden disabled>Change shortcut</button>
-          </div>
-        </details>
         <details id="optional-settings" hidden>
           <summary>Copy options</summary>
           <div id="handoff-options" hidden>
@@ -6045,6 +7541,8 @@ function createPanelDom(): string {
         <details id="advanced-data" data-developer-tooling hidden>
           <summary>Developer diagnostics</summary>
           <p data-i18n="developer_diagnostics_help">Raw metadata and separate Markdown/JSON copies for debugging integrations.</p>
+          <p data-i18n="source_export_help">Export the source-bound session for diagnostics or checkout-based tooling.</p>
+          <button id="export-session" type="button">Export source session</button>
           <textarea id="agent-summary"></textarea>
           <textarea id="markdown"></textarea>
           <textarea id="json"></textarea>
@@ -6069,6 +7567,58 @@ function storedOrigin(
     clearPending: false,
     activeClearOperationId: null,
   };
+}
+
+type MalformedClearPairKind =
+  | "idle-non-null"
+  | "pending-null"
+  | "pending-whitespace"
+  | "pending-overbound"
+  | "inherited"
+  | "extra";
+
+function malformedStoredSummary(kind: MalformedClearPairKind): unknown {
+  const base = storedOrigin("https://admin.example.test", "epoch-admin", 0);
+  if (kind === "idle-non-null") {
+    return { ...base, activeClearOperationId: "clear-impossible" };
+  }
+  if (kind === "pending-null") {
+    return { ...base, clearPending: true, activeClearOperationId: null };
+  }
+  if (kind === "pending-whitespace") {
+    return { ...base, clearPending: true, activeClearOperationId: " clear-invalid " };
+  }
+  if (kind === "pending-overbound") {
+    return { ...base, clearPending: true, activeClearOperationId: "x".repeat(129) };
+  }
+  if (kind === "extra") return { ...base, unexpected: true };
+  const { clearPending: _clearPending, activeClearOperationId: _operationId, ...own } = base;
+  return Object.assign(Object.create({
+    clearPending: true,
+    activeClearOperationId: "clear-inherited",
+  }), own);
+}
+
+function malformedClearReadback(kind: MalformedClearPairKind): unknown {
+  const base = emptyReadback("https://admin.example.test");
+  if (kind === "idle-non-null") {
+    return { ...base, activeClearOperationId: "clear-impossible" };
+  }
+  if (kind === "pending-null") {
+    return { ...base, clearPending: true, activeClearOperationId: null };
+  }
+  if (kind === "pending-whitespace") {
+    return { ...base, clearPending: true, activeClearOperationId: " clear-invalid " };
+  }
+  if (kind === "pending-overbound") {
+    return { ...base, clearPending: true, activeClearOperationId: "x".repeat(129) };
+  }
+  if (kind === "extra") return { ...base, unexpected: true };
+  const { clearPending: _clearPending, activeClearOperationId: _operationId, ...own } = base;
+  return Object.assign(Object.create({
+    clearPending: true,
+    activeClearOperationId: "clear-inherited",
+  }), own);
 }
 
 function storedReviewData() {

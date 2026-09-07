@@ -5,6 +5,8 @@ import {
   isUIAttachment,
   UI_ATTACHMENT_SCHEMA_VERSION,
   UI_ATTACH_SOURCE_ANCHOR_SCHEMA_VERSION,
+  UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+  UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
   type UIAttachment,
 } from "./index";
 
@@ -81,8 +83,114 @@ const validAttachment: UIAttachment = {
 };
 
 describe("UIAttachment schema", () => {
+  it("exports opaque callsite source attribute names", () => {
+    expect(UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE).toBe(
+      "data-ui-attach-callsite-build-id",
+    );
+    expect(UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE).toBe(
+      "data-ui-attach-callsite-source-id",
+    );
+  });
+
   it("accepts a valid attachment", () => {
     expect(isUIAttachment(validAttachment)).toBe(true);
+  });
+
+  it("accepts only bounded computed style facts when they are present", () => {
+    const computedStyle = {
+      position: "relative",
+      boxSizing: "border-box",
+      width: "90px",
+      height: "40px",
+      margin: "4px",
+      padding: "6px 8px",
+      gap: "10px",
+      flexDirection: "column",
+      justifyContent: "center",
+      alignItems: "flex-start",
+      overflowX: "auto",
+      overflowY: "hidden",
+      fontSize: "14px",
+      fontWeight: "600",
+      lineHeight: "20px",
+      borderRadius: "8px",
+    } as const;
+
+    expect(isUIAttachment({
+      ...validAttachment,
+      style: { ...validAttachment.style, ...computedStyle },
+    })).toBe(true);
+    expect(isUIAttachment({
+      ...validAttachment,
+      style: { ...validAttachment.style, position: undefined },
+    })).toBe(false);
+    expect(isUIAttachment({
+      ...validAttachment,
+      style: { ...validAttachment.style, gap: 12 },
+    })).toBe(false);
+    expect(isUIAttachment({
+      ...validAttachment,
+      style: { ...validAttachment.style, padding: "x".repeat(513) },
+    })).toBe(false);
+    expect(isUIAttachment({
+      ...validAttachment,
+      style: { ...validAttachment.style, opacity: "0.5" },
+    })).toBe(false);
+  });
+
+  it("accepts only a bounded element-relative pointer selection point", () => {
+    expect(
+      isUIAttachment({
+        ...validAttachment,
+        selectionPoint: {
+          kind: "element_relative_pointer",
+          xRatio: 0.25,
+          yRatio: 0.75,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isUIAttachment({
+        ...validAttachment,
+        selectionPoint: {
+          kind: "element_relative_pointer",
+          xRatio: -0.01,
+          yRatio: 0.75,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isUIAttachment({
+        ...validAttachment,
+        selectionPoint: {
+          kind: "element_relative_pointer",
+          xRatio: 0.25,
+          yRatio: 0.75,
+          clientX: 32,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["null", null],
+    ["NaN x ratio", { kind: "element_relative_pointer", xRatio: Number.NaN, yRatio: 0.5 }],
+    ["infinite y ratio", { kind: "element_relative_pointer", xRatio: 0.5, yRatio: Infinity }],
+    ["wrong kind", { kind: "viewport_pointer", xRatio: 0.5, yRatio: 0.5 }],
+    ["over-bound y ratio", { kind: "element_relative_pointer", xRatio: 0.5, yRatio: 1.01 }],
+  ])("rejects a malformed selection point: %s", (_case, selectionPoint) => {
+    expect(isUIAttachment({ ...validAttachment, selectionPoint })).toBe(false);
+  });
+
+  it("accepts inclusive selection point boundaries", () => {
+    expect(isUIAttachment({
+      ...validAttachment,
+      selectionPoint: {
+        kind: "element_relative_pointer",
+        xRatio: 0,
+        yRatio: 1,
+      },
+    })).toBe(true);
   });
 
   it("accepts an exact opaque source anchor without treating it as verified", () => {

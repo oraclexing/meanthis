@@ -8,7 +8,7 @@ import {
 describe("local agent bridge background lifecycle", () => {
   test("resumes a pending approval after the side panel closes", async () => {
     const harness = createHarness(pendingStatus());
-    harness.bridge.refreshConnectionAndPublish = vi.fn(async () => connectedStatus());
+    harness.bridge.refreshConnectionAndHeartbeat = vi.fn(async () => connectedStatus());
     const controller = createLocalAgentBridgeBackgroundController(harness.dependencies);
 
     await controller.initialize();
@@ -19,7 +19,7 @@ describe("local agent bridge background lifecycle", () => {
 
     await controller.handleAlarm({ name: LOCAL_AGENT_BRIDGE_REFRESH_ALARM });
 
-    expect(harness.bridge.refreshConnectionAndPublish).toHaveBeenCalledOnce();
+    expect(harness.bridge.refreshConnectionAndHeartbeat).toHaveBeenCalledOnce();
     expect(harness.alarms.create).toHaveBeenLastCalledWith(
       LOCAL_AGENT_BRIDGE_REFRESH_ALARM,
       { delayInMinutes: 0.5 },
@@ -55,7 +55,7 @@ describe("local agent bridge background lifecycle", () => {
 
   test("fails closed after an alarm refresh error", async () => {
     const harness = createHarness(connectedStatus());
-    harness.bridge.refreshConnectionAndPublish = vi.fn(async () => {
+    harness.bridge.refreshConnectionAndHeartbeat = vi.fn(async () => {
       throw new Error("owner unavailable");
     });
     const controller = createLocalAgentBridgeBackgroundController(harness.dependencies);
@@ -78,7 +78,7 @@ describe("local agent bridge background lifecycle", () => {
     }, "local");
 
     expect(harness.bridge.readStatus).not.toHaveBeenCalled();
-    expect(harness.bridge.refreshConnectionAndPublish).not.toHaveBeenCalled();
+    expect(harness.bridge.refreshConnectionAndHeartbeat).not.toHaveBeenCalled();
     expect(harness.alarms.create).not.toHaveBeenCalled();
     expect(harness.alarms.clear).not.toHaveBeenCalled();
   });
@@ -89,7 +89,7 @@ function createHarness(initialStatus: LocalAgentBridgeStatus) {
     readStatus: vi.fn(async () => initialStatus),
     createConnectionRequest: vi.fn(),
     refreshConnection: vi.fn(),
-    refreshConnectionAndPublish: vi.fn(async () => initialStatus),
+    refreshConnectionAndHeartbeat: vi.fn(async () => initialStatus),
     publish: vi.fn(),
     disconnect: vi.fn(),
   };

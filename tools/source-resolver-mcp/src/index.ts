@@ -1,15 +1,24 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import {
+  ListRootsResultSchema,
+  type ServerNotification,
+  type ServerRequest,
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   UI_ATTACH_SOURCE_RESOLUTION_KIND,
   UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
+  normalizeUIAttachSourceResolutionV1,
   resolveUIAttachSourceAcrossWorkspaces,
+  type UIAttachSourceResolutionV1,
 } from "@meanthis/source-map-core";
 import { fileURLToPath } from "node:url";
 import { z } from "zod/v4";
 
 export const MEANTHIS_SOURCE_RESOLVER_TOOL_NAME = "meanthis_resolve_source" as const;
 export const UI_ATTACH_SOURCE_RESOLVER_TOOL_NAME = MEANTHIS_SOURCE_RESOLVER_TOOL_NAME;
+export const MEANTHIS_SOURCE_RESOLVER_MAX_BATCH_SIZE = 26;
 
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -23,6 +32,45 @@ type MaybePromise<T> = T | Promise<T>;
 export interface SourceResolverMcpServerOptions {
   listWorkspaceRoots?: () => MaybePromise<readonly string[]>;
   launchWorkspaceRoot?: string;
+}
+
+export interface SourceResolverInput {
+  sourceAnchor: unknown;
+  candidates?: readonly unknown[];
+}
+
+export {
+  normalizeUIAttachSourceResolutionV1,
+  type UIAttachSourceResolutionV1,
+} from "@meanthis/source-map-core";
+
+export async function resolveSourceInputsAcrossWorkspaces(
+  workspaceRoots: readonly string[],
+  inputs: readonly SourceResolverInput[],
+): Promise<UIAttachSourceResolutionV1[]> {
+  if (inputs.length > MEANTHIS_SOURCE_RESOLVER_MAX_BATCH_SIZE) {
+    throw new TypeError("Source resolver batch exceeds the capture target limit.");
+  }
+  return Promise.all(inputs.map((input) => resolveUIAttachSourceAcrossWorkspaces({
+    workspaceRoots,
+    anchor: input.sourceAnchor,
+    candidates: input.candidates,
+  })));
+}
+
+export async function resolveSourceInputsForMcpRequest(
+  server: McpServer,
+  options: SourceResolverMcpServerOptions,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  inputs: readonly SourceResolverInput[],
+): Promise<UIAttachSourceResolutionV1[]> {
+  let workspaceRoots: readonly string[];
+  try {
+    workspaceRoots = await discoverWorkspaceRoots(server, options, extra);
+  } catch {
+    return inputs.map(() => workspaceUnavailableResolution());
+  }
+  return resolveSourceInputsAcrossWorkspaces(workspaceRoots, inputs);
 }
 
 export function registerSourceResolverMcpTool(
@@ -51,23 +99,14 @@ export function registerSourceResolverMcpTool(
       }).strict(),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ sourceAnchor, candidates }) => {
-      let workspaceRoots: readonly string[];
-      try {
-        workspaceRoots = await discoverWorkspaceRoots(server, options);
-      } catch {
-        return textResult({
-          schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
-          kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
-          status: "unavailable",
-          reason: "workspace_unavailable",
-        });
-      }
-      return textResult(await resolveUIAttachSourceAcrossWorkspaces({
-        workspaceRoots,
-        anchor: sourceAnchor,
-        candidates,
-      }));
+    async ({ sourceAnchor, candidates }, extra) => {
+      const [resolution] = await resolveSourceInputsForMcpRequest(
+        server,
+        options,
+        extra,
+        [{ sourceAnchor, candidates }],
+      );
+      return textResult(resolution ?? workspaceUnavailableResolution());
     },
   );
 }
@@ -105,14 +144,21 @@ export async function runSourceResolverMcpServer(
 async function discoverWorkspaceRoots(
   server: McpServer,
   options: SourceResolverMcpServerOptions,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
 ): Promise<readonly string[]> {
   if (options.listWorkspaceRoots) return options.listWorkspaceRoots();
-  if (server.server.getClientCapabilities()?.roots) return listMcpWorkspaceRoots(server);
+  if (server.server.getClientCapabilities()?.roots) return listMcpWorkspaceRoots(extra);
   return options.launchWorkspaceRoot ? [options.launchWorkspaceRoot] : [];
 }
 
-async function listMcpWorkspaceRoots(server: McpServer): Promise<string[]> {
-  const result = await server.server.listRoots();
+async function listMcpWorkspaceRoots(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+): Promise<string[]> {
+  const result = await extra.sendRequest(
+    { method: "roots/list" },
+    ListRootsResultSchema,
+    { signal: extra.signal },
+  );
   const roots: string[] = [];
   for (const root of result.roots) {
     try {
@@ -123,6 +169,15 @@ async function listMcpWorkspaceRoots(server: McpServer): Promise<string[]> {
     }
   }
   return roots;
+}
+
+function workspaceUnavailableResolution(): UIAttachSourceResolutionV1 {
+  return {
+    schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
+    kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
+    status: "unavailable",
+    reason: "workspace_unavailable",
+  };
 }
 
 function textResult(value: unknown) {

@@ -1,0 +1,2 @@
+declare const __MEANTHIS_EXTENSION_DEV_BUILD_ID__: string;
+declare const __MEANTHIS_EXTENSION_DEV_RELOAD_TOKEN__: string;

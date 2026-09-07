@@ -1,12 +1,301 @@
 import { describe, expect, test } from "vitest";
-import type { UIAttachment } from "@meanthis/schema";
 import {
+  UI_ATTACHMENT_COMPUTED_STYLE_FIELDS,
+  type UIAttachment,
+} from "@meanthis/schema";
+import {
+  CAPTURE_SESSION_FILE_SCHEMA_VERSION,
+  CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2,
+  CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3,
   hydrateCaptureSessionFile,
+  isCaptureSessionAnnotationLifecycleV3,
+  isCaptureSessionFileV1,
+  isCaptureSessionFileV2,
+  isCaptureSessionFileV3,
+  parseCaptureSessionFile,
+  serializeCaptureSessionFile,
   validateCaptureSessionFile,
+  type CaptureSessionFileV3,
+  type CaptureSessionFileV2,
   type CaptureSessionFileV1,
 } from "./index";
 
 describe("capture session file", () => {
+  test("accepts the current annotation identity schema without rewriting item identity or timestamps", () => {
+    const input = createAnnotationSessionFile();
+    const before = structuredClone(input);
+
+    const validation = validateCaptureSessionFile(input);
+    const hydration = hydrateCaptureSessionFile(input);
+
+    expect(CAPTURE_SESSION_FILE_SCHEMA_VERSION_V2).toBe("0.2.0");
+    expect(validation).toEqual({ ok: true, file: input });
+    expect(hydration.ok).toBe(true);
+    if (!hydration.ok) return;
+    expect(hydration.hub.getAttachment("session-1", "att_save", {
+      disclosureMode: "agent_safe",
+    })).toEqual(expect.objectContaining({
+      ok: true,
+      item: expect.objectContaining({
+        annotationId: "annotation-identity-a",
+        createdAt: "2026-07-10T10:00:00.000Z",
+        updatedAt: "2026-07-10T10:01:00.000Z",
+      }),
+    }));
+    expect(input).toEqual(before);
+  });
+
+  test("keeps legacy V1 readable without synthesizing a permanent annotation identity", () => {
+    const input = createSessionFile();
+
+    const validation = validateCaptureSessionFile(input);
+    const hydration = hydrateCaptureSessionFile(input);
+
+    expect(validation).toEqual({ ok: true, file: input });
+    expect(hydration.ok).toBe(true);
+    if (!hydration.ok) return;
+    const item = hydration.hub.getAttachment("session-1", "att_save", {
+      disclosureMode: "agent_safe",
+    });
+    expect(item.ok).toBe(true);
+    if (!item.ok) return;
+    expect(item.item).not.toHaveProperty("annotationId");
+    expect(item.item).not.toHaveProperty("updatedAt");
+  });
+
+  test("fails closed when annotation identity fields do not match the declared schema revision", () => {
+    const missingIdentity = createAnnotationSessionFile() as unknown as Record<string, unknown>;
+    delete ((missingIdentity.session as CaptureSessionFileV2["session"]).attachments[0] as {
+      annotationId?: string;
+    }).annotationId;
+    const missingUpdatedAt = createAnnotationSessionFile() as unknown as Record<string, unknown>;
+    delete ((missingUpdatedAt.session as CaptureSessionFileV2["session"]).attachments[0] as {
+      updatedAt?: string;
+    }).updatedAt;
+    const backwardUpdatedAt = createAnnotationSessionFile();
+    backwardUpdatedAt.session.attachments[0].updatedAt = "2026-07-10T09:59:59.999Z";
+    const laterThanSession = createAnnotationSessionFile();
+    laterThanSession.session.attachments[0].updatedAt = "2026-07-10T10:02:00.001Z";
+    const legacyWithIdentity = createSessionFile() as CaptureSessionFileV1 & {
+      session: { attachments: Array<{ annotationId?: string }> };
+    };
+    legacyWithIdentity.session.attachments[0].annotationId = "must-not-be-accepted-as-v1";
+
+    expect(validateCaptureSessionFile(missingIdentity)).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([expect.objectContaining({
+        path: "session.attachments[0].annotationId",
+      })]),
+    }));
+    expect(validateCaptureSessionFile(legacyWithIdentity)).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([expect.objectContaining({
+        path: "session.attachments[0].[unknownField:0]",
+      })]),
+    }));
+    expect(validateCaptureSessionFile(missingUpdatedAt)).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([expect.objectContaining({
+        path: "session.attachments[0].updatedAt",
+      })]),
+    }));
+    expect(validateCaptureSessionFile(backwardUpdatedAt)).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([{
+        path: "session.attachments[0].updatedAt",
+        message: "Expected item updatedAt not to precede createdAt.",
+      }]),
+    }));
+    expect(validateCaptureSessionFile(laterThanSession)).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([{
+        path: "session.attachments[0].updatedAt",
+        message: "Expected item updatedAt not to exceed session updatedAt.",
+      }]),
+    }));
+  });
+
+  test.each([
+    ["malformed", "annotation id with spaces", "Expected an opaque ASCII annotation id up to 128 characters."],
+    ["over-bound", "a".repeat(129), "Expected an opaque ASCII annotation id up to 128 characters."],
+    ["duplicate", "annotation-identity-b", "Duplicate annotation id."],
+  ])("rejects %s annotation identity without reflecting its value", (_case, annotationId, message) => {
+    const input = createAnnotationSessionFile();
+    input.session.attachments[0].annotationId = annotationId;
+
+    const result = validateCaptureSessionFile(input);
+
+    const expectedPath = _case === "duplicate"
+      ? "session.attachments[1].annotationId"
+      : "session.attachments[0].annotationId";
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      issues: expect.arrayContaining([{
+        path: expectedPath,
+        message,
+      }]),
+    }));
+    expect(JSON.stringify(result)).not.toContain(annotationId);
+  });
+
+  test.each([
+    ["open", () => createLifecycleSessionFile("open")],
+    ["resolved", () => createLifecycleSessionFile("resolved")],
+  ] as const)("accepts a V3 %s lifecycle and preserves it during hydration", (_state, create) => {
+    const input = create();
+    const before = structuredClone(input);
+
+    expect(CAPTURE_SESSION_FILE_SCHEMA_VERSION).toBe(CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3);
+    expect(validateCaptureSessionFile(input)).toEqual({ ok: true, file: input });
+    expect(isCaptureSessionFileV3(input)).toBe(true);
+    expect(isCaptureSessionAnnotationLifecycleV3(input.session.attachments[0].annotationLifecycle)).toBe(true);
+
+    const hydrated = hydrateCaptureSessionFile(input);
+
+    expect(hydrated.ok).toBe(true);
+    if (!hydrated.ok) return;
+    const attachment = hydrated.hub.getAttachment("session-1", "att_save", {
+      disclosureMode: "agent_safe",
+    });
+    expect(attachment).toEqual(expect.objectContaining({
+      ok: true,
+      item: expect.objectContaining({
+        annotationId: "annotation-identity-a",
+        annotationLifecycle: input.session.attachments[0].annotationLifecycle,
+        createdAt: "2026-07-10T10:00:00.000Z",
+        updatedAt: "2026-07-10T10:01:00.000Z",
+      }),
+    }));
+    expect(input).toEqual(before);
+  });
+
+  test("keeps V1 and V2 type guards and serialization on their declared versions", () => {
+    const legacy = createSessionFile();
+    const identity = createAnnotationSessionFile();
+
+    expect(isCaptureSessionFileV1(legacy)).toBe(true);
+    expect(isCaptureSessionFileV2(identity)).toBe(true);
+    expect(isCaptureSessionFileV3(legacy)).toBe(false);
+    expect(isCaptureSessionFileV3(identity)).toBe(false);
+
+    for (const input of [legacy, identity]) {
+      const serialized = serializeCaptureSessionFile(input);
+      expect(serialized.ok).toBe(true);
+      if (!serialized.ok) continue;
+      expect(serialized.value.file.schemaVersion).toBe(input.schemaVersion);
+      expect(serialized.value.file).toEqual(input);
+      expect(serialized.value.file.session.attachments[0]).not.toHaveProperty("annotationLifecycle");
+      expect(parseCaptureSessionFile(serialized.value.text)).toEqual({
+        ok: true,
+        value: serialized.value.file,
+      });
+    }
+  });
+
+  test.each([
+    ["missing", (file: CaptureSessionFileV3) => {
+      delete (file.session.attachments[0] as unknown as Record<string, unknown>).annotationLifecycle;
+    }],
+    ["own undefined", (file: CaptureSessionFileV3) => {
+      (file.session.attachments[0] as unknown as Record<string, unknown>).annotationLifecycle = undefined;
+    }],
+    ["null", (file: CaptureSessionFileV3) => {
+      (file.session.attachments[0] as unknown as Record<string, unknown>).annotationLifecycle = null;
+    }],
+    ["malformed", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "pending",
+        resolvedAt: null,
+      } as unknown as CaptureSessionFileV3["session"]["attachments"][number]["annotationLifecycle"];
+    }],
+    ["extra field", (file: CaptureSessionFileV3) => {
+      (file.session.attachments[0].annotationLifecycle as unknown as Record<string, unknown>).reason = "done";
+    }],
+    ["invalid open time", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "open",
+        resolvedAt: "2026-07-10T10:00:30.000Z",
+      };
+    }],
+    ["invalid resolved state", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "resolved",
+        resolvedAt: null,
+      };
+    }],
+    ["malformed resolved time", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "resolved",
+        resolvedAt: "not-a-date",
+      };
+    }],
+    ["resolved before createdAt", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "resolved",
+        resolvedAt: "2026-07-10T09:59:59.999Z",
+      };
+    }],
+    ["resolved after updatedAt", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "resolved",
+        resolvedAt: "2026-07-10T10:01:00.001Z",
+      };
+    }],
+    ["extended-year over-bound", (file: CaptureSessionFileV3) => {
+      file.session.attachments[0].annotationLifecycle = {
+        state: "resolved",
+        resolvedAt: "+010000-01-01T00:00:00.000Z",
+      };
+    }],
+  ] as const)("rejects V3 lifecycle %s", (_name, mutate) => {
+    const input = createLifecycleSessionFile("resolved");
+    mutate(input);
+
+    const result = validateCaptureSessionFile(input);
+
+    expect(result.ok).toBe(false);
+    expect(isCaptureSessionFileV3(input)).toBe(false);
+  });
+
+  test("rejects extended-year V3 session timestamps while retaining V2 acceptance", () => {
+    const v3 = createLifecycleSessionFile("open");
+    v3.session.updatedAt = "+010000-01-01T00:00:00.000Z";
+    expect(validateCaptureSessionFile(v3).ok).toBe(false);
+
+    const v2 = createAnnotationSessionFile();
+    v2.session.updatedAt = "+010000-01-01T00:00:00.000Z";
+    v2.session.attachments[0].updatedAt = "+010000-01-01T00:00:00.000Z";
+    expect(validateCaptureSessionFile(v2).ok).toBe(true);
+  });
+
+  test("serializes and parses V3 canonical bytes without migration", () => {
+    const input = createLifecycleSessionFile("resolved");
+    const before = structuredClone(input);
+
+    const serialized = serializeCaptureSessionFile(input);
+
+    expect(serialized.ok).toBe(true);
+    if (!serialized.ok) return;
+    expect(serialized.value.text).toBe(`${JSON.stringify(serialized.value.file, null, 2)}\n`);
+    expect(serialized.value.byteLength).toBe(
+      new TextEncoder().encode(serialized.value.text).byteLength,
+    );
+    expect(serialized.value.file.schemaVersion).toBe("0.3.0");
+    const serializedV3 = serialized.value.file as CaptureSessionFileV3;
+    expect(serializedV3.session.attachments[0].annotationLifecycle).toEqual(
+      input.session.attachments[0].annotationLifecycle,
+    );
+    expect(parseCaptureSessionFile(serialized.value.text)).toEqual({
+      ok: true,
+      value: serialized.value.file,
+    });
+    expect(parseCaptureSessionFile(JSON.stringify(input))).toEqual({
+      ok: false,
+      issues: [{ path: "", message: "Expected canonical capture session JSON bytes." }],
+    });
+    expect(input).toEqual(before);
+  });
+
   test("hydrates a valid session file without changing ids or timestamps", () => {
     const input = createSessionFile();
     const before = structuredClone(input);
@@ -69,6 +358,89 @@ describe("capture session file", () => {
     }));
   });
 
+  test("accepts and preserves an exact element-relative selection point", () => {
+    const input = createSessionFile();
+    const selectionPoint = {
+      kind: "element_relative_pointer" as const,
+      xRatio: 0.25,
+      yRatio: 0.75,
+    };
+    input.session.attachments[0].sourceRecord.attachment.selectionPoint = selectionPoint;
+    const before = structuredClone(input);
+
+    const result = hydrateCaptureSessionFile(input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const attachment = result.hub.getAttachment("session-1", "att_save", {
+      disclosureMode: "agent_safe",
+    });
+    expect(attachment).toEqual(expect.objectContaining({
+      ok: true,
+      record: expect.objectContaining({
+        attachment: expect.objectContaining({ selectionPoint }),
+      }),
+    }));
+    expect(input).toEqual(before);
+  });
+
+  test("rejects an unknown selection point field before hydration", () => {
+    const input = createSessionFile();
+    input.session.attachments[0].sourceRecord.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+      clientX: 32,
+    } as unknown as UIAttachment["selectionPoint"];
+
+    const result = hydrateCaptureSessionFile(input);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.issues).toContainEqual({
+      path: "session.attachments[0].sourceRecord.attachment.selectionPoint.[unknownField:0]",
+      message: "Unknown field.",
+    });
+  });
+
+  test("accepts and preserves structured element content parts", () => {
+    const input = createSessionFile("agent_safe");
+    input.session.attachments[0].sourceRecord.attachment.element.contentParts = [
+      {
+        kind: "link",
+        tagName: "a",
+        role: "link",
+        text: "Documentation",
+        accessibleName: "Open documentation",
+      },
+      {
+        kind: "time",
+        tagName: "time",
+        role: null,
+        text: "8 minutes ago",
+        accessibleName: null,
+      },
+    ];
+
+    const result = hydrateCaptureSessionFile(input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const attachment = result.hub.getAttachment("session-1", "att_save", {
+      disclosureMode: "agent_safe",
+    });
+    expect(attachment).toEqual(expect.objectContaining({
+      ok: true,
+      record: expect.objectContaining({
+        attachment: expect.objectContaining({
+          element: expect.objectContaining({
+            contentParts: input.session.attachments[0].sourceRecord.attachment.element.contentParts,
+          }),
+        }),
+      }),
+    }));
+  });
+
   test("accepts and preserves a canonical embedded-frame pathname", () => {
     const input = createSessionFile();
     input.session.attachments[0].sourceRecord.attachment.boundary = {
@@ -123,6 +495,19 @@ describe("capture session file", () => {
     ["attachment", (attachment: UIAttachment) => setUnknownField(attachment)],
     ["attachment.source", (attachment: UIAttachment) => setUnknownField(attachment.source)],
     ["attachment.element", (attachment: UIAttachment) => setUnknownField(attachment.element)],
+    [
+      "attachment.element.contentParts[0]",
+      (attachment: UIAttachment) => {
+        attachment.element.contentParts = [{
+          kind: "text",
+          tagName: "p",
+          role: null,
+          text: "Visible text",
+          accessibleName: null,
+        }];
+        setUnknownField(attachment.element.contentParts[0]!);
+      },
+    ],
     ["attachment.element.bbox", (attachment: UIAttachment) => setUnknownField(attachment.element.bbox)],
     ["attachment.style", (attachment: UIAttachment) => setUnknownField(attachment.style)],
     ["attachment.context", (attachment: UIAttachment) => setUnknownField(attachment.context)],
@@ -587,6 +972,7 @@ describe("capture session file", () => {
       "style.display",
       "style.color",
       "style.backgroundColor",
+      ...UI_ATTACHMENT_COMPUTED_STYLE_FIELDS.map((field) => `style.${field}`),
       "context.parentSummary",
       "context.nearbyText",
       "context.selectorHints",
@@ -602,6 +988,40 @@ describe("capture session file", () => {
     const result = hydrateCaptureSessionFile(input);
 
     expect(result.ok).toBe(true);
+  });
+
+  test("preserves optional bounded computed style facts through canonical hydration", () => {
+    const input = createSessionFile();
+    Object.assign(input.session.attachments[0].sourceRecord.attachment.style, {
+      position: "relative",
+      boxSizing: "border-box",
+      width: "100px",
+      height: "36px",
+      margin: "4px",
+      padding: "6px 8px",
+      gap: "10px",
+      flexDirection: "row",
+      justifyContent: "center",
+      alignItems: "center",
+      overflowX: "visible",
+      overflowY: "hidden",
+      fontSize: "14px",
+      fontWeight: "600",
+      lineHeight: "20px",
+      borderRadius: "8px",
+    });
+
+    const result = serializeCaptureSessionFile(input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.file.session.attachments[0].sourceRecord.attachment.style).toMatchObject({
+      position: "relative",
+      padding: "6px 8px",
+      gap: "10px",
+      fontSize: "14px",
+      borderRadius: "8px",
+    });
   });
 
   test("recomputes derived text and preserves disclosure non-upgrade behavior", () => {
@@ -638,7 +1058,7 @@ describe("capture session file", () => {
     expect(result).toEqual({
       ok: false,
       issues: [
-        { path: "schemaVersion", message: 'Expected "0.1.0".' },
+        { path: "schemaVersion", message: 'Expected "0.1.0", "0.2.0", or "0.3.0".' },
         {
           path: "session.attachments[1].id",
           message: 'Duplicate attachment id "att_save".',
@@ -776,6 +1196,46 @@ function createSessionFile(
           disclosureMode,
         ),
       ],
+    },
+  };
+}
+
+function createAnnotationSessionFile(): CaptureSessionFileV2 {
+  const legacy = createSessionFile();
+  return {
+    ...legacy,
+    schemaVersion: "0.2.0",
+    session: {
+      ...legacy.session,
+      attachments: legacy.session.attachments.map((item, index) => ({
+        ...item,
+        annotationId: `annotation-identity-${index === 0 ? "a" : "b"}`,
+        updatedAt: index === 0 ? "2026-07-10T10:01:00.000Z" : item.createdAt,
+      })),
+    },
+  };
+}
+
+function createLifecycleSessionFile(
+  state: "open" | "resolved",
+): CaptureSessionFileV3 {
+  const identity = createAnnotationSessionFile();
+  return {
+    ...identity,
+    schemaVersion: CAPTURE_SESSION_FILE_SCHEMA_VERSION_V3,
+    session: {
+      ...identity.session,
+      attachments: identity.session.attachments.map((item, index) => ({
+        ...item,
+        annotationLifecycle: {
+          state,
+          resolvedAt: state === "resolved"
+            ? index === 0
+              ? "2026-07-10T10:00:30.000Z"
+              : "2026-07-10T10:02:00.000Z"
+            : null,
+        },
+      })),
     },
   };
 }

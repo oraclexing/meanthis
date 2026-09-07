@@ -35,6 +35,48 @@ describe("createOverlayRebindController", () => {
     controller.dispose();
   });
 
+  test("reads a current target only for its matching descriptor and revision", async () => {
+    const target = createVisibleButton();
+    const controller = createOverlayRebindController({ root: document, bindTarget: vi.fn() });
+
+    await controller.commitCurrent(createRestoreData().items[0], target);
+    const read = controller.readCurrentTarget("att_save", "att_save");
+
+    expect(read).toMatchObject({
+      itemId: "att_save",
+      attachmentId: "att_save",
+      status: "restored",
+      target,
+      origin: window.location.origin,
+      pathname: "/",
+    });
+    expect(read.revision).toEqual(expect.any(Number));
+    expect(controller.isCurrentTarget(read)).toBe(true);
+    expect(controller.readCurrentTarget("att_save", "wrong-attachment")).toMatchObject({
+      status: "unavailable",
+      target: null,
+    });
+
+    await controller.commitCurrent(createRestoreData().items[0], target);
+    expect(controller.isCurrentTarget(read)).toBe(false);
+    expect(controller.isCurrentTarget(
+      controller.readCurrentTarget("att_save", "att_save"),
+    )).toBe(true);
+
+    target.hidden = true;
+    expect(controller.readCurrentTarget("att_save", "att_save")).toMatchObject({
+      status: "missing",
+      target: null,
+    });
+    target.hidden = false;
+    window.history.pushState({}, "", "/another-page");
+    expect(controller.readCurrentTarget("att_save", "att_save")).toMatchObject({
+      status: "stale",
+      target: null,
+    });
+    controller.dispose();
+  });
+
   test("retains a fresh dynamic target across same-route restore refreshes", async () => {
     const target = createVisibleButton();
     const bindTarget = vi.fn();

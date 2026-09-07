@@ -1,12 +1,18 @@
 import "./extension-api";
 import { createBackgroundController } from "./background-controller";
 import { createContentScriptAccess } from "./content-script-access";
+import {
+  createDevelopmentAnnotationLifecycleExecutionGate,
+  createDevelopmentCaptureCommitGate,
+  registerDevelopmentRuntimeControl,
+} from "./development-runtime-control";
 import { createFirstCaptureDisclosureStore } from "./first-capture-disclosure";
 import { createExtensionSessionStore } from "./session-store";
 import {
   backgroundRuntimeFeatures,
+  localAgentBridgeSessionPublisher,
   registerSurfaceBackground,
-} from "./surface-background.development";
+} from "./surface-background.shared";
 import { createToolbarEntryHandler } from "./toolbar-entry";
 import {
   UI_ATTACH_CONTEXT_MENU_ID,
@@ -17,7 +23,14 @@ const storageAccessReady = Promise.all([
   chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }),
 ])
   .then(() => true, () => false);
+registerDevelopmentRuntimeControl();
 const store = createExtensionSessionStore({ storage: chrome.storage.local });
+const captureCommitGate = createDevelopmentCaptureCommitGate({
+  storage: chrome.storage.session,
+});
+const annotationLifecycleExecutionGate = createDevelopmentAnnotationLifecycleExecutionGate({
+  storage: chrome.storage.session,
+});
 const firstCaptureDisclosure = createFirstCaptureDisclosureStore({
   storage: chrome.storage.local,
 });
@@ -27,6 +40,10 @@ const controller = createBackgroundController({
   store,
   firstCaptureDisclosure,
   runtimeFeatures: backgroundRuntimeFeatures,
+  captureCommitGate,
+  annotationLifecycleExecutionGate,
+  onActiveSessionChanged: (data) => localAgentBridgeSessionPublisher.reconcile(data),
+  onActivePageInvalidated: () => localAgentBridgeSessionPublisher.clearActivePageContext(),
   storageAccessReady,
   ensureContentScript: contentScriptAccess.ensure,
 });
@@ -34,6 +51,16 @@ const controller = createBackgroundController({
 const handleToolbarClick = createToolbarEntryHandler({
   action: chrome.action,
   ensureContentScript: contentScriptAccess.ensure,
+  showInPageWidget: async (tabId) => {
+    const shown = await controller.showInPageWidget(tabId);
+    if (shown) {
+      try { await controller.refreshInPageWidgetContext(tabId); } catch {
+        // A context refresh failure must not turn an already opened widget into
+        // a side-panel failure; later widget activity can refresh its context.
+      }
+    }
+    return shown;
+  },
   openSidePanel: async (openOptions) => {
     if (!chrome.sidePanel) throw new Error("Side panel API is unavailable.");
     await chrome.sidePanel.open(openOptions);
@@ -47,6 +74,10 @@ const handleToolbarClick = createToolbarEntryHandler({
   contentUnavailableTitle: getLocalizedMessage(
     "toolbar_content_unavailable",
     "MeanThis could not access this page. Reload it, then select MeanThis again.",
+  ),
+  widgetUnavailableTitle: getLocalizedMessage(
+    "toolbar_widget_unavailable",
+    "MeanThis could not start its in-page tool. Click MeanThis again to open the side panel.",
   ),
   sidePanelUnavailableTitle: getLocalizedMessage(
     "toolbar_side_panel_unavailable",

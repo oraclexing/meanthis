@@ -19,7 +19,13 @@
     "README_zh.md",
     "dist/index.js",
     "dist/index.js.map",
-    "dist/index.d.ts"
+    "dist/index.d.ts",
+    "dist/metadata-diagnostics.js",
+    "dist/metadata-diagnostics.js.map",
+    "dist/metadata-diagnostics.d.ts",
+    "dist/annotation-lifecycle-control.js",
+    "dist/annotation-lifecycle-control.js.map",
+    "dist/annotation-lifecycle-control.d.ts"
   ],
   "exports": {
     ".": {
@@ -33,6 +39,6 @@
   "scripts": {
     "build": "tsc -b",
     "prepack": "npm run build",
-    "test": "vitest run src/index.test.ts src/local-bridge.test.ts src/saved-snapshot-control-policy.test.ts"
+    "test": "vitest run src/index.test.ts src/local-bridge.test.ts src/saved-snapshot-control-policy.test.ts src/metadata-diagnostics.test.ts src/annotation-lifecycle-control.test.ts"
   }
 }

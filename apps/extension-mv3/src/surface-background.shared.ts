@@ -5,10 +5,24 @@ import {
 } from "./local-agent-bridge";
 import { createLocalAgentBridgeBackgroundController } from "./local-agent-bridge-background";
 import { createLocalAgentBridgeRuntimeFeature } from "./local-agent-bridge-runtime";
+import { createLocalAgentBridgeSessionPublisher } from "./local-agent-bridge-session-publisher";
+import {
+  createBrowserLocalAgentBridgeBootstrap,
+  createBrowserLocalAgentBridgeRepair,
+} from "./local-agent-bridge-bootstrap";
+import { createDevelopmentAwareLocalAgentBridgeBootstrap } from
+  "./development-runtime-control";
+
+const localAgentBridgeBootstrap = createDevelopmentAwareLocalAgentBridgeBootstrap({
+  nativeBootstrap: createBrowserLocalAgentBridgeBootstrap(),
+  storage: chrome.storage.session,
+});
 
 const localAgentBridge = createBrowserLocalAgentBridgeClient({
   requestPermission: async () => true,
   withSessionLock: (operation) => operation(),
+  ensureOwnersReady: localAgentBridgeBootstrap,
+  repairOwners: createBrowserLocalAgentBridgeRepair(),
 });
 
 const localAgentBridgeBackground = createLocalAgentBridgeBackgroundController({
@@ -19,6 +33,10 @@ const localAgentBridgeBackground = createLocalAgentBridgeBackgroundController({
   }),
   storage: chrome.storage,
 });
+
+export const localAgentBridgeSessionPublisher = createLocalAgentBridgeSessionPublisher(
+  localAgentBridge,
+);
 
 export const backgroundRuntimeFeatures: readonly BackgroundRuntimeFeature[] = [
   createLocalAgentBridgeRuntimeFeature(localAgentBridge),

@@ -1,4 +1,4 @@
-import type { CaptureSessionFileV1 } from "@meanthis/hub-core";
+import type { CaptureSessionFile } from "@meanthis/hub-core";
 import type { UIAttachment, UIAttachmentDisclosureMode } from "@meanthis/schema";
 import type { OriginCaptureRecord } from "./capture-store";
 import { deriveCaptureRecordDisclosure, type CaptureRecordDisclosureResult } from "./disclosure-view";
@@ -28,6 +28,11 @@ export interface PanelCopyScope {
   current: boolean;
 }
 
+export interface PanelCurrentScope {
+  itemIds: string[];
+  selectedItemId: string | null;
+}
+
 export interface SourceModeSummary {
   agent_safe: number;
   developer_diagnostic: number;
@@ -35,14 +40,14 @@ export interface SourceModeSummary {
 }
 
 export interface PanelSessionPreviewInput {
-  file: CaptureSessionFileV1 | null;
+  file: CaptureSessionFile | null;
   legacyRecord: OriginCaptureRecord | null;
   selectedItemId: string | null;
   viewMode: UIAttachmentDisclosureMode;
 }
 
 export function summarizePanelSessionRows(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   selectedItemId: string | null,
   viewMode: UIAttachmentDisclosureMode,
   activePage: ActivePageContext | null = null,
@@ -90,7 +95,7 @@ export function summarizePanelSessionRows(
 }
 
 export function selectInitialSessionItemId(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   activePage?: ActivePageContext | null,
 ): string | null {
   if (activePage) {
@@ -103,7 +108,7 @@ export function selectInitialSessionItemId(
 }
 
 export function groupPanelSessionRows(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   rows: PanelSessionRow[],
   activePage: ActivePageContext | null,
   liveCurrentItemIds: ReadonlySet<string> = new Set(),
@@ -142,14 +147,23 @@ export function groupPanelSessionRows(
 }
 
 export function derivePanelCopyScope(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   selectedItemId: string | null,
   activePage: ActivePageContext | null,
   liveCurrentItemIds: ReadonlySet<string> = new Set(),
   liveExcludedItemIds: ReadonlySet<string> = new Set(),
 ): PanelCopyScope | null {
-  if (!file || !selectedItemId || !activePage) return null;
-  const selectedItem = file.session.attachments.find((item) => item.id === selectedItemId);
+  if (!file || !activePage) return null;
+  const selectedItem = selectedItemId
+    ? file.session.attachments.find((item) => item.id === selectedItemId)
+    : file.session.attachments.find((item) => (
+      getStrictPanelCopyIdentity(
+        item.sourceRecord as OriginCaptureRecord,
+        activePage,
+        liveCurrentItemIds.has(item.id),
+        liveExcludedItemIds.has(item.id),
+      )?.current === true
+    ));
   if (!selectedItem) return null;
   const selectedIdentity = getStrictPanelCopyIdentity(
     selectedItem.sourceRecord as OriginCaptureRecord,
@@ -175,6 +189,29 @@ export function derivePanelCopyScope(
     label: formatPanelSessionGroupLabel(selectedIdentity),
     itemIds,
     current: selectedIdentity.current,
+  };
+}
+
+export function derivePanelCurrentScope(
+  file: CaptureSessionFile | null,
+  selectedItemId: string | null,
+  activePage: ActivePageContext | null,
+  authoritativeItemIds?: ReadonlySet<string>,
+): PanelCurrentScope {
+  const currentItems = file?.session.attachments.filter((item) => (
+    authoritativeItemIds !== undefined
+      ? authoritativeItemIds.has(item.id)
+      : activePage === null || isCurrentPageRecord(
+          item.sourceRecord as OriginCaptureRecord,
+          activePage,
+        )
+  )) ?? [];
+  const itemIds = currentItems.map((item) => item.id);
+  return {
+    itemIds,
+    selectedItemId: selectedItemId && itemIds.includes(selectedItemId)
+      ? selectedItemId
+      : itemIds.at(-1) ?? null,
   };
 }
 
@@ -286,7 +323,7 @@ function getPanelSessionGroupIdentity(
   return { key, pathname, frameId, current, sameTab };
 }
 
-export function summarizeSourceModes(file: CaptureSessionFileV1 | null): SourceModeSummary {
+export function summarizeSourceModes(file: CaptureSessionFile | null): SourceModeSummary {
   const summary: SourceModeSummary = {
     agent_safe: 0,
     developer_diagnostic: 0,
@@ -298,18 +335,18 @@ export function summarizeSourceModes(file: CaptureSessionFileV1 | null): SourceM
   return summary;
 }
 
-export function requiresSourceExportConfirmation(file: CaptureSessionFileV1 | null): boolean {
+export function requiresSourceExportConfirmation(file: CaptureSessionFile | null): boolean {
   const summary = summarizeSourceModes(file);
   return summary.developer_diagnostic > 0 || summary.full_debug > 0;
 }
 
-export function getSourceExportWarning(file: CaptureSessionFileV1 | null): string | null {
+export function getSourceExportWarning(file: CaptureSessionFile | null): string | null {
   return requiresSourceExportConfirmation(file)
     ? "Export includes developer_diagnostic or full_debug source material. Review before sharing."
     : null;
 }
 
-export function formatSessionItemCount(file: CaptureSessionFileV1 | null): string {
+export function formatSessionItemCount(file: CaptureSessionFile | null): string {
   return `${file?.session.attachments.length ?? 0}/${EXTENSION_SESSION_MAX_ITEMS} items`;
 }
 
@@ -324,9 +361,9 @@ export function derivePanelSessionPreview(
 }
 
 export function findPanelSessionItem(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   itemId: string | null,
-): CaptureSessionFileV1["session"]["attachments"][number] | null {
+): CaptureSessionFile["session"]["attachments"][number] | null {
   if (!file || !itemId) return null;
   return file.session.attachments.find((item) => item.id === itemId) ?? null;
 }

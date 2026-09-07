@@ -1,6 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CancelledNotificationSchema,
+  ListRootsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   createSourceContentHash,
   createSourceMapSidecar,
@@ -10,7 +13,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
-import { createSourceResolverMcpServer } from "./index.js";
+import {
+  MEANTHIS_SOURCE_RESOLVER_MAX_BATCH_SIZE,
+  createSourceResolverMcpServer,
+  resolveSourceInputsAcrossWorkspaces,
+} from "./index.js";
 
 const BUILD_ID = "A".repeat(43);
 const SOURCE_ID = "B".repeat(43);
@@ -29,6 +36,16 @@ afterEach(async () => {
 });
 
 describe("minimal source resolver MCP", () => {
+  test("rejects an oversized internal resolution batch before workspace access", async () => {
+    await expect(resolveSourceInputsAcrossWorkspaces(
+      ["C:/must-not-be-read"],
+      Array.from(
+        { length: MEANTHIS_SOURCE_RESOLVER_MAX_BATCH_SIZE + 1 },
+        () => ({ sourceAnchor: SOURCE_ANCHOR }),
+      ),
+    )).rejects.toThrow("capture target limit");
+  });
+
   test("exposes one strict read-only tool and returns domain failures as text JSON", async () => {
     const server = createSourceResolverMcpServer();
     const client = new Client({ name: "source-resolver-contract", version: "0.1.0" });
@@ -109,6 +126,86 @@ describe("minimal source resolver MCP", () => {
       });
       expect(readText(result)).not.toContain(createSourceContentHash(SOURCE));
       expect(readText(result)).not.toContain(matchingRoot);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("binds and cancels nested roots/list with the current tools/call", async () => {
+    const server = createSourceResolverMcpServer();
+    const client = new Client(
+      { name: "cancelling-roots-client", version: "0.1.0" },
+      { capabilities: { roots: { listChanged: false } } },
+    );
+    let markRootsStarted!: () => void;
+    const rootsStarted = new Promise<void>((resolve) => {
+      markRootsStarted = resolve;
+    });
+    client.setRequestHandler(ListRootsRequestSchema, async (_request, extra) => {
+      markRootsStarted();
+      await new Promise<void>((resolve) => {
+        if (extra.signal.aborted) resolve();
+        else extra.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("roots request cancelled");
+    });
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const clientSend = clientTransport.send.bind(clientTransport);
+    const serverSend = serverTransport.send.bind(serverTransport);
+    let toolCallRequestId: string | number | undefined;
+    let nestedRequestId: string | number | undefined;
+    let rootsRelatedRequestId: string | number | undefined;
+    let markNestedCancelled!: (requestId: string | number) => void;
+    const nestedCancelled = new Promise<string | number>((resolve) => {
+      markNestedCancelled = resolve;
+    });
+    clientTransport.send = async (message, options) => {
+      if ("method" in message && message.method === "tools/call" && "id" in message) {
+        toolCallRequestId = message.id;
+      }
+      await clientSend(message, options);
+    };
+    serverTransport.send = async (message, options) => {
+      if ("method" in message && message.method === "roots/list" && "id" in message) {
+        nestedRequestId = message.id;
+        rootsRelatedRequestId = options?.relatedRequestId;
+      }
+      const cancellation = CancelledNotificationSchema.safeParse(message);
+      if (cancellation.success && cancellation.data.params.requestId === nestedRequestId) {
+        markNestedCancelled(cancellation.data.params.requestId);
+      }
+      await serverSend(message, options);
+    };
+
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const abortController = new AbortController();
+      const callState = client.callTool(
+        {
+          name: "meanthis_resolve_source",
+          arguments: { sourceAnchor: SOURCE_ANCHOR },
+        },
+        undefined,
+        { signal: abortController.signal },
+      ).then(() => "resolved", () => "rejected");
+      await rootsStarted;
+      expect(toolCallRequestId).toBeDefined();
+      expect(nestedRequestId).toBeDefined();
+      expect(rootsRelatedRequestId).toBe(toolCallRequestId);
+
+      abortController.abort();
+      expect(await callState).toBe("rejected");
+      let cancellationTimeout!: ReturnType<typeof setTimeout>;
+      const cancellation = await Promise.race([
+        nestedCancelled.then((requestId) => ({ status: "cancelled" as const, requestId })),
+        new Promise<{ status: "timeout" }>((resolve) => {
+          cancellationTimeout = setTimeout(() => resolve({ status: "timeout" }), 1_000);
+        }),
+      ]);
+      clearTimeout(cancellationTimeout);
+      expect(cancellation).toEqual({ status: "cancelled", requestId: nestedRequestId });
     } finally {
       await client.close();
       await server.close();

@@ -1,4 +1,6 @@
+import { createBrowserCaptureObservationReader } from "./browser-capture-observation";
 import "./extension-api";
+import { createPanelCaptureComparison, type CaptureObservationReader } from "./panel-capture-comparison";
 import {
   deriveCapturePageRoutingHint,
   type CapturePromptBundleFormat,
@@ -17,6 +19,7 @@ import {
   type LocalBridgeApprovalMode,
   type LocalBridgeActivityV1,
   type LocalBridgeObservationsV1,
+  type LocalBridgePageV1,
   type UIAttachmentDisclosureMode,
 } from "@meanthis/schema";
 import {
@@ -63,9 +66,11 @@ import {
   requiresSourceExportConfirmation,
   summarizePanelSessionRows,
   summarizeSourceModes,
+  type PanelCopyScope,
 } from "./panel-session-model";
 import {
   buildPanelAgentCopy,
+  buildPanelBridgeAgentCopy,
   buildPanelBridgeCapture,
   composePanelMarkdown,
   formatCaptureFailureStatus,
@@ -111,11 +116,15 @@ import {
 } from "./panel-handoff-format";
 import {
   acquireFrameScopePermission,
+  createFrameScopeSelectionController,
   FrameScopeAccessError,
   readFrameScopes,
-  selectFrameScope,
   type FrameScopeSelectionTarget,
 } from "./frame-scope-access";
+import {
+  createAutomaticPageAccessController,
+  type AutomaticPageAccessController,
+} from "./automatic-page-access";
 import type { ExtensionSurfaceProfile } from "./surface-profile";
 import {
   INDEPENDENT_VIEW_MODE_KEY,
@@ -150,6 +159,7 @@ const SAVED_ATTACHMENT_REF_KEYS = [
 ] as const;
 
 type PageAccessRecoveryKind = "permission" | "content";
+type PageAccessAutomaticFeedback = "denied" | "failed" | "not_ready" | null;
 type CurrentRebindObservation = OverlayRebindStatusData & { documentId?: string };
 
 export interface PanelDependencies {
@@ -164,6 +174,7 @@ export interface PanelDependencies {
   setInterval?(callback: () => void, delay: number): number;
   openOptionsPage?(): Promise<void>;
   openSavedRoute?(route: string): Promise<void>;
+  automaticPageAccess?: AutomaticPageAccessController;
   i18n?: UiAttachI18n;
   surfaceProfile?: ExtensionSurfaceProfile;
   localBridge?: LocalAgentBridgeClient;
@@ -181,6 +192,7 @@ export interface PanelDependencies {
   currentRebind?: {
     read(activePage: ActivePageContext): Promise<CurrentRebindObservation | null>;
   };
+  captureComparison?: CaptureObservationReader;
   storedSessions?: {
     list(): Promise<SessionCommandResponse<StoredOriginSessionSummary[]>>;
     review(origin: string): Promise<SessionCommandResponse<StoredSessionReviewData>>;
@@ -223,7 +235,7 @@ interface PanelRuntimeDependencies extends PanelDependencies {
     read(): Promise<PanelHandoffFormatPreferences>;
     save(scope: PanelHandoffFormatScope, format: CapturePromptBundleFormat): Promise<void>;
   };
-  testClickCapture?: {
+  elementSelection?: {
     read(): Promise<boolean>;
     save(enabled: boolean): Promise<void>;
   };
@@ -240,7 +252,40 @@ export function createBrowserPanelDependencies(options: {
   surfaceProfile?: ExtensionSurfaceProfile;
 } = {}): PanelDependencies {
   const client = createRuntimeSessionClient();
+  const frameScopeSelection = createFrameScopeSelectionController({
+    permissions: chrome.permissions,
+    selectTarget: async (target, startSelection) => {
+      const response = await sendSessionCommand<{ enabled: boolean }>({
+        type: "ui-attach:frame-scope-select",
+        tabId: target.tabId,
+        frameId: target.frameId,
+        documentId: target.documentId,
+        origin: target.origin,
+        pathname: target.pathname,
+        startSelection,
+      });
+      if (!response.ok) throw new FrameScopeAccessError(response.code);
+      if (!isElementSelectionData(response.data) || response.data.enabled !== startSelection) {
+        throw new FrameScopeAccessError("INVALID_SESSION_RESPONSE");
+      }
+      return response.data.enabled;
+    },
+    stopSelection: async () => {
+      const response = await sendSessionCommand<{ enabled: boolean }>({
+        type: "ui-attach:element-selection-set",
+        enabled: false,
+      });
+      if (!response.ok) throw new FrameScopeAccessError(response.code);
+      if (!isElementSelectionData(response.data) || response.data.enabled) {
+        throw new FrameScopeAccessError("INVALID_SESSION_RESPONSE");
+      }
+      return false;
+    },
+  });
   maintainPanelOverlayVisibilityLease();
+  window.addEventListener("pagehide", () => {
+    void frameScopeSelection.releasePermission().catch(() => undefined);
+  }, { once: true });
   return {
     controller: createPanelSessionController({
       client,
@@ -266,6 +311,7 @@ export function createBrowserPanelDependencies(options: {
     openSavedRoute: async (route) => {
       await chrome.tabs.create({ url: route, active: true });
     },
+    automaticPageAccess: createAutomaticPageAccessController(chrome),
     i18n: createUiAttachI18n(chrome.i18n),
     surfaceProfile: options.surfaceProfile ?? "development",
     localBridge: options.localBridge,
@@ -320,19 +366,41 @@ export function createBrowserPanelDependencies(options: {
         format,
       ),
     },
-    testClickCapture: {
-      read: readElementSelectionEnabled,
-      save: saveElementSelectionEnabled,
+    elementSelection: {
+      read: async () => {
+        const enabled = await readElementSelectionEnabled();
+        if (!enabled) await frameScopeSelection.releasePermission();
+        return enabled;
+      },
+      save: async (enabled) => {
+        try {
+          if (!enabled) {
+            await frameScopeSelection.stop();
+            return;
+          }
+          const scopes = await readFrameScopes((command) => sendSessionCommand<unknown>(command));
+          const current = scopes.scopes.find((scope) => scope.frameId === scopes.currentFrameId);
+          if (!current?.selectable) throw new FrameScopeAccessError("FRAME_UNAVAILABLE");
+          await frameScopeSelection.select({
+            tabId: scopes.tabId,
+            frameId: current.frameId,
+            documentId: current.documentId,
+            origin: current.origin,
+            pathname: current.pathname,
+            requiresHostPermission: current.requiresHostPermission,
+          }, true);
+        } catch (error) {
+          throw new Error(formatElementSelectionFailureStatus(
+            error instanceof FrameScopeAccessError ? error.code : "FRAME_SCOPE_UNAVAILABLE",
+          ));
+        }
+      },
     },
     frameScopes: {
       list: () => readFrameScopes((command) => sendSessionCommand<unknown>(command)),
-      select: (target, startSelection) => selectFrameScope({
-        permissions: chrome.permissions,
-        sendCommand: (command) => sendSessionCommand<unknown>(command),
-        target,
-        startSelection,
-      }),
+      select: (target, startSelection) => frameScopeSelection.select(target, startSelection),
     },
+    captureComparison: createBrowserCaptureObservationReader(chrome),
     currentRebind: {
       read: async (activePage) => {
         try {
@@ -458,7 +526,7 @@ export function createBrowserPanelDependencies(options: {
         epoch,
       }),
       clear: (origin, epoch, operationId) => sendSessionCommand<ActiveSessionReadback>({
-        type: "ui-attach:session-clear",
+        type: "ui-attach:session-clear-stored-origin",
         origin,
         epoch,
         operationId,
@@ -549,6 +617,12 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   const elements = queryPanelElements();
   elements.elementSelectionToggle.disabled = true;
   let latestSnapshot = options.controller.getSnapshot();
+  const captureComparison = deps.captureComparison ? createPanelCaptureComparison({
+    anchor: elements.selectedTargetDetails,
+    read: deps.captureComparison,
+    clipboard: deps.clipboard,
+    t,
+  }) : null;
   let currentRecord: OriginCaptureRecord | null = null;
   let currentMarkdown = "";
   let currentSummary = "";
@@ -593,6 +667,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   let activeOriginMessageRevision = 0;
   let elementSelectionRevision = 0;
   let elementSelectionEnabled = false;
+  let selectionStoppedStatusKey: string | null = null;
   let selectionStopPending = false;
   let frameScopeData: FrameScopeListData | null = null;
   let frameScopeRefreshRevision = 0;
@@ -600,6 +675,9 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   let frameScopeAutoStart = false;
   let firstCaptureDisclosureAcknowledged = false;
   let pageAccessRecoveryStatus: string | null = null;
+  let pageAccessRecoveryKind: PageAccessRecoveryKind | null = null;
+  let pageAccessAutomaticPending = false;
+  let pageAccessAutomaticFeedback: PageAccessAutomaticFeedback = null;
   let currentRebindRequestRevision = 0;
   let currentRebindRequestInFlight: { revision: number; pageKey: string } | null = null;
   let currentRebindPageKey: string | null = null;
@@ -622,8 +700,16 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   let pendingLocalBridgeSnapshot: PanelSessionSnapshot | null = null;
   let localBridgeObservationPublishAttempts = 0;
   let localBridgeObservationPublishSettled = 0;
+  let localBridgeIntentEditActive = false;
+  let localBridgeRequestBusy = false;
   let localBridgeActivity: LocalBridgeActivityV1 | null = null;
   let localBridgeStatus: LocalAgentBridgeStatus = disconnectedLocalBridgeStatus();
+  let localBridgeShareState:
+    | "idle"
+    | "shared"
+    | "unavailable"
+    | "publish_failed"
+    | "clear_failed" = "idle";
   let localBridgeRefresh = Promise.resolve();
   let storedSessionSummaries: StoredOriginSessionSummary[] = [];
   let storedSessionReview: StoredSessionReviewData | null = null;
@@ -668,7 +754,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     }
     if (deps.localBridge) {
       deps.setInterval?.(() => requestLocalBridgeRefresh(), 1_000);
-      deps.setInterval?.(() => requestLocalBridgePublish(latestSnapshot), 10_000);
+      deps.setInterval?.(() => requestLocalBridgeHeartbeat(), 10_000);
     }
     elements.elementSelectionToggle.disabled = pageAccessRecoveryStatus !== null;
   } catch {
@@ -678,6 +764,9 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   }
 
   function wireControls(): void {
+    elements.pageAccessEnableAutomatic.addEventListener("click", () => {
+      requestAutomaticPageAccess();
+    });
     elements.localBridgeApprovalMode.addEventListener("change", () => {
       renderLocalBridgeTrustHelp();
     });
@@ -703,7 +792,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
               t("request_ready");
           }
         }
-      });
+      }, true);
     });
 
     elements.localBridgeDisconnect.addEventListener("click", () => {
@@ -720,8 +809,15 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       if (elements.intent.disabled) return;
       generatedRelationIntent = null;
       clearRelationApplyFeedback();
+      markLocalBridgeIntentEditing();
       options.controller.setIntent(elements.intent.value);
       updatePromptMarkdown();
+    });
+    elements.intent.addEventListener("blur", () => {
+      void runPanelAction(async () => {
+        await options.controller.flushIntent();
+        finishLocalBridgeIntentEditing();
+      });
     });
 
     elements.removeSelectedItem.addEventListener("click", () => {
@@ -1023,7 +1119,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         void (async () => {
           try {
             const observed = await (
-              deps.testClickCapture?.read() ?? Promise.resolve(message.enabled)
+              deps.elementSelection?.read() ?? Promise.resolve(message.enabled)
             );
             if (revision !== elementSelectionRevision) return;
             renderElementSelectionState(observed);
@@ -1073,6 +1169,10 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     });
     deps.addWindowPageHideListener?.(() => {
       clearOverlayPreview();
+      void runPanelAction(async () => {
+        await options.controller.flushIntent();
+        finishLocalBridgeIntentEditing();
+      });
     });
   }
 
@@ -1088,15 +1188,126 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     }
   }
 
-  async function runLocalBridgeAction(action: () => Promise<void>): Promise<void> {
+  function requestAutomaticPageAccess(): void {
+    if (
+      pageAccessAutomaticPending ||
+      pageAccessRecoveryKind !== "permission" ||
+      !deps.automaticPageAccess
+    ) return;
+
+    pageAccessAutomaticPending = true;
+    pageAccessAutomaticFeedback = null;
+    renderPageAccessAutomaticAction();
+    const requestActiveOriginRevision = activeOriginMessageRevision;
+
+    let request: Promise<boolean>;
+    try {
+      // This must remain the first async browser call in the click path so
+      // Chrome associates permissions.request with the user's gesture.
+      request = deps.automaticPageAccess.setEnabled(true);
+    } catch {
+      finishAutomaticPageAccessRequest("failed");
+      return;
+    }
+
+    void request.then(async (granted) => {
+      if (requestActiveOriginRevision !== activeOriginMessageRevision) {
+        settleStaleAutomaticPageAccessRequest();
+        return;
+      }
+      if (!granted) {
+        finishAutomaticPageAccessRequest("denied");
+        return;
+      }
+      try {
+        await options.controller.refreshActiveOrigin();
+        await refreshFrameScopes();
+        if (requestActiveOriginRevision !== activeOriginMessageRevision) {
+          settleStaleAutomaticPageAccessRequest();
+          return;
+        }
+        const refreshedSnapshot = options.controller.getSnapshot();
+        if (!refreshedSnapshot.activeSupported || !refreshedSnapshot.origin) {
+          finishAutomaticPageAccessRequest("not_ready");
+          return;
+        }
+        if (pageAccessRecoveryKind === "permission") {
+          renderActiveOriginAccessState(false);
+        }
+        finishAutomaticPageAccessRequest(null);
+      } catch {
+        if (requestActiveOriginRevision !== activeOriginMessageRevision) {
+          settleStaleAutomaticPageAccessRequest();
+          return;
+        }
+        finishAutomaticPageAccessRequest("failed");
+      }
+    }, () => {
+      if (requestActiveOriginRevision !== activeOriginMessageRevision) {
+        settleStaleAutomaticPageAccessRequest();
+        return;
+      }
+      finishAutomaticPageAccessRequest("failed");
+    });
+  }
+
+  function settleStaleAutomaticPageAccessRequest(): void {
+    pageAccessAutomaticPending = false;
+    renderPageAccessAutomaticAction();
+  }
+
+  function finishAutomaticPageAccessRequest(feedback: PageAccessAutomaticFeedback): void {
+    pageAccessAutomaticPending = false;
+    pageAccessAutomaticFeedback = pageAccessRecoveryKind === "permission" ? feedback : null;
+    renderPageAccessAutomaticAction();
+  }
+
+  async function runLocalBridgeAction(
+    action: () => Promise<void>,
+    announceStartup = false,
+  ): Promise<void> {
+    if (announceStartup) setLocalBridgeRequestBusy("preparing");
     elements.localBridgeRequest.disabled = true;
     elements.localBridgeDisconnect.disabled = true;
     elements.localBridgeApprovalMode.disabled = true;
     try {
       await action();
-    } catch {
-      elements.localBridgeStatus.textContent = t("local_connection_failed");
+    } catch (error) {
+      const code = isRecord(error) && typeof error.code === "string" ? error.code : null;
+      if (
+        (code === "BRIDGE_REPAIR_REQUIRED" || code === "BRIDGE_SETUP_REQUIRED") &&
+        deps.localBridge?.repairConnection &&
+        options.confirm(t(code === "BRIDGE_REPAIR_REQUIRED"
+          ? "confirm_local_bridge_repair"
+          : "confirm_local_bridge_setup"))
+      ) {
+        try {
+          if (announceStartup) setLocalBridgeRequestBusy("repairing");
+          await deps.localBridge.repairConnection();
+          elements.localBridgeStatus.textContent = t("local_bridge_repaired_retry");
+        } catch {
+          elements.localBridgeStatus.textContent = t("local_bridge_start_failed");
+        }
+      } else {
+        elements.localBridgeStatus.textContent = code === "COMPANION_UNAVAILABLE"
+          ? t("local_companion_unavailable")
+          : code === "BRIDGE_REPAIR_REQUIRED"
+            ? t("local_bridge_repair_required")
+            : code === "BRIDGE_SETUP_REQUIRED"
+              ? t("local_bridge_setup_required")
+            : code === "BRIDGE_ACTION_REQUIRED"
+              ? t("local_bridge_action_required")
+            : code === "BRIDGE_START_FAILED"
+              ? t("local_bridge_start_failed")
+              : t("local_connection_failed");
+      }
     } finally {
+      if (announceStartup) {
+        localBridgeRequestBusy = false;
+        elements.localBridgeRequest.setAttribute("aria-busy", "false");
+        renderLocalBridgeRequestLabel(localBridgeStatus);
+        renderLocalBridgeSteps(localBridgeStatus);
+      }
       elements.localBridgeRequest.disabled = localBridgeStatus.connected;
       elements.localBridgeDisconnect.disabled = false;
       elements.localBridgeApprovalMode.disabled = localBridgeStatus.connected || localBridgeStatus.pending;
@@ -1112,7 +1323,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     const [
       captureMode,
       savedPreviewCopyPreference,
-      testClickEnabled,
+      elementSelectionEnabled,
       savedThemePreference,
       savedTimeDisplayPreference,
       savedRelationShortcuts,
@@ -1125,7 +1336,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         independent: false,
         mode: "agent_safe" as const,
       })),
-      retryBootstrapRead(() => deps.testClickCapture?.read() ?? Promise.resolve(false)),
+      retryBootstrapRead(() => deps.elementSelection?.read() ?? Promise.resolve(false)),
       retryBootstrapRead(() =>
         deps.themePreference?.read() ?? Promise.resolve<PanelThemePreference>("system")),
       retryBootstrapRead(() =>
@@ -1149,7 +1360,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     preferredMultiTargetHandoffFormat = savedHandoffFormatPreferences.multiTarget;
     persistedSingleTargetHandoffFormat = savedHandoffFormatPreferences.singleTarget;
     persistedMultiTargetHandoffFormat = savedHandoffFormatPreferences.multiTarget;
-    renderElementSelectionToggle(testClickEnabled);
+    renderElementSelectionToggle(elementSelectionEnabled);
   }
 
   async function refreshGlobalSettings(): Promise<void> {
@@ -1227,21 +1438,31 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     try {
       localBridgeStatus = await deps.localBridge.readStatus();
       renderLocalBridgeStatus(localBridgeStatus);
+      if (localBridgeStatus.connected || localBridgeStatus.pending) {
+        await requestLocalBridgePublish(latestSnapshot);
+      }
     } catch {
       elements.localBridgeStatus.textContent = t("local_status_unavailable");
+      renderLocalBridgeReadAcknowledgement({
+        ...localBridgeStatus,
+        readAcknowledgementState: "unavailable",
+      });
     }
   }
 
   function renderLocalBridgeStatus(status: LocalAgentBridgeStatus): void {
+    elements.localBridgeStatus.dataset.sharedTargetCount =
+      status.sharedTargetCount === null ? "unknown" : String(status.sharedTargetCount);
+    elements.localBridgeStatus.dataset.sharedSequence =
+      status.sharedSequence === null ? "unknown" : String(status.sharedSequence);
+    renderLocalBridgeReadAcknowledgement(status);
     renderLocalBridgeSteps(status);
     renderLocalBridgeTrustHelp();
     elements.localBridgeApprovalMode.disabled = status.connected || status.pending;
     elements.localBridgeTrustField.hidden = status.connected;
     elements.localBridgeTrustHelp.hidden = status.connected;
     elements.localBridgeRequest.hidden = status.connected;
-    elements.localBridgeRequest.textContent = status.pending
-      ? t("copy_request_again")
-      : t("create_copy_request");
+    renderLocalBridgeRequestLabel(status);
     elements.localBridgeDisconnect.hidden = !status.connected && !status.pending;
     elements.localBridgeDisconnect.textContent = status.pending
       ? t("cancel_request")
@@ -1255,18 +1476,78 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     elements.localBridgeDetails.hidden = !status.pending && !status.connected;
     if (elements.localBridgeDetails.hidden) elements.localBridgeDetails.open = false;
     if (status.connected) {
-      elements.localBridgeStatus.textContent = t("connected_local");
+      elements.localBridgeStatus.textContent = localBridgeShareState === "shared"
+        ? status.sharedTargetCount !== null && status.sharedTargetCount > 0
+          ? t("connected_local_targets", { count: status.sharedTargetCount })
+          : t("connected_local")
+        : localBridgeShareState === "unavailable"
+          ? t("connected_share_unavailable")
+          : localBridgeShareState === "publish_failed" || localBridgeShareState === "clear_failed"
+            ? t("connected_agent_unreachable")
+            : t("connected_no_selection");
     } else if (status.pending) {
       elements.localBridgeStatus.textContent = t("waiting_approval", {
-        expiresAt: status.expiresAt ?? "",
+        expiresAt: formatDisplayTime(status.expiresAt ?? "", timeDisplayPreference),
       });
     } else {
       elements.localBridgeStatus.textContent = t("ready_to_connect");
     }
   }
 
+  function renderLocalBridgeReadAcknowledgement(status: LocalAgentBridgeStatus): void {
+    const acknowledgementState = status.readAcknowledgementState ?? "unavailable";
+    const visible = status.connected && status.sharedSequence !== null;
+    elements.localBridgeReadAcknowledgementStatus.hidden = !visible;
+    elements.localBridgeReadAcknowledgementLimitations.hidden = !visible;
+    elements.localBridgeReadAcknowledgementStatus.dataset.state = acknowledgementState;
+    elements.localBridgeReadAcknowledgementStatus.dataset.readAcknowledgementState =
+      acknowledgementState;
+    elements.localBridgeReadAcknowledgementStatus.dataset.sharedSequence = visible
+      ? String(status.sharedSequence)
+      : "unknown";
+    elements.localBridgeReadAcknowledgementLimitations.dataset.state = acknowledgementState;
+    elements.localBridgeReadAcknowledgementLimitations.dataset.readAcknowledgementState =
+      acknowledgementState;
+    elements.localBridgeReadAcknowledgementLimitations.dataset.sharedSequence = visible
+      ? String(status.sharedSequence)
+      : "unknown";
+    elements.localBridgeReadAcknowledgementStatus.textContent = visible
+      ? t(
+          acknowledgementState === "current"
+            ? "local_bridge_read_ack_current"
+            : acknowledgementState === "waiting"
+              ? "local_bridge_read_ack_waiting"
+              : "local_bridge_read_ack_unavailable",
+        )
+      : "";
+    elements.localBridgeReadAcknowledgementLimitations.textContent = visible
+      ? t("local_bridge_read_ack_limitations")
+      : "";
+  }
+
+  function renderLocalBridgeRequestLabel(status: LocalAgentBridgeStatus): void {
+    if (localBridgeRequestBusy) return;
+    elements.localBridgeRequest.textContent = status.pending
+      ? t("copy_request_again")
+      : t("create_copy_request");
+  }
+
+  function setLocalBridgeRequestBusy(phase: "preparing" | "repairing"): void {
+    localBridgeRequestBusy = true;
+    elements.localBridgeRequest.setAttribute("aria-busy", "true");
+    elements.localBridgeRequest.textContent = t(
+      phase === "repairing" ? "local_bridge_repairing" : "local_bridge_preparing",
+    );
+    elements.localBridgeStatus.textContent = t(
+      phase === "repairing" ? "local_bridge_repairing_help" : "local_bridge_preparing_help",
+    );
+    renderLocalBridgeSteps(localBridgeStatus);
+  }
+
   function renderLocalBridgeSteps(status: LocalAgentBridgeStatus): void {
-    const states = status.connected
+    const states = localBridgeRequestBusy
+      ? ["complete", "current", "upcoming", "upcoming"]
+      : status.connected
       ? ["complete", "complete", "complete", "current"]
       : status.pending
         ? ["complete", "complete", "current", "upcoming"]
@@ -1298,6 +1579,39 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       })
       .catch(() => {
         elements.localBridgeStatus.textContent = t("waiting_approval_bridge_unavailable");
+        renderLocalBridgeReadAcknowledgement({
+          ...localBridgeStatus,
+          readAcknowledgementState: "unavailable",
+        });
+      });
+  }
+
+  function requestLocalBridgeHeartbeat(): void {
+    if (!deps.localBridge || !localBridgeStatus.connected) return;
+    localBridgeRefresh = localBridgeRefresh
+      .then(async () => {
+        localBridgeStatus = await deps.localBridge!.refreshConnectionAndHeartbeat();
+        renderLocalBridgeStatus(localBridgeStatus);
+        if (
+          localBridgeStatus.connected &&
+          (localBridgeShareState === "publish_failed" || localBridgeShareState === "clear_failed")
+        ) {
+          // A liveness refresh may have brought the owner back without changing
+          // the desired panel state. Reconcile the latest authoritative
+          // snapshot through the same serialized queue, whether the failed
+          // operation was a publish or a panel-channel revocation.
+          await requestLocalBridgePublish(latestSnapshot);
+        }
+      })
+      .catch(() => {
+        if (localBridgeShareState !== "clear_failed") {
+          localBridgeShareState = "publish_failed";
+        }
+        renderLocalBridgeStatus(localBridgeStatus);
+        renderLocalBridgeReadAcknowledgement({
+          ...localBridgeStatus,
+          readAcknowledgementState: "unavailable",
+        });
       });
   }
 
@@ -1319,6 +1633,8 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         try {
           await publishLocalBridgeSnapshot(snapshot);
         } catch {
+          localBridgeShareState = "publish_failed";
+          renderLocalBridgeStatus(localBridgeStatus);
           // A later snapshot remains eligible to replace a failed publish.
         }
       }
@@ -1329,15 +1645,60 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
 
   async function publishLocalBridgeSnapshot(snapshot: PanelSessionSnapshot): Promise<void> {
     if (!deps.localBridge) return;
+    if (!localBridgeStatus.connected && !localBridgeStatus.pending) return;
+    if (snapshot.intentDirty || localBridgeIntentEditActive) {
+      // Persist local drafts on the controller's short debounce, but do not
+      // share them while the textarea is still being edited. Publishing waits
+      // for an explicit editing boundary and a persisted snapshot.
+      return;
+    }
+    const focusedPage = deriveFocusedLocalBridgePage(snapshot.activePage);
+    if (
+      !snapshot.activeSupported ||
+      snapshot.status.kind === "error" ||
+      snapshot.clearPending ||
+      !focusedPage
+    ) {
+      await clearLocalBridgePanelContext();
+      return;
+    }
     const selectedItem = findPanelSessionItem(snapshot.file, snapshot.selectedItemId);
-    const record = selectedItem
+    const selectedRecord = selectedItem
       ? selectedItem.sourceRecord as OriginCaptureRecord
       : snapshot.file
         ? null
         : snapshot.legacyRecord;
-    const attachmentIds = record
-      ? getAgentHandoffAttachmentIds(snapshot, record)
-      : [];
+    const bridgeScope = snapshot.file
+      ? derivePanelCopyScope(
+          snapshot.file,
+          snapshot.selectedItemId,
+          snapshot.activePage,
+          getLiveCurrentItemIds(snapshot),
+          getLiveExcludedItemIds(snapshot),
+        )
+      : null;
+    const attachmentIds = snapshot.file
+      ? bridgeScope?.itemIds ?? []
+      : selectedRecord
+        ? [selectedRecord.attachment.id]
+        : [];
+    const representativeItem = selectedItem && attachmentIds.includes(selectedItem.id)
+      ? selectedItem
+      : findPanelSessionItem(snapshot.file, attachmentIds[0] ?? null);
+    const candidateRecord = representativeItem
+      ? representativeItem.sourceRecord as OriginCaptureRecord
+      : selectedRecord;
+    const candidateRoutingHint = candidateRecord
+      ? deriveCapturePageRoutingHint(candidateRecord)
+      : null;
+    const record = candidateRecord && (
+      snapshot.file !== null || (
+        candidateRoutingHint?.pageInstanceId === focusedPage.pageInstanceId &&
+        candidateRoutingHint.route === focusedPage.route
+      )
+    )
+      ? candidateRecord
+      : null;
     const bridgeInput = record
       ? {
           file: snapshot.file,
@@ -1346,17 +1707,16 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
           selectedRecord: record,
           viewMode: "agent_safe" as const,
           intent: snapshot.intent,
+          includeReplayDiagnostics: true as const,
         }
       : null;
     const handoff = bridgeInput
-      ? buildPanelAgentCopy({
+      ? buildPanelBridgeAgentCopy({
           ...bridgeInput,
         }, t)
       : null;
-    const captureRoutingHint = handoff?.ok && record ? deriveCapturePageRoutingHint(record) : null;
-    const observationCandidate = handoff?.ok
-      ? getLocalBridgeObservations(snapshot)
-      : null;
+    const captureRoutingHint = record ? candidateRoutingHint : null;
+    const observationCandidate = record ? getLocalBridgeObservations(snapshot) : null;
     const observationRoutingHint = observationCandidate && snapshot.activePage && record
       ? deriveCapturePageRoutingHint({
         ...record,
@@ -1366,9 +1726,15 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         pageUrl: `${snapshot.activePage.origin}${snapshot.activePage.pathname}`,
       })
       : null;
-    const observations = observationCandidate && observationRoutingHint
+    const availableObservations = observationCandidate && observationRoutingHint
       ? observationCandidate
       : null;
+    const waitingForCurrentScopeObservation = isCurrentBridgeScopeObservationPending(
+      snapshot,
+      bridgeScope,
+      attachmentIds,
+    );
+    const observations = waitingForCurrentScopeObservation ? null : availableObservations;
     if (observationCandidate && !observationRoutingHint) {
       elements.localBridgeStatus.dataset.observationState = "page_routing_unavailable";
     }
@@ -1376,6 +1742,14 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     const observedAttachmentIds = observations
       ? new Set(observations.targets.map((target) => target.attachmentId))
       : null;
+    if (waitingForCurrentScopeObservation) {
+      // A session update can reach the panel before the content script has
+      // rebound every newly added target. Share the complete capture-time
+      // attachment set immediately, then upgrade it with live observations
+      // when rebind finishes. Optional live evidence must never make a local
+      // capture invisible to the Agent or require the user to reselect it.
+      elements.localBridgeStatus.dataset.observationState = "scope_pending";
+    }
     const hasCurrentLiveBinding = Boolean(
       observations &&
       observedAttachmentIds &&
@@ -1383,19 +1757,25 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       attachmentIds.every((attachmentId) => observedAttachmentIds.has(attachmentId)) &&
       observations.targets.every((target) => target.status === "restored"),
     );
-    const capture = handoff?.ok && bridgeInput
+    const capture = bridgeInput
       ? buildPanelBridgeCapture(bridgeInput, hasCurrentLiveBinding ? "live_page" : "capture_time")
       : null;
-    const publishInput = {
-      page: routingHint
-        ? { pageInstanceId: routingHint.pageInstanceId, route: routingHint.route }
-        : null,
-      attachmentCount: handoff?.ok ? handoff.attachmentCount : 0,
-      agentCopy: handoff?.ok ? handoff.text : null,
-      ...(capture ? { capture } : {}),
-      ...(observations ? { observations } : {}),
-      ...(localBridgeActivity ? { activity: localBridgeActivity } : {}),
-    };
+    const publishInput = record && capture && captureRoutingHint
+      ? {
+          page: routingHint
+            ? { pageInstanceId: routingHint.pageInstanceId, route: routingHint.route }
+            : null,
+          attachmentCount: capture.targets.length,
+          agentCopy: handoff?.ok ? handoff.text : null,
+          capture,
+          ...(observations ? { observations } : {}),
+          ...(localBridgeActivity ? { activity: localBridgeActivity } : {}),
+        }
+      : {
+          page: focusedPage,
+          attachmentCount: 0,
+          agentCopy: null,
+        };
     if (observations) {
       localBridgeObservationPublishAttempts += 1;
       elements.localBridgeStatus.dataset.observationPublishAttempts =
@@ -1425,6 +1805,21 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         ? "published"
         : "publish_rejected";
     }
+    localBridgeShareState = published ? "shared" : "publish_failed";
+    if (published && localBridgeStatus.connected) {
+      // publish() intentionally returns only success; readStatus performs the
+      // authenticated, ephemeral ACK readback and makes a new sequence show
+      // waiting immediately without persisting acknowledgement data.
+      try {
+        localBridgeStatus = await deps.localBridge.readStatus();
+      } catch {
+        localBridgeStatus = {
+          ...localBridgeStatus,
+          readAcknowledgementState: "unavailable",
+        };
+      }
+    }
+    renderLocalBridgeStatus(localBridgeStatus);
     if (!published && localBridgeStatus.connected) {
       const storedStatus = await deps.localBridge.readStatus();
       if (!storedStatus.connected) {
@@ -1434,6 +1829,19 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         elements.localBridgeStatus.textContent = t("connected_agent_unreachable");
       }
     }
+  }
+
+  function markLocalBridgeIntentEditing(): void {
+    if (!deps.localBridge) return;
+    localBridgeIntentEditActive = true;
+  }
+
+  function finishLocalBridgeIntentEditing(): void {
+    if (!deps.localBridge || !localBridgeIntentEditActive) return;
+    localBridgeIntentEditActive = false;
+    // If persistence is still pending, intentDirty keeps this snapshot from
+    // publishing. The controller's persisted readback will publish it later.
+    void requestLocalBridgePublish(latestSnapshot);
   }
 
   function getLocalBridgeObservations(
@@ -1518,8 +1926,8 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     const revision = ++elementSelectionRevision;
     elements.elementSelectionToggle.disabled = true;
     try {
-      await deps.testClickCapture?.save(enabled);
-      const observed = await (deps.testClickCapture?.read() ?? Promise.resolve(false));
+      await deps.elementSelection?.save(enabled);
+      const observed = await (deps.elementSelection?.read() ?? Promise.resolve(false));
       if (revision !== elementSelectionRevision) return;
       if (observed) renderPageAccessRecovery(null);
       renderElementSelectionState(observed);
@@ -1705,13 +2113,23 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
 
   function renderElementSelectionState(enabled: boolean): void {
     renderElementSelectionToggle(enabled);
+    const canRenderStatus = (
+      canRenderSelectionStatus(latestSnapshot) &&
+      pageAccessRecoveryStatus === null &&
+      !hasActionableSelectedPreviewStatus(latestSnapshot)
+    );
+    selectionStoppedStatusKey = !enabled && canRenderStatus
+      ? createSelectionStatusSnapshotKey(latestSnapshot)
+      : null;
     const hasElements = (
       (latestSnapshot.file?.session.attachments.length ?? 0) > 0 ||
       latestSnapshot.legacyRecord !== null
     );
-    elements.status.textContent = enabled
-      ? t("selection_enabled")
-      : formatSelectionStoppedStatus(hasElements, t);
+    if (canRenderStatus) {
+      elements.status.textContent = enabled
+        ? t("selection_enabled")
+        : formatSelectionStoppedStatus(hasElements, t);
+    }
     if (pageAccessRecoveryStatus !== null) {
       elements.status.textContent = pageAccessRecoveryStatus;
     }
@@ -1767,7 +2185,13 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         renderStoredSessions(true);
         return;
       }
-      storedSessionSummaries = response.data;
+      const summaries = parseStoredSessionSummaries(response.data);
+      if (summaries === null) {
+        storedSessionSummaries = [];
+        renderStoredSessions(true);
+        return;
+      }
+      storedSessionSummaries = summaries;
       if (storedSessionReview) {
         const current = storedSessionSummaries.find(
           (summary) => summary.origin === storedSessionReview?.origin,
@@ -2543,10 +2967,19 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     renderStoredSessions();
     let response: SessionCommandResponse<ActiveSessionReadback>;
     try {
+      const operationId = summary.clearPending
+        ? summary.activeClearOperationId
+        : options.randomUUID();
+      if (!operationId) {
+        elements.savedSitesStatus.textContent = t("saved_sites_action_failed");
+        storedSessionsBusy = false;
+        renderStoredSessions();
+        return;
+      }
       response = await options.storedSessions.clear(
         summary.origin,
         summary.epoch,
-        summary.activeClearOperationId ?? options.randomUUID(),
+        operationId,
       );
     } catch {
       response = { ok: false, code: "CAPTURE_FAILED", error: SAFE_PANEL_ERROR };
@@ -2557,10 +2990,18 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       renderStoredSessions();
       return;
     }
+    const readback = parseStoredClearReadback(response.data);
+    if (readback === null) {
+      elements.savedSitesStatus.textContent = t("saved_sites_action_failed");
+      renderStoredSessions();
+      return;
+    }
     await options.controller.refreshActiveOrigin().catch(() => undefined);
     await refreshStoredSessions();
     elements.savedSites.hidden = false;
-    elements.savedSitesStatus.textContent = t("saved_site_cleared");
+    elements.savedSitesStatus.textContent = readback.clearPending
+      ? t("clear_in_progress")
+      : t("saved_site_cleared");
   }
 
   async function clearAllStoredOrigins(): Promise<void> {
@@ -2606,6 +3047,16 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     );
     const currentRows = groups.find((group) => group.current)?.rows ?? [];
     const legacyRecord = getSameOriginLegacyRecord(snapshot);
+    const selectionStatusSnapshotKey = createSelectionStatusSnapshotKey(snapshot);
+    if (
+      selectionStoppedStatusKey !== null &&
+      (
+        selectionStoppedStatusKey !== selectionStatusSnapshotKey ||
+        !canRenderSelectionStatus(snapshot)
+      )
+    ) {
+      selectionStoppedStatusKey = null;
+    }
     elements.origin.hidden = snapshot.origin === null;
     elements.origin.textContent = snapshot.origin === null
       ? ""
@@ -2613,18 +3064,12 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         ? `${snapshot.origin} · ${t("embedded_frame_scope")}`
         : snapshot.origin;
     elements.status.textContent = formatSnapshotStatus(snapshot, hasSessionItems, t);
-    if (
-      elementSelectionEnabled &&
-      (snapshot.status.kind === "empty" || snapshot.status.kind === "ready")
-    ) {
-      elements.status.textContent = t("selection_enabled");
-    }
-    if (pageAccessRecoveryStatus !== null) {
-      elements.status.textContent = pageAccessRecoveryStatus;
-    }
-    if (workspaceRestoreNotice?.pageKey === currentPageKey(snapshot.activePage)) {
-      elements.status.textContent = workspaceRestoreNotice.message;
-    }
+    const activeWorkspaceRestoreNotice = (
+      snapshot.status.kind === "ready" || snapshot.status.kind === "empty"
+    ) && pageAccessRecoveryStatus === null &&
+      workspaceRestoreNotice?.pageKey === currentPageKey(snapshot.activePage)
+      ? workspaceRestoreNotice
+      : null;
     elements.emptyWorkflow.hidden = (
       !snapshot.activeSupported ||
       !snapshot.origin ||
@@ -2645,7 +3090,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     const selectedRowCurrent = selectedRow
       ? groups.some((group) => group.current && group.rows.some((row) => row.id === selectedRow.id))
       : false;
-    renderSelectedTargetSummary(selectedRow, selectedRowCurrent);
+    renderSelectedTargetSummary(selectedRow, selectedRowCurrent, snapshot);
     elements.removeSelectedItem.disabled = (
       !selectedRow ||
       snapshot.recovery !== null ||
@@ -2659,7 +3104,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         : t("remove_selected_element"),
     );
     renderSessionRows(snapshot, groups, clearPending || sessionMutationPending);
-    renderSelectedPreview(snapshot, legacyRecord);
+    const previewHasActionableStatus = renderSelectedPreview(snapshot, legacyRecord);
 
     const blocked = snapshot.recovery !== null || !snapshot.origin || sessionMutationPending;
     renderHandoffScope(snapshot, blocked);
@@ -2667,8 +3112,38 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     renderRelationComposer(currentRows, snapshot);
     elements.clearSession.disabled = blocked || (!hasSessionItems && !clearPending);
     elements.exportSession.disabled = blocked || clearPending || !hasSessionItems;
-    if (workspaceRestoreNotice?.pageKey === currentPageKey(snapshot.activePage)) {
-      elements.status.textContent = workspaceRestoreNotice.message;
+    renderSnapshotStatusOverride(
+      snapshot,
+      hasSessionItems || legacyRecord !== null,
+      activeWorkspaceRestoreNotice,
+      previewHasActionableStatus,
+    );
+  }
+
+  function renderSnapshotStatusOverride(
+    snapshot: PanelSessionSnapshot,
+    hasElements: boolean,
+    activeWorkspaceRestoreNotice: { pageKey: string; message: string } | null,
+    previewHasActionableStatus: boolean,
+  ): void {
+    if (
+      !previewHasActionableStatus &&
+      canRenderSelectionStatus(snapshot) &&
+      elementSelectionEnabled
+    ) {
+      elements.status.textContent = t("selection_enabled");
+    } else if (
+      !previewHasActionableStatus &&
+      canRenderSelectionStatus(snapshot) &&
+      selectionStoppedStatusKey !== null
+    ) {
+      elements.status.textContent = formatSelectionStoppedStatus(hasElements, t);
+    }
+    if (pageAccessRecoveryStatus !== null) {
+      elements.status.textContent = pageAccessRecoveryStatus;
+    }
+    if (activeWorkspaceRestoreNotice) {
+      elements.status.textContent = activeWorkspaceRestoreNotice.message;
     }
   }
 
@@ -2676,15 +3151,19 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     kind: PageAccessRecoveryKind | null,
     statusMessage?: string,
   ): void {
+    pageAccessRecoveryKind = kind;
     pageAccessRecoveryStatus = kind === null
       ? null
       : statusMessage ?? pageAccessRecoveryStatus ?? elements.status.textContent;
     elements.pageAccessRecovery.hidden = kind === null;
+    if (kind !== "permission") pageAccessAutomaticFeedback = null;
+    renderPageAccessAutomaticAction();
     if (kind === null) return;
     if (pageAccessRecoveryStatus !== null) {
       elements.status.textContent = pageAccessRecoveryStatus;
     }
     const permission = kind === "permission";
+    elements.pageAccessTemporaryPath.hidden = !permission;
     elements.pageAccessRecoveryHeading.textContent = permission
       ? t("page_access_recovery_heading")
       : t("page_access_content_heading");
@@ -2694,6 +3173,28 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     elements.pageAccessRecoveryFirstStep.textContent = permission
       ? t("page_access_step_keep_active")
       : t("page_access_step_reload");
+  }
+
+  function renderPageAccessAutomaticAction(): void {
+    const visible = pageAccessRecoveryKind === "permission" && Boolean(deps.automaticPageAccess);
+    elements.pageAccessAutomatic.hidden = !visible;
+    elements.pageAccessEnableAutomatic.disabled = !visible || pageAccessAutomaticPending;
+    elements.pageAccessEnableAutomatic.setAttribute(
+      "aria-busy",
+      pageAccessAutomaticPending ? "true" : "false",
+    );
+    elements.pageAccessEnableAutomatic.textContent = pageAccessAutomaticPending
+      ? t("page_access_enabling_automatic")
+      : t("page_access_enable_automatic");
+    const feedback = pageAccessAutomaticFeedback === "denied"
+      ? t("page_access_automatic_denied")
+      : pageAccessAutomaticFeedback === "failed"
+        ? t("page_access_automatic_failed")
+        : pageAccessAutomaticFeedback === "not_ready"
+          ? t("page_access_automatic_not_ready")
+        : "";
+    elements.pageAccessAutomaticStatus.textContent = feedback;
+    elements.pageAccessAutomaticStatus.hidden = feedback.length === 0;
   }
 
   function renderActiveOriginAccessState(accessRequired: boolean): void {
@@ -2749,12 +3250,19 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     );
   }
 
-  function requestCurrentRebindStatus(snapshot: PanelSessionSnapshot): void {
+  function requestCurrentRebindStatus(snapshot: PanelSessionSnapshot, force = false): void {
     const activePage = snapshot.activePage;
     if (!deps.currentRebind || !activePage) return;
     syncCurrentRebindPage(activePage);
     const pageKey = currentPageKey(activePage);
     if (pageKey === null) return;
+    if (force) {
+      // An overlay sync establishes a newer causal boundary than any read that
+      // started before it. Invalidate that older read and observe the exact
+      // post-sync target set immediately.
+      currentRebindRequestRevision += 1;
+      currentRebindRequestInFlight = null;
+    }
     const revision = currentRebindRequestRevision;
     if (
       currentRebindRequestInFlight?.revision === revision &&
@@ -2783,10 +3291,17 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       const nextStateKey = observedData === null
         ? "unavailable"
         : `${nextDocumentId ?? "unbound"}:${JSON.stringify(observedData.items)}`;
-      currentRebindObservedAt = observedData === null ? null : new Date().toISOString();
-      currentRebindDocumentId = nextDocumentId;
-      if (nextStateKey === currentRebindStateKey) return;
+      const observedAt = observedData === null ? null : new Date().toISOString();
+      if (nextStateKey === currentRebindStateKey) {
+        // A repeated rebind read is fresh live evidence even when its result did
+        // not change. Refresh the evidence clock without rendering or publishing
+        // another identical snapshot.
+        currentRebindObservedAt = observedAt;
+        return;
+      }
       currentRebindStateKey = nextStateKey;
+      currentRebindObservedAt = observedAt;
+      currentRebindDocumentId = nextDocumentId;
       currentRebindUnavailable = observedData === null;
       currentRebindStatuses = new Map(
         observedData?.items.map((item) => [item.itemId, item.status]) ?? [],
@@ -2845,6 +3360,9 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       if (revision !== overlaySyncRevision) return;
       lastOverlaySyncKey = key;
       pendingOverlaySyncKey = null;
+      if (isCurrentBridgeScopeObservationPending(latestSnapshot)) {
+        requestCurrentRebindStatus(latestSnapshot, true);
+      }
     }).catch(() => {
       if (revision !== overlaySyncRevision) return;
       pendingOverlaySyncKey = null;
@@ -2853,10 +3371,38 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     });
   }
 
+  function isCurrentBridgeScopeObservationPending(
+    snapshot: PanelSessionSnapshot,
+    scope: PanelCopyScope | null = snapshot.file
+      ? derivePanelCopyScope(
+          snapshot.file,
+          snapshot.selectedItemId,
+          snapshot.activePage,
+          getLiveCurrentItemIds(snapshot),
+          getLiveExcludedItemIds(snapshot),
+        )
+      : null,
+    attachmentIds: readonly string[] = scope?.itemIds ?? [],
+  ): boolean {
+    const activePageKey = currentPageKey(snapshot.activePage);
+    return Boolean(
+      scope?.current &&
+      deps.currentRebind &&
+      !currentRebindUnavailable &&
+      activePageKey &&
+      currentRebindPageKey === activePageKey &&
+      currentRebindObservedAt !== null &&
+      currentRebindDocumentId !== null &&
+      attachmentIds.some((attachmentId) => !currentRebindStatuses.has(attachmentId))
+    );
+  }
+
   function renderSelectedTargetSummary(
     row: ReturnType<typeof summarizePanelSessionRows>[number] | undefined,
     previewEnabled: boolean,
+    snapshot: PanelSessionSnapshot,
   ): void {
+    captureComparison?.sync(snapshot, previewEnabled);
     const previousItemId = elements.selectedTargetDetails.dataset.selectedItemId;
     if (!row) {
       elements.selectedTargetSummary.hidden = true;
@@ -3311,7 +3857,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   function renderSelectedPreview(
     snapshot: PanelSessionSnapshot,
     legacyRecord: OriginCaptureRecord | null,
-  ): void {
+  ): boolean {
     const result = derivePanelSessionPreview({
       file: snapshot.file,
       legacyRecord,
@@ -3330,15 +3876,33 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
         ) {
           elements.status.textContent = localizeKnownStatus(result.status, t);
         }
-        return;
+        return hasActionableSelectedPreviewStatus(snapshot);
       }
       renderCapture(fallbackRecord, localizeKnownStatus(result.status, t));
-      return;
+      return true;
     }
 
     renderCapture(
       result.record as OriginCaptureRecord,
       localizeKnownStatus(result.status, t),
+    );
+    return false;
+  }
+
+  function hasActionableSelectedPreviewStatus(snapshot: PanelSessionSnapshot): boolean {
+    const legacyRecord = getSameOriginLegacyRecord(snapshot);
+    const result = derivePanelSessionPreview({
+      file: snapshot.file,
+      legacyRecord,
+      selectedItemId: snapshot.selectedItemId,
+      viewMode: snapshot.viewMode,
+    });
+    if (result.ok) return false;
+    return findPreviewFallbackRecord(snapshot, legacyRecord) !== null || Boolean(
+      snapshot.file &&
+      snapshot.selectedItemId &&
+      pageAccessRecoveryStatus === null &&
+      canPreviewStatusOverride(snapshot)
     );
   }
 
@@ -3612,8 +4176,29 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     if (latestSnapshot.intentDirty) {
       await options.controller.discardDirtyIntent();
     }
-    await options.controller.clearSession(options.randomUUID());
+    const operationId = latestSnapshot.clearPending
+      ? latestSnapshot.activeClearOperationId
+      : options.randomUUID();
+    if (!operationId) return;
+    await options.controller.clearSession(operationId);
     await refreshStoredSessions();
+  }
+
+  async function clearLocalBridgePanelContext(): Promise<void> {
+    if (!deps.localBridge || (!localBridgeStatus.connected && !localBridgeStatus.pending)) return;
+    const cleared = await deps.localBridge.clearPanelContext();
+    localBridgeShareState = cleared ? "unavailable" : "clear_failed";
+    if (cleared && localBridgeStatus.connected) {
+      try {
+        localBridgeStatus = await deps.localBridge.readStatus();
+      } catch {
+        localBridgeStatus = {
+          ...localBridgeStatus,
+          readAcknowledgementState: "unavailable",
+        };
+      }
+    }
+    renderLocalBridgeStatus(localBridgeStatus);
   }
 
   async function exportSession(): Promise<void> {
@@ -3708,6 +4293,22 @@ function createRuntimeSessionClient(): PanelSessionClient {
         itemId,
         intent,
       }),
+    updateAnnotationLifecycle: (
+      origin,
+      epoch,
+      itemId,
+      annotationId,
+      expectedState,
+      nextState,
+    ) => sendSessionCommand<ActiveSessionReadback>({
+      type: "ui-attach:session-update-annotation-lifecycle",
+      origin,
+      epoch,
+      itemId,
+      annotationId,
+      expectedState,
+      nextState,
+    }),
     removeItem: (origin, epoch, itemId) =>
       sendSessionCommand<ActiveSessionReadback>({
         type: "ui-attach:session-remove-item",
@@ -3942,6 +4543,45 @@ function parseSessionRefreshMessage(
         activeOriginChange: true,
       }
     : null;
+}
+
+function canRenderSelectionStatus(snapshot: PanelSessionSnapshot): boolean {
+  return snapshot.activeSupported &&
+    snapshot.origin !== null &&
+    snapshot.recovery === null &&
+    !snapshot.clearPending &&
+    !snapshot.sessionMutationPending &&
+    (
+      snapshot.status.kind === "empty" ||
+      (
+        snapshot.status.kind === "ready" &&
+        (
+          snapshot.status.message === "Capture session ready." ||
+          snapshot.status.message === "Selected element preview ready."
+        )
+      )
+    );
+}
+
+function createSelectionStatusSnapshotKey(snapshot: PanelSessionSnapshot): string {
+  return JSON.stringify({
+    activePage: snapshot.activePage
+      ? {
+          tabId: snapshot.activePage.tabId,
+          frameId: snapshot.activePage.frameId,
+          origin: snapshot.activePage.origin,
+          pathname: snapshot.activePage.pathname,
+          documentId: snapshot.activePage.documentId ?? null,
+        }
+      : null,
+    origin: snapshot.origin,
+    epoch: snapshot.epoch,
+    itemIds: snapshot.file?.session.attachments.map((item) => item.id) ?? [],
+    legacyItemId: snapshot.legacyRecord?.attachment.id ?? null,
+    currentItemIds: snapshot.currentItemIds,
+    selectedItemId: snapshot.selectedItemId,
+    viewMode: snapshot.viewMode,
+  });
 }
 
 function formatSnapshotStatus(
@@ -4194,6 +4834,31 @@ function parseLocalBridgeApprovalMode(value: string): LocalBridgeApprovalMode {
   return value === "browser_session" ? "browser_session" : "ask";
 }
 
+function deriveFocusedLocalBridgePage(
+  activePage: ActivePageContext | null,
+): LocalBridgePageV1 | null {
+  if (
+    !activePage ||
+    !Number.isSafeInteger(activePage.tabId) ||
+    activePage.tabId < 0 ||
+    !Number.isSafeInteger(activePage.frameId) ||
+    activePage.frameId < 0
+  ) return null;
+  const page = {
+    pageInstanceId: `chromium-tab:${activePage.tabId}:frame:${activePage.frameId}`,
+    route: `${activePage.origin}${activePage.pathname}`,
+  };
+  return isLocalBridgeSnapshot({
+    schemaVersion: "0.1.0",
+    kind: "ui-attach.local-bridge-snapshot",
+    sequence: 0,
+    publishedAt: "2026-01-01T00:00:00.000Z",
+    page,
+    attachmentCount: 0,
+    agentCopy: null,
+  }) ? page : null;
+}
+
 function disconnectedLocalBridgeStatus(): LocalAgentBridgeStatus {
   return {
     connected: false,
@@ -4202,6 +4867,8 @@ function disconnectedLocalBridgeStatus(): LocalAgentBridgeStatus {
     approvalMode: null,
     requestText: null,
     expiresAt: null,
+    sharedTargetCount: null,
+    sharedSequence: null,
   };
 }
 
@@ -4212,6 +4879,10 @@ function queryPanelElements() {
     pageAccessRecoveryHeading: query<HTMLElement>("#page-access-recovery-heading"),
     pageAccessRecoveryReason: query<HTMLElement>("#page-access-recovery-reason"),
     pageAccessRecoveryFirstStep: query<HTMLElement>("#page-access-recovery-first-step"),
+    pageAccessAutomatic: query<HTMLElement>("#page-access-automatic"),
+    pageAccessEnableAutomatic: query<HTMLButtonElement>("#page-access-enable-automatic"),
+    pageAccessAutomaticStatus: query<HTMLElement>("#page-access-automatic-status"),
+    pageAccessTemporaryPath: query<HTMLElement>("#page-access-temporary-path"),
     emptyWorkflow: query<HTMLElement>("#empty-workflow"),
     session: query<HTMLElement>("#session"),
     capture: query<HTMLElement>("#capture"),
@@ -4281,6 +4952,14 @@ function queryPanelElements() {
     localBridgeRequestText: queryBridge<HTMLTextAreaElement>("#local-bridge-request-text", "textarea"),
     localBridgeInstance: queryBridge<HTMLElement>("#local-bridge-instance", "p"),
     localBridgeStatus: queryBridge<HTMLElement>("#local-bridge-status", "p"),
+    localBridgeReadAcknowledgementStatus: queryBridge<HTMLElement>(
+      "#local-bridge-read-acknowledgement-status",
+      "p",
+    ),
+    localBridgeReadAcknowledgementLimitations: queryBridge<HTMLElement>(
+      "#local-bridge-read-acknowledgement-limitations",
+      "p",
+    ),
     sessionCount: query<HTMLElement>("#session-count"),
     sessionList: query<HTMLElement>("#session-list"),
     savedSites: query<HTMLDetailsElement>("#saved-sites"),
@@ -4315,4 +4994,127 @@ function queryBridge<T extends HTMLElement>(selector: string, tagName: string): 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+const STORED_SESSION_SUMMARY_KEYS = [
+  "origin",
+  "epoch",
+  "attachmentCount",
+  "state",
+  "clearPending",
+  "activeClearOperationId",
+] as const;
+
+const ACTIVE_SESSION_READBACK_KEYS = [
+  "origin",
+  "epoch",
+  "clearPending",
+  "activeClearOperationId",
+  "file",
+  "legacyRecord",
+] as const;
+
+function parseStoredSessionSummaries(value: unknown): StoredOriginSessionSummary[] | null {
+  if (!Array.isArray(value)) return null;
+  const summaries: StoredOriginSessionSummary[] = [];
+  for (const candidate of value) {
+    const fields = readExactOwnDataProperties(candidate, STORED_SESSION_SUMMARY_KEYS);
+    if (!fields) return null;
+    const clearStatus = parseStoredClearStatus(
+      fields.clearPending,
+      fields.activeClearOperationId,
+    );
+    if (
+      typeof fields.origin !== "string" || fields.origin.length === 0 ||
+      !(fields.epoch === null || typeof fields.epoch === "string") ||
+      !(
+        fields.attachmentCount === null ||
+        (Number.isSafeInteger(fields.attachmentCount) && (fields.attachmentCount as number) >= 0)
+      ) ||
+      !(
+        fields.state === "ready" ||
+        fields.state === "legacy" ||
+        fields.state === "needs_cleanup"
+      ) ||
+      clearStatus === null
+    ) {
+      return null;
+    }
+    summaries.push({
+      origin: fields.origin,
+      epoch: fields.epoch,
+      attachmentCount: fields.attachmentCount as number | null,
+      state: fields.state,
+      ...clearStatus,
+    });
+  }
+  return summaries;
+}
+
+function parseStoredClearReadback(value: unknown): ActiveSessionReadback | null {
+  const fields = readExactOwnDataProperties(value, ACTIVE_SESSION_READBACK_KEYS);
+  if (!fields) return null;
+  const clearStatus = parseStoredClearStatus(
+    fields.clearPending,
+    fields.activeClearOperationId,
+  );
+  if (
+    typeof fields.origin !== "string" || fields.origin.length === 0 ||
+    !(fields.epoch === null || typeof fields.epoch === "string") ||
+    !(fields.file === null || isRecord(fields.file)) ||
+    !(fields.legacyRecord === null || isRecord(fields.legacyRecord)) ||
+    clearStatus === null
+  ) {
+    return null;
+  }
+  return {
+    origin: fields.origin,
+    epoch: fields.epoch,
+    file: fields.file as ActiveSessionReadback["file"],
+    legacyRecord: fields.legacyRecord as ActiveSessionReadback["legacyRecord"],
+    ...clearStatus,
+  };
+}
+
+type StoredClearStatus =
+  | { clearPending: false; activeClearOperationId: null }
+  | { clearPending: true; activeClearOperationId: string };
+
+function parseStoredClearStatus(
+  clearPending: unknown,
+  activeClearOperationId: unknown,
+): StoredClearStatus | null {
+  if (clearPending === false && activeClearOperationId === null) {
+    return { clearPending: false, activeClearOperationId: null };
+  }
+  return clearPending === true && isDurableStoredClearOperationId(activeClearOperationId)
+    ? { clearPending: true, activeClearOperationId }
+    : null;
+}
+
+function isDurableStoredClearOperationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 &&
+    value.trim() === value && !/\p{Cc}/u.test(value);
+}
+
+function readExactOwnDataProperties<const TKey extends readonly string[]>(
+  value: unknown,
+  expectedKeys: TKey,
+): Record<TKey[number], unknown> | null {
+  if (!isRecord(value)) return null;
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    ownKeys.length !== expectedKeys.length ||
+    ownKeys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+  ) {
+    return null;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const fields = {} as Record<TKey[number], unknown>;
+  for (const key of expectedKeys) {
+    const descriptor = descriptors[key];
+    if (!descriptor || !("value" in descriptor)) return null;
+    fields[key as TKey[number]] = descriptor.value;
+  }
+  return fields;
 }

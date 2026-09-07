@@ -1,4 +1,5 @@
 import type { UIAttachmentDisclosureMode } from "@meanthis/schema";
+import type { PersistentOverlayDisplayMode } from "@meanthis/web-picker";
 import type { ExtensionStorageArea } from "./capture-store";
 
 export const INDEPENDENT_VIEW_MODE_KEY = "ui-attach:independent-view-mode";
@@ -7,6 +8,7 @@ export const CONTEXT_MENU_SELECTION_MODE_KEY = "ui-attach:context-menu-selection
 export const FRAME_SCOPE_AUTO_START_KEY = "ui-attach:frame-scope-auto-start";
 export const TIME_DISPLAY_PREFERENCE_KEY = "ui-attach:time-display-preference";
 export const OVERLAY_VISIBILITY_PREFERENCE_KEY = "ui-attach:overlay-visibility-preference";
+export const OVERLAY_DISPLAY_MODE_PREFERENCE_KEY = "ui-attach:overlay-display-mode";
 export const RELATION_SHORTCUTS_KEY = "ui-attach:relation-shortcuts";
 export const UI_ATTACH_SETTINGS_UPDATED = "ui-attach:settings-updated";
 export const MAX_RELATION_SHORTCUTS = 8;
@@ -16,6 +18,68 @@ export const MAX_RELATION_SHORTCUT_TEMPLATE_LENGTH = 280;
 export type ContextMenuSelectionMode = "single" | "continuous";
 export type TimeDisplayPreference = "local" | "utc";
 export type OverlayVisibilityPreference = "panel" | "always";
+export type OverlayDisplayModePreference = PersistentOverlayDisplayMode;
+
+export interface DeferredPreferenceReadbackCoordinator<T> {
+  request(value: T): void;
+  externalChange(): void;
+  drain(): Promise<void>;
+}
+
+/** Serializes local writes while preserving an external change observed mid-read. */
+export function createDeferredPreferenceReadbackCoordinator<T>(options: {
+  write(value: T): Promise<void>;
+  read(): Promise<T>;
+  onValue(value: T): void;
+  onSettled?(): void;
+}): DeferredPreferenceReadbackCoordinator<T> {
+  let tail = Promise.resolve();
+  let pending = 0;
+  let deferredExternalRead = false;
+  let revision = 0;
+  const refresh = async (): Promise<void> => {
+    const current = ++revision;
+    const value = await options.read();
+    if (current === revision) options.onValue(value);
+  };
+  const drainDeferred = (): void => {
+    if (pending !== 0 || !deferredExternalRead) return;
+    deferredExternalRead = false;
+    tail = tail.then(refresh).catch(() => undefined).finally(options.onSettled);
+  };
+  return {
+    request(value): void {
+      pending += 1;
+      tail = tail.then(async () => {
+        const current = ++revision;
+        await options.write(value);
+        const readback = await options.read();
+        if (current === revision) options.onValue(readback);
+      }).catch(() => undefined).finally(() => {
+        pending -= 1;
+        if (pending === 0 && deferredExternalRead) {
+          drainDeferred();
+        } else if (pending === 0) {
+          options.onSettled?.();
+        }
+      });
+    },
+    externalChange(): void {
+      if (pending > 0) {
+        deferredExternalRead = true;
+        return;
+      }
+      tail = tail.then(refresh).catch(() => undefined).finally(options.onSettled);
+    },
+    async drain(): Promise<void> {
+      let observed: Promise<void>;
+      do {
+        observed = tail;
+        await observed;
+      } while (observed !== tail);
+    },
+  };
+}
 
 export interface RelationShortcutPreference {
   id: string;
@@ -113,6 +177,22 @@ export async function saveOverlayVisibilityPreference(
   });
 }
 
+export async function readOverlayDisplayModePreference(
+  storage: ExtensionStorageArea,
+): Promise<OverlayDisplayModePreference> {
+  const values = await storage.get(OVERLAY_DISPLAY_MODE_PREFERENCE_KEY);
+  return parseOverlayDisplayModePreference(values[OVERLAY_DISPLAY_MODE_PREFERENCE_KEY]);
+}
+
+export async function saveOverlayDisplayModePreference(
+  storage: ExtensionStorageArea,
+  preference: OverlayDisplayModePreference,
+): Promise<void> {
+  await storage.set({
+    [OVERLAY_DISPLAY_MODE_PREFERENCE_KEY]: parseOverlayDisplayModePreference(preference),
+  });
+}
+
 export async function readRelationShortcuts(
   storage: ExtensionStorageArea,
 ): Promise<RelationShortcutPreference[]> {
@@ -174,6 +254,12 @@ export function formatDisplayTime(
 function parseDisclosureMode(value: unknown): UIAttachmentDisclosureMode {
   if (value === "developer_diagnostic" || value === "full_debug") return value;
   return "agent_safe";
+}
+
+function parseOverlayDisplayModePreference(value: unknown): OverlayDisplayModePreference {
+  return value === "full" || value === "markers" || value === "hidden" || value === "hover"
+    ? value
+    : "hover";
 }
 
 function parseRelationShortcuts(value: unknown): RelationShortcutPreference[] {

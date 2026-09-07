@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
+import type { CaptureSessionFileV2, CaptureSessionFileV3 } from "@meanthis/hub-core";
 import {
   createCaptureRecord,
   createSessionFile,
@@ -18,6 +19,78 @@ import {
 } from "./session-file";
 
 describe("extension capture session files", () => {
+  test("preserves optional computed style facts through the extension session projection", () => {
+    const file = createSessionFile([createCaptureRecord("save", "Save changes")]);
+    Object.assign(file.session.attachments[0].sourceRecord.attachment.style, {
+      position: "relative",
+      boxSizing: "border-box",
+      padding: "6px 8px",
+      gap: "10px",
+      fontSize: "14px",
+      borderRadius: "8px",
+    });
+
+    const projected = projectCaptureSessionFile(file);
+    const serialized = serializeCaptureSessionFile(file);
+
+    expect(projected.session.attachments[0].sourceRecord.attachment.style).toMatchObject({
+      display: "block",
+      position: "relative",
+      boxSizing: "border-box",
+      padding: "6px 8px",
+      gap: "10px",
+      fontSize: "14px",
+      borderRadius: "8px",
+    });
+    expect(serialized.ok).toBe(true);
+    if (!serialized.ok) return;
+    expect(serialized.value.file.session.attachments[0].sourceRecord.attachment.style)
+      .toEqual(projected.session.attachments[0].sourceRecord.attachment.style);
+  });
+
+  test("projects and exports V3 lifecycle bytes without changing legacy V1/V2 input", () => {
+    const legacy = createSessionFile([createCaptureRecord("save", "Save changes")]);
+    const v2: CaptureSessionFileV2 = {
+      ...legacy,
+      schemaVersion: "0.2.0",
+      session: {
+        ...legacy.session,
+        updatedAt: "2026-07-11T10:03:00.000Z",
+        attachments: legacy.session.attachments.map((item) => ({
+          ...item,
+          annotationId: "opaque-random-annotation-a",
+          updatedAt: "2026-07-11T10:03:00.000Z",
+        })),
+      },
+    };
+    const current: CaptureSessionFileV3 = {
+      ...v2,
+      schemaVersion: "0.3.0",
+      session: {
+        ...v2.session,
+        attachments: v2.session.attachments.map((item) => ({
+          ...item,
+          annotationLifecycle: {
+            state: "resolved",
+            resolvedAt: item.updatedAt,
+          },
+        })),
+      },
+    };
+
+    const serialized = serializeCaptureSessionFile(current);
+
+    expect(serialized.ok).toBe(true);
+    if (!serialized.ok) return;
+    expect(serialized.value.file).toEqual(current);
+    expect(JSON.parse(serialized.value.text)).toEqual(current);
+    expect(projectCaptureSessionFile(legacy)).toEqual(legacy);
+    expect(projectCaptureSessionFile(v2)).toEqual(v2);
+    expect(legacy.session.attachments[0]).not.toHaveProperty("annotationId");
+    expect(legacy.session.attachments[0]).not.toHaveProperty("updatedAt");
+    expect(v2.session.attachments[0]).not.toHaveProperty("annotationLifecycle");
+  });
+
   test("matches the committed two-element extension session fixture bytes", () => {
     const fixtureText = readFileSync(
       new URL("../fixtures/two-element.capture-session.json", import.meta.url),
@@ -298,6 +371,25 @@ describe("extension capture session files", () => {
     expect(
       serialized.value.file.session.attachments[0].sourceRecord.attachment.sourceAnchor,
     ).toEqual(record.attachment.sourceAnchor);
+  });
+
+  test("preserves the pointer selection point through canonical extension export", () => {
+    const record = createCaptureRecord("save", "Save changes", "agent_safe");
+    record.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+    };
+
+    const projected = toSessionFileSourceRecord(record);
+    const serialized = serializeCaptureSessionFile(createSessionFile([record]));
+
+    expect(projected.attachment.selectionPoint).toEqual(record.attachment.selectionPoint);
+    expect(serialized.ok).toBe(true);
+    if (!serialized.ok) return;
+    expect(
+      serialized.value.file.session.attachments[0].sourceRecord.attachment.selectionPoint,
+    ).toEqual(record.attachment.selectionPoint);
   });
 
   test("preserves an embedded-frame boundary through canonical extension export", () => {

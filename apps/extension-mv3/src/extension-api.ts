@@ -2,9 +2,11 @@ import type { ExtensionStorageArea } from "./capture-store";
 
 export interface UiAttachChromeEvent<T extends (...args: never[]) => unknown> {
   addListener(listener: T): void;
+  removeListener?(listener: T): void;
 }
 
 export interface UiAttachChromeMessageSender {
+  id?: string;
   documentId?: string;
   frameId?: number;
   url?: string;
@@ -50,6 +52,8 @@ export interface UiAttachChromePort {
   sender?: UiAttachChromeMessageSender;
   disconnect(): void;
   onDisconnect: UiAttachChromeEvent<() => void>;
+  onMessage?: UiAttachChromeEvent<(message: unknown) => void>;
+  postMessage?(message: unknown): void;
 }
 
 export interface UiAttachChromeRuntime {
@@ -67,8 +71,10 @@ export interface UiAttachChromeRuntime {
     ) => boolean | void
   >;
   connect(options: { name: string }): UiAttachChromePort;
+  getURL(path: string): string;
   openOptionsPage(): Promise<void>;
   sendMessage(message: unknown): Promise<unknown>;
+  sendNativeMessage(application: string, message: object): Promise<unknown>;
 }
 
 export interface UiAttachChromePermissions {
@@ -101,7 +107,7 @@ export interface UiAttachChromeNavigationCommittedDetails {
 export interface UiAttachChromeWebNavigation {
   getAllFrames(details: { tabId: number }): Promise<UiAttachChromeFrame[] | undefined>;
   getFrame(
-    details: { tabId: number; frameId: number },
+    details: { tabId: number; frameId?: number; documentId?: string },
   ): Promise<UiAttachChromeFrameDetails | undefined>;
   onCommitted: UiAttachChromeEvent<(details: UiAttachChromeNavigationCommittedDetails) => void>;
   onHistoryStateUpdated: UiAttachChromeEvent<

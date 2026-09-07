@@ -82,7 +82,7 @@ export function createLocalAgentBridgeBackgroundController(
       if (alarm.name !== LOCAL_AGENT_BRIDGE_REFRESH_ALARM) return Promise.resolve();
       return enqueue(async () => {
         try {
-          await scheduleFromStatus(await dependencies.bridge.refreshConnectionAndPublish());
+          await scheduleFromStatus(await dependencies.bridge.refreshConnectionAndHeartbeat());
         } catch {
           await closeIdleState();
         }

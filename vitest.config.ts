@@ -11,18 +11,26 @@ export default defineConfig({
       "@meanthis/prompt": resolve(root, "packages/prompt/src/index.ts"),
       "@meanthis/replay": resolve(root, "packages/replay/src/index.ts"),
       "@meanthis/schema": resolve(root, "packages/schema/src/index.ts"),
+      "@meanthis/source-map-core": resolve(root, "tools/source-map-core/src/index.ts"),
+      "@meanthis/source-resolver-mcp": resolve(root, "tools/source-resolver-mcp/src/index.ts"),
       "@meanthis/web-extractor": resolve(root, "packages/web-extractor/src/index.ts"),
       "@meanthis/web-picker": resolve(root, "packages/web-picker/src/index.ts"),
     },
   },
   test: {
     globals: false,
+    tags: [
+      { name: "platform" },
+      { name: "release" },
+    ],
     include: [
       "packages/**/*.test.ts",
       "apps/**/*.test.ts",
       "apps/**/*.test.mjs",
       "examples/**/*.test.mjs",
       "scripts/**/*.test.mjs",
+      "tools/**/*.test.ts",
+      "tools/**/*.test.mjs",
     ],
   },
 });

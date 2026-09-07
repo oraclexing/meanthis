@@ -1,8 +1,22 @@
 import { describe, expect, test } from "vitest";
-import type { UIAttachment } from "@meanthis/schema";
+import {
+  hydrateCaptureSessionFile,
+  type CaptureSessionFileV2,
+  type CaptureSessionFileV3,
+} from "@meanthis/hub-core";
+import {
+  UI_ATTACHMENT_COMPUTED_STYLE_FIELDS,
+  UI_ATTACH_LOCAL_BRIDGE_MAX_AGENT_COPY_BYTES,
+  UI_ATTACH_LOCAL_BRIDGE_MAX_CAPTURE_BYTES,
+  isLocalBridgeSnapshot,
+  isUIAttachment,
+  type MetadataDiagnosticsV1,
+  type UIAttachment,
+} from "@meanthis/schema";
 import { createCaptureRecord, createSessionFile } from "../test/session-fixtures";
 import {
   buildPanelAgentCopy,
+  buildPanelBridgeAgentCopy,
   buildPanelBridgeCapture,
   composePanelMarkdown,
   formatElementSelectionFailureStatus,
@@ -19,6 +33,16 @@ import {
 describe("buildPanelBridgeCapture", () => {
   test("projects the explicitly shared targets into one agent-safe structured capture", () => {
     const save = createCaptureRecord("save", "Save changes", "full_debug");
+    Object.assign(save.attachment.style, {
+      position: "relative",
+      padding: "6px 8px",
+      fontSize: "14px",
+    });
+    save.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+    };
     const cancel = createCaptureRecord("cancel", "Cancel");
     const file = createSessionFile([save, cancel]);
 
@@ -39,13 +63,397 @@ describe("buildPanelBridgeCapture", () => {
       authority: "live_page",
       disclosureMode: "agent_safe",
       targets: [
-        { attachmentId: "att_save", label: "A", taskNote: "Update Save changes" },
-        { attachmentId: "att_cancel", label: "B", taskNote: "Use a secondary style." },
+        {
+          targetId: "target_A",
+          attachmentId: "att_save",
+          label: "A",
+          taskNote: "Update Save changes",
+        },
+        {
+          targetId: "target_B",
+          attachmentId: "att_cancel",
+          label: "B",
+          taskNote: "Use a secondary style.",
+        },
       ],
     });
     expect(JSON.stringify(capture)).not.toContain("ada@example.com");
     expect(JSON.stringify(capture)).not.toContain("sk-test-1234567890");
     expect(capture?.targets[0]?.attachment.policy.disclosureMode).toBe("agent_safe");
+    expect(capture?.targets[0]?.attachment.selectionPoint).toEqual(
+      save.attachment.selectionPoint,
+    );
+    expect(capture?.targets[0]?.attachment.style).toMatchObject({
+      display: "block",
+      position: "relative",
+      padding: "6px 8px",
+      fontSize: "14px",
+    });
+    expect(capture).not.toHaveProperty("metadataDiagnostics");
+    expect(capture?.targets.map((target) => ({
+      annotationId: target.annotationId,
+      annotationIdScope: target.annotationIdScope,
+      annotationCreatedAt: target.annotationCreatedAt,
+      annotationUpdatedAt: target.annotationUpdatedAt,
+    }))).toEqual([
+      {
+        annotationId: null,
+        annotationIdScope: "unknown",
+        annotationCreatedAt: null,
+        annotationUpdatedAt: null,
+      },
+      {
+        annotationId: null,
+        annotationIdScope: "unknown",
+        annotationCreatedAt: null,
+        annotationUpdatedAt: null,
+      },
+    ]);
+  });
+
+  test("projects selected canonical replay facts as a bounded capture-time diagnostics sidecar", () => {
+    const save = createCaptureRecord("save", "Save changes", "full_debug");
+    save.replayAttempts = [{
+      strategy: "playwright.role",
+      value: 'page.getByRole("button", { name: "Save changes" })',
+      replayVerified: true,
+      uniqueness: true,
+      failureReason: null,
+      matchCount: 1,
+      visible: true,
+    }];
+    const cancel = createCaptureRecord("cancel", "Cancel", "full_debug");
+    cancel.replayAttempts = [{
+      strategy: "css",
+      value: "[data-secret='never-publish']",
+      replayVerified: false,
+      uniqueness: false,
+      failureReason: "locator matched 2 elements",
+      matchCount: 2,
+      visible: null,
+    }];
+    const file = createSessionFile([save, cancel]);
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: ["att_save", "att_cancel"],
+      selectedItemId: "att_save",
+      selectedRecord: save,
+      viewMode: "agent_safe",
+      intent: "Inspect replay stability.",
+      includeReplayDiagnostics: true,
+    }, "live_page");
+
+    expect(capture?.metadataDiagnostics).toEqual({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.metadata-only-diagnostics",
+      captureId: "session-1",
+      scope: "capture",
+      observedAt: file.session.updatedAt,
+      consent: "explicit_capture",
+      authority: "capture_time",
+      replay: {
+        status: "collected",
+        attemptCount: 2,
+        verifiedCount: 1,
+        ambiguousCount: 1,
+        missingCount: 0,
+      },
+      device: { status: "not_requested" },
+      network: { status: "not_requested" },
+      console: { status: "not_requested" },
+      executionAuthority: {
+        grantedByCapture: false,
+        browserControl: false,
+        liveDomMutation: false,
+      },
+    });
+    expect(JSON.stringify(capture?.metadataDiagnostics)).not.toContain("never-publish");
+    expect(JSON.stringify(capture?.metadataDiagnostics)).not.toContain("locator matched");
+  });
+
+  test("merges supplied coarse device facts with the current-scope replay aggregate and fails closed on mismatches", () => {
+    const currentSave = createCaptureRecord("save", "Save changes");
+    currentSave.replayAttempts = [{
+      strategy: "playwright.role",
+      value: 'page.getByRole("button", { name: "Save changes" })',
+      replayVerified: true,
+      uniqueness: true,
+      failureReason: null,
+      matchCount: 1,
+      visible: true,
+    }];
+    const currentCancel = createCaptureRecord("cancel", "Cancel");
+    currentCancel.replayAttempts = [{
+      strategy: "css",
+      value: '[data-testid="cancel"]',
+      replayVerified: false,
+      uniqueness: false,
+      failureReason: "multiple matches",
+      matchCount: 2,
+      visible: null,
+    }];
+    const outsideScope = createCaptureRecord("outside", "Outside scope");
+    outsideScope.replayAttempts = [{
+      strategy: "css",
+      value: '[data-testid="outside"]',
+      replayVerified: false,
+      uniqueness: false,
+      failureReason: "not found",
+      matchCount: 0,
+      visible: null,
+    }];
+    const file = createSessionFile([currentSave, currentCancel, outsideScope]);
+    const supplied: MetadataDiagnosticsV1 = {
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.metadata-only-diagnostics",
+      captureId: file.session.id,
+      scope: "capture",
+      observedAt: "2026-07-11T10:01:00.000Z",
+      consent: "explicit_capture",
+      authority: "capture_time",
+      replay: { status: "not_available" },
+      device: {
+        status: "collected",
+        deviceClass: "desktop",
+        viewportClass: "large",
+        touch: "coarse",
+      },
+      network: { status: "not_requested" },
+      console: { status: "not_requested" },
+      executionAuthority: {
+        grantedByCapture: false,
+        browserControl: false,
+        liveDomMutation: false,
+      },
+    };
+    const input = {
+      file,
+      // Exclude the third record to prove the aggregate is scoped to the
+      // explicitly selected current capture targets.
+      attachmentIds: [currentSave.attachment.id, currentCancel.attachment.id],
+      selectedItemId: currentSave.attachment.id,
+      selectedRecord: currentSave,
+      viewMode: "agent_safe" as const,
+      intent: currentSave.intent,
+      includeReplayDiagnostics: true as const,
+      metadataDiagnostics: supplied,
+    };
+
+    const capture = buildPanelBridgeCapture(input, "capture_time");
+    expect(capture).toMatchObject({
+      captureId: file.session.id,
+      updatedAt: file.session.updatedAt,
+      metadataDiagnostics: {
+        observedAt: supplied.observedAt,
+        replay: {
+          status: "collected",
+          attemptCount: 2,
+          verifiedCount: 1,
+          ambiguousCount: 1,
+          missingCount: 0,
+        },
+        device: supplied.device,
+        network: { status: "not_requested" },
+        console: { status: "not_requested" },
+      },
+    });
+    expect(capture?.metadataDiagnostics).not.toHaveProperty("viewportWidth");
+    expect(capture?.metadataDiagnostics).not.toHaveProperty("userAgent");
+    expect(capture?.metadataDiagnostics).not.toHaveProperty("url");
+    expect(capture?.metadataDiagnostics).not.toHaveProperty("path");
+
+    const malformedDevice = {
+      ...supplied,
+      device: {
+        status: "collected",
+        deviceClass: "desktop",
+        viewportClass: "wide",
+        touch: "coarse",
+      },
+    } as unknown as MetadataDiagnosticsV1;
+    for (const metadataDiagnostics of [
+      { ...supplied, captureId: "session-other" },
+      { ...supplied, authority: "live_page" as const },
+      {
+        ...supplied,
+        network: { status: "collected", requestCount: 1, failureCount: 0, windowMs: 10 },
+      },
+      {
+        ...supplied,
+        console: { status: "collected", logCount: 1, warnCount: 0, errorCount: 0, windowMs: 10 },
+      },
+      malformedDevice,
+      { ...supplied, observedAt: "2026-07-11T10:02:00.001Z" },
+    ]) {
+      expect(buildPanelBridgeCapture({ ...input, metadataDiagnostics }, "capture_time"))
+        .toBeNull();
+    }
+  });
+
+  test("projects canonical V2 item identity and timestamps without deriving fallbacks", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const cancel = createCaptureRecord("cancel", "Cancel");
+    const file = createSessionFile([save, cancel]) as unknown as CaptureSessionFileV2;
+    file.schemaVersion = "0.2.0";
+    file.session.updatedAt = "2026-07-11T10:03:00.000Z";
+    file.session.attachments = file.session.attachments.map((item, index) => ({
+      ...item,
+      annotationId: index === 0 ? "annotation-save" : "annotation-cancel",
+      updatedAt: index === 0
+        ? "2026-07-11T10:01:00.000Z"
+        : "2026-07-11T10:02:00.000Z",
+    }));
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: ["att_save", "att_cancel"],
+      selectedItemId: "att_cancel",
+      selectedRecord: cancel,
+      viewMode: "agent_safe",
+      intent: "Use a secondary style.",
+    }, "capture_time");
+
+    expect(capture?.targets.map((target) => ({
+      annotationId: target.annotationId,
+      annotationIdScope: target.annotationIdScope,
+      annotationCreatedAt: target.annotationCreatedAt,
+      annotationUpdatedAt: target.annotationUpdatedAt,
+    }))).toEqual([
+      {
+        annotationId: "annotation-save",
+        annotationIdScope: "capture_session",
+        annotationCreatedAt: "2026-07-11T10:00:00.000Z",
+        annotationUpdatedAt: "2026-07-11T10:01:00.000Z",
+      },
+      {
+        annotationId: "annotation-cancel",
+        annotationIdScope: "capture_session",
+        annotationCreatedAt: "2026-07-11T10:02:00.000Z",
+        annotationUpdatedAt: "2026-07-11T10:02:00.000Z",
+      },
+    ]);
+  });
+
+  test("preserves the complete identity group when compacting a V2 bridge target", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    save.attachment.element.text = "large text ".repeat(30_000);
+    save.attachment.element.accessibleName = "large accessible name ".repeat(30_000);
+    const file = createSessionFile([save]) as unknown as CaptureSessionFileV2;
+    file.schemaVersion = "0.2.0";
+    file.session.updatedAt = "2026-07-11T10:01:00.000Z";
+    file.session.attachments = file.session.attachments.map((item) => ({
+      ...item,
+      annotationId: "annotation-save",
+      updatedAt: "2026-07-11T10:01:00.000Z",
+    }));
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: ["att_save"],
+      selectedItemId: "att_save",
+      selectedRecord: save,
+      viewMode: "agent_safe",
+      intent: "Keep the target compact.",
+    }, "capture_time");
+
+    expect(capture).not.toBeNull();
+    expect(capture?.targets[0]).toMatchObject({
+      annotationId: "annotation-save",
+      annotationIdScope: "capture_session",
+      annotationCreatedAt: "2026-07-11T10:00:00.000Z",
+      annotationUpdatedAt: "2026-07-11T10:01:00.000Z",
+    });
+    expect(JSON.stringify(capture)).not.toContain("large accessible name ".repeat(30_000));
+  });
+
+  test("fails closed instead of downgrading a malformed declared V2 identity", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const file = createSessionFile([save]) as unknown as CaptureSessionFileV2;
+    file.schemaVersion = "0.2.0";
+    file.session.updatedAt = "2026-07-11T10:01:00.000Z";
+    file.session.attachments = file.session.attachments.map((item) => ({
+      ...item,
+      annotationId: "annotation-save",
+      updatedAt: "2026-07-11T10:01:00.000Z",
+    }));
+    delete (file.session.attachments[0] as Partial<
+      CaptureSessionFileV2["session"]["attachments"][number]
+    >).annotationId;
+
+    expect(buildPanelBridgeCapture({
+      file,
+      attachmentIds: ["att_save"],
+      selectedItemId: "att_save",
+      selectedRecord: save,
+      viewMode: "agent_safe",
+      intent: "Keep this identity stable.",
+    }, "capture_time")).toBeNull();
+  });
+
+  test("projects the exact V3 annotation lifecycle, keeps it during compaction, and rejects malformed input", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    save.attachment.element.text = "large text ".repeat(30_000);
+    const file = createSessionFile([save]) as unknown as CaptureSessionFileV3;
+    file.schemaVersion = "0.3.0";
+    file.session.updatedAt = "2026-07-11T10:03:00.000Z";
+    file.session.attachments = file.session.attachments.map((item) => ({
+      ...item,
+      annotationId: "annotation-save",
+      updatedAt: "2026-07-11T10:02:00.000Z",
+      annotationLifecycle: {
+        state: "resolved" as const,
+        resolvedAt: "2026-07-11T10:01:00.000Z",
+      },
+    }));
+
+    const input = {
+      file,
+      attachmentIds: ["att_save"],
+      selectedItemId: "att_save",
+      selectedRecord: save,
+      viewMode: "agent_safe" as const,
+      intent: "Keep this lifecycle.",
+    };
+    const capture = buildPanelBridgeCapture(input, "capture_time");
+    expect(capture).toMatchObject({
+      annotationLifecycleVersion: "v1",
+      targets: [{
+        annotationId: "annotation-save",
+        annotationLifecycle: {
+          state: "resolved",
+          resolvedAt: "2026-07-11T10:01:00.000Z",
+        },
+      }],
+    });
+    expect(isLocalBridgeSnapshot({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.local-bridge-snapshot",
+      sequence: 1,
+      publishedAt: "2026-07-11T10:03:00.000Z",
+      page: null,
+      attachmentCount: 1,
+      agentCopy: null,
+      capture,
+    })).toBe(true);
+
+    const missing = structuredClone(file);
+    delete (missing.session.attachments[0] as unknown as Record<string, unknown>)
+      .annotationLifecycle;
+    const ownUndefined = structuredClone(file);
+    (ownUndefined.session.attachments[0] as unknown as Record<string, unknown>)
+      .annotationLifecycle = undefined;
+    const extra = structuredClone(file);
+    Object.assign(
+      (extra.session.attachments[0] as unknown as Record<string, unknown>).annotationLifecycle as object,
+      { extra: true },
+    );
+    const outOfOrder = structuredClone(file);
+    (outOfOrder.session.attachments[0] as unknown as { annotationLifecycle: { resolvedAt: string } })
+      .annotationLifecycle.resolvedAt = "2026-07-11T10:02:30.000Z";
+    for (const invalid of [missing, ownUndefined, extra, outOfOrder]) {
+      expect(buildPanelBridgeCapture({ ...input, file: invalid }, "capture_time")).toBeNull();
+    }
   });
 
   test("fails closed when the requested target scope is invalid", () => {
@@ -78,6 +486,215 @@ describe("buildPanelBridgeCapture", () => {
     expect(capture).not.toBeNull();
     expect(capture?.title).not.toContain("ada@example.com");
     expect(JSON.stringify(capture)).not.toContain("ada@example.com");
+  });
+
+  test("bounds long multibyte display labels without changing the source attachment", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const longTitle = `页面标题 ${"动态中文标题".repeat(80)}`;
+    const longIntent = `任务说明 ${"保留完整上下文".repeat(1_000)}`;
+    save.attachment.source.title = longTitle;
+    const file = createSessionFile([save]);
+    const longLabel = `A · span · ${"一段会持续变化的中文页面元素".repeat(12)}`;
+    file.session.attachments[0]!.labels = [longLabel];
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: ["att_save"],
+      selectedItemId: "att_save",
+      selectedRecord: save,
+      viewMode: "agent_safe",
+      intent: longIntent,
+    }, "live_page");
+
+    const label = capture?.targets[0]?.label ?? "";
+    expect(new TextEncoder().encode(label).byteLength).toBeLessThanOrEqual(128);
+    expect(label).toMatch(/…$/u);
+    expect(new TextEncoder().encode(capture?.title ?? "").byteLength).toBeLessThanOrEqual(512);
+    expect(capture?.title).toMatch(/…$/u);
+    expect(new TextEncoder().encode(capture?.targets[0]?.taskNote ?? "").byteLength)
+      .toBeLessThanOrEqual(16_384);
+    expect(capture?.targets[0]?.taskNote).toMatch(/…$/u);
+    expect(file.session.attachments[0]!.labels[0]).toBe(longLabel);
+    expect(capture?.targets[0]?.attachment.id).toBe(save.attachment.id);
+    expect(JSON.stringify(capture?.targets[0]?.attachment)).toContain("Save changes");
+    expect(capture?.targets[0]?.attachment.source.title).toBe(longTitle);
+    expect(isLocalBridgeSnapshot({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.local-bridge-snapshot",
+      sequence: 1,
+      publishedAt: "2026-07-11T12:34:56.789Z",
+      page: {
+        pageInstanceId: "chromium-tab:7:frame:0",
+        route: "https://app.example.test/settings",
+      },
+      attachmentCount: 1,
+      agentCopy: "Target details remain available.",
+      capture,
+      observations: {
+        observedAt: "2026-07-11T12:34:56.789Z",
+        documentInstanceId: "document-01234567",
+        targets: [{ attachmentId: "att_save", status: "restored" }],
+      },
+    })).toBe(true);
+  });
+
+  test("keeps several individually valid text-heavy targets within the bridge capture budget", () => {
+    const records = ["first", "second", "third"].map((seed) => {
+      const record = createCaptureRecord(seed, `${seed} article`);
+      record.attachment.element.text = "动态正文 ".repeat(3_500);
+      record.attachment.element.accessibleName = "动态正文 ".repeat(3_500);
+      record.attachment.element.contentParts = [{
+        kind: "text",
+        tagName: "p",
+        role: null,
+        text: "结构化正文".repeat(800),
+        accessibleName: null,
+      }];
+      record.attachment.policy = {
+        ...record.attachment.policy,
+        redactedFields: ["element.text"],
+        sensitiveHints: ["element.text", "element.accessibleName"],
+        includedSensitiveFields: ["element.accessibleName"],
+      };
+      for (const key of UI_ATTACHMENT_COMPUTED_STYLE_FIELDS) {
+        record.attachment.style[key] = `${seed}-${key}`;
+      }
+      return record;
+    });
+    const file = createSessionFile(records);
+    expect(records.every((record) => isUIAttachment(record.attachment))).toBe(true);
+    expect(hydrateCaptureSessionFile(file)).toMatchObject({ ok: true });
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: records.map((record) => record.attachment.id),
+      selectedItemId: records[2]!.attachment.id,
+      selectedRecord: records[2]!,
+      viewMode: "agent_safe",
+      intent: "Compare the three targets.",
+    }, "capture_time");
+
+    expect(capture?.targets).toHaveLength(3);
+    expect(capture?.targets.map((target) => target.attachmentId)).toEqual(
+      records.map((record) => record.attachment.id),
+    );
+    expect(capture?.targets[0]?.attachment.element.text).not.toBe(
+      records[0]!.attachment.element.text,
+    );
+    expect(new TextEncoder().encode(JSON.stringify(capture)).byteLength)
+      .toBeLessThanOrEqual(UI_ATTACH_LOCAL_BRIDGE_MAX_CAPTURE_BYTES);
+    expect(capture?.targets.every((target) =>
+      (target.attachment.element.contentParts?.length ?? 0) > 0
+    )).toBe(true);
+    for (const [index, target] of (capture?.targets ?? []).entries()) {
+      expect(target.attachment.style).toEqual(records[index]!.attachment.style);
+      expect(target.attachment.policy.redactedFields).toEqual(["element.text"]);
+      expect(new Set(target.attachment.policy.sensitiveHints)).toEqual(
+        new Set(["element.text", "element.accessibleName"]),
+      );
+      expect(target.attachment.policy.includedSensitiveFields).toEqual([
+        "element.accessibleName",
+      ]);
+    }
+    const handoff = buildPanelBridgeAgentCopy({
+      file,
+      attachmentIds: records.map((record) => record.attachment.id),
+      selectedItemId: records[2]!.attachment.id,
+      selectedRecord: records[2]!,
+      viewMode: "agent_safe",
+      intent: "Compare the three targets.",
+    });
+    expect(handoff.ok).toBe(false);
+    expect(isLocalBridgeSnapshot({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.local-bridge-snapshot",
+      sequence: 1,
+      publishedAt: "2026-07-11T12:34:56.789Z",
+      page: {
+        pageInstanceId: "chromium-tab:7:frame:0",
+        route: "https://app.example.test/settings",
+      },
+      attachmentCount: 3,
+      agentCopy: "Three compact targets are available through the structured capture.",
+      capture,
+    })).toBe(true);
+  });
+
+  test("fails closed when exact target styles alone cannot fit the bridge capture budget", () => {
+    const maximumStyleValue = "界".repeat(170);
+    const records = Array.from({ length: 26 }, (_, index) => {
+      const record = createCaptureRecord(`style-${index + 1}`, `Target ${index + 1}`);
+      record.attachment.style.display = maximumStyleValue;
+      record.attachment.style.color = maximumStyleValue;
+      record.attachment.style.backgroundColor = maximumStyleValue;
+      for (const key of UI_ATTACHMENT_COMPUTED_STYLE_FIELDS) {
+        record.attachment.style[key] = maximumStyleValue;
+      }
+      return record;
+    });
+    const file = createSessionFile(records);
+    expect(records.every((record) => isUIAttachment(record.attachment))).toBe(true);
+    expect(hydrateCaptureSessionFile(file)).toMatchObject({ ok: true });
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds: records.map((record) => record.attachment.id),
+      selectedItemId: records[0]!.attachment.id,
+      selectedRecord: records[0]!,
+      viewMode: "agent_safe",
+      intent: "Compare all targets without dropping their captured style facts.",
+    }, "capture_time");
+
+    expect(capture).toBeNull();
+  });
+
+  test("normalizes duplicate source attachment ids to the session item ids shared with the Agent", () => {
+    const records = ["first", "second", "third"].map((seed) => {
+      const record = createCaptureRecord(seed, `${seed} article`);
+      record.attachment.id = "att_tweet";
+      return record;
+    });
+    const file = createSessionFile(records);
+    file.session.attachments.forEach((item, index) => {
+      item.id = index === 0 ? "att_tweet" : `att_tweet-${index + 1}`;
+    });
+    const attachmentIds = file.session.attachments.map((item) => item.id);
+    expect(hydrateCaptureSessionFile(file)).toMatchObject({ ok: true });
+
+    const capture = buildPanelBridgeCapture({
+      file,
+      attachmentIds,
+      selectedItemId: "att_tweet-3",
+      selectedRecord: records[2]!,
+      viewMode: "agent_safe",
+      intent: "Compare the three targets.",
+    }, "capture_time");
+
+    expect(capture?.targets.map((target) => ({
+      attachmentId: target.attachmentId,
+      nestedAttachmentId: target.attachment.id,
+    }))).toEqual(attachmentIds.map((attachmentId) => ({
+      attachmentId,
+      nestedAttachmentId: attachmentId,
+    })));
+    expect(isLocalBridgeSnapshot({
+      schemaVersion: "0.1.0",
+      kind: "ui-attach.local-bridge-snapshot",
+      sequence: 1,
+      publishedAt: "2026-07-11T12:34:56.789Z",
+      page: {
+        pageInstanceId: "chromium-tab:7:frame:0",
+        route: "https://app.example.test/settings",
+      },
+      attachmentCount: 3,
+      agentCopy: null,
+      capture,
+    })).toBe(true);
+    expect(records.map((record) => record.attachment.id)).toEqual([
+      "att_tweet",
+      "att_tweet",
+      "att_tweet",
+    ]);
   });
 });
 
@@ -180,15 +797,89 @@ describe("buildPanelAgentCopy", () => {
 
     const exact = buildPanelAgentCopy(base);
     const compact = buildPanelAgentCopy({ ...base, format: "compact" });
+    const bridge = buildPanelBridgeAgentCopy(base);
 
     expect(exact.ok).toBe(true);
     expect(compact.ok).toBe(true);
-    if (!exact.ok || !compact.ok) return;
+    expect(bridge.ok).toBe(true);
+    if (!exact.ok || !compact.ok || !bridge.ok) return;
     expect(exact.text).toContain("# MeanThis Capture Bundle");
     expect(compact.text).toContain("# MeanThis Compact Capture Bundle");
+    expect(bridge.text).toBe(exact.text);
+    expect(new TextEncoder().encode(bridge.text).byteLength)
+      .toBeLessThanOrEqual(UI_ATTACH_LOCAL_BRIDGE_MAX_AGENT_COPY_BYTES);
     expect(compact.text).toContain('"taskNote":""');
     expect(compact.text).toContain('"taskNote":"Use a secondary style."');
     expect(compact.text).toContain('page.getByRole(\\"button\\", { name: \\"Cancel\\" })');
+  });
+
+  test("uses one four-level feedback serializer for single and multi-target widget copies", () => {
+    const save = createCaptureRecord("save", "Save changes");
+    const cancel = createCaptureRecord("cancel", "Cancel");
+    save.intent = "Move this action below the profile form.";
+    cancel.intent = "Use the secondary style.";
+    const base = {
+      file: createSessionFile([save, cancel]),
+      attachmentIds: ["att_save", "att_cancel"],
+      selectedItemId: "att_cancel",
+      selectedRecord: cancel,
+      viewMode: "agent_safe" as const,
+      intent: "Use the secondary style.",
+    };
+
+    const compact = buildPanelAgentCopy({ ...base, outputDetail: "compact" });
+    const forensic = buildPanelAgentCopy({ ...base, outputDetail: "forensic" });
+
+    expect(compact.ok).toBe(true);
+    expect(forensic.ok).toBe(true);
+    if (!compact.ok || !forensic.ok) return;
+    expect(compact.attachmentCount).toBe(2);
+    expect(compact.text).toContain("Target A");
+    expect(compact.text).toContain("Move this action below the profile form.");
+    expect(compact.text).toContain("Target B");
+    expect(compact.text).toContain("Use the secondary style.");
+    expect(compact.text).not.toContain("Policy audit:");
+    expect(forensic.text).toContain("Policy audit (reference only):");
+    expect(forensic.text.length).toBeGreaterThan(compact.text.length);
+  });
+
+  test("groups repeated annotations on one element in feedback copy", () => {
+    const first = createCaptureRecord("save", "Save changes");
+    first.intent = "First comment.";
+    first.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.5,
+    };
+    const second = structuredClone(first);
+    second.intent = "Second comment.";
+    second.capturedAt = "2026-07-11T10:03:00.000Z";
+    second.attachment.capturedAt = second.capturedAt;
+    second.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.75,
+      yRatio: 0.5,
+    };
+    const file = createSessionFile([first, second]);
+    file.session.attachments[1]!.id = "att_save-2";
+
+    const result = buildPanelAgentCopy({
+      file,
+      attachmentIds: ["att_save", "att_save-2"],
+      selectedItemId: "att_save-2",
+      selectedRecord: second,
+      viewMode: "agent_safe",
+      intent: "Second comment.",
+      outputDetail: "standard",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.attachmentCount).toBe(1);
+    expect(result.text.match(/Target A/gu)).toHaveLength(1);
+    expect(result.text).not.toContain("Target B");
+    expect(result.text).toContain("Annotation 1 task note: First comment.");
+    expect(result.text).toContain("Annotation 2 task note: Second comment.");
   });
 
   test("does not revive a cleared selected note or include an out-of-scope edit", () => {

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { CaptureSessionFileV1 } from "@meanthis/hub-core";
+import type {
+  CaptureSessionFileV1,
+  CaptureSessionFileV2,
+  CaptureSessionFileV3,
+} from "@meanthis/hub-core";
+import type { MetadataDiagnosticsV1 } from "@meanthis/schema";
 import type { ActiveSessionCommandData, SessionCommandResponse } from "./messages";
 import type { OriginCaptureRecord } from "./capture-store";
 import type { ActiveSessionReadback } from "./session-store";
@@ -15,6 +20,126 @@ import {
 const ORIGIN = "https://app.example.test";
 const OTHER_ORIGIN = "https://other.example.test";
 const THIRD_ORIGIN = "https://third.example.test";
+
+const MALFORMED_CLEAR_PAIR_CASES: ReadonlyArray<[
+  string,
+  (readback: ActiveSessionReadback) => unknown,
+]> = [
+  ["numeric zero", (readback) => ({
+    ...readback,
+    clearPending: 0,
+    activeClearOperationId: null,
+  })],
+  ["empty string", (readback) => ({
+    ...readback,
+    clearPending: "",
+    activeClearOperationId: null,
+  })],
+  ["undefined boolean", (readback) => ({
+    ...readback,
+    clearPending: undefined,
+    activeClearOperationId: null,
+  })],
+  ["missing boolean", (readback) => {
+    const { clearPending: _clearPending, ...missing } = readback;
+    return missing;
+  }],
+  ["truthy number", (readback) => ({
+    ...readback,
+    clearPending: 1,
+    activeClearOperationId: "clear-truthy",
+  })],
+  ["idle with id", (readback) => ({
+    ...readback,
+    clearPending: false,
+    activeClearOperationId: "clear-idle",
+  })],
+  ["pending with null id", (readback) => ({
+    ...readback,
+    clearPending: true,
+    activeClearOperationId: null,
+  })],
+  ["pending with whitespace id", (readback) => ({
+    ...readback,
+    clearPending: true,
+    activeClearOperationId: " clear-whitespace ",
+  })],
+  ["pending with overbound id", (readback) => ({
+    ...readback,
+    clearPending: true,
+    activeClearOperationId: "x".repeat(129),
+  })],
+];
+
+interface StructuralClearPairFixture<T> {
+  value: T;
+  getterCalls(): number;
+}
+
+const STRUCTURALLY_INVALID_CLEAR_READBACK_CASES: ReadonlyArray<[
+  string,
+  (readback: ActiveSessionReadback) => StructuralClearPairFixture<ActiveSessionReadback>,
+]> = [
+  ["inherited pair", (readback) => {
+    const { clearPending, activeClearOperationId, ...ownFields } = readback;
+    return {
+      value: Object.assign(Object.create({ clearPending, activeClearOperationId }), ownFields),
+      getterCalls: () => 0,
+    };
+  }],
+  ["accessor pair", (readback) => {
+    let calls = 0;
+    const value = { ...readback };
+    Object.defineProperty(value, "clearPending", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        calls += 1;
+        return false;
+      },
+    });
+    Object.defineProperty(value, "activeClearOperationId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        calls += 1;
+        return null;
+      },
+    });
+    return { value, getterCalls: () => calls } as StructuralClearPairFixture<ActiveSessionReadback>;
+  }],
+  ["extra string field", (readback) => ({
+    value: { ...readback, unexpected: true } as ActiveSessionReadback,
+    getterCalls: () => 0,
+  })],
+  ["extra symbol field", (readback) => {
+    const value = { ...readback };
+    Object.defineProperty(value, Symbol("unexpected"), {
+      configurable: true,
+      enumerable: true,
+      value: true,
+    });
+    return { value, getterCalls: () => 0 };
+  }],
+  ["non-enumerable pair field", (readback) => {
+    const value = { ...readback };
+    Object.defineProperty(value, "clearPending", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: false,
+    });
+    return { value, getterCalls: () => 0 };
+  }],
+  ["structural proxy failure", (readback) => ({
+    value: new Proxy({ ...readback }, {
+      ownKeys() {
+        throw new Error("structural trap");
+      },
+    }),
+    getterCalls: () => 0,
+  })],
+];
 
 describe("panel session controller intent and recovery", () => {
   beforeEach(() => {
@@ -258,6 +383,168 @@ describe("panel session controller mutations and export readbacks", () => {
     vi.useRealTimers();
   });
 
+  test("keeps a V2 readback byte-for-byte through snapshot and export", async () => {
+    const record = createCaptureRecord("save", "Save changes");
+    const file = createV2SessionFile([record]);
+    const readback: ActiveSessionReadback = {
+      origin: file.session.origin,
+      epoch: "epoch-v2",
+      clearPending: false,
+      activeClearOperationId: null,
+      file,
+      legacyRecord: record,
+    };
+    const client: PanelSessionClient = {
+      getActive: vi.fn(async () => ({ ok: true, data: createActiveData(readback) })),
+      updateIntent: vi.fn(),
+      updateAnnotationLifecycle: vi.fn(),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    };
+    const controller = createPanelSessionController({
+      client,
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: (id) => clearTimeout(id),
+    });
+
+    await controller.initialize();
+    const snapshotFile = controller.getSnapshot().file;
+    const exported = await controller.readExport();
+
+    expect(snapshotFile).toEqual(file);
+    expect(snapshotFile?.schemaVersion).toBe("0.2.0");
+    expect(snapshotFile?.session.attachments[0]).toMatchObject({
+      annotationId: "annotation:1",
+      updatedAt: record.capturedAt,
+    });
+    expect(exported).toMatchObject({ ok: true, value: { file } });
+  });
+
+  test("resolves and reopens a V3 annotation only after exact authoritative readback", async () => {
+    const record = createCaptureRecord("save", "Save changes");
+    let file: CaptureSessionFileV3 = {
+      ...createV2SessionFile([record]),
+      schemaVersion: "0.3.0",
+      session: {
+        ...createV2SessionFile([record]).session,
+        attachments: createV2SessionFile([record]).session.attachments.map((item) => ({
+          ...item,
+          annotationLifecycle: { state: "open", resolvedAt: null },
+        })),
+      },
+    };
+    const client: PanelSessionClient = {
+      getActive: vi.fn(async () => ({
+        ok: true,
+        data: createActiveData(createReadback(file as CaptureSessionFileV1)),
+      })),
+      updateIntent: vi.fn(),
+      updateAnnotationLifecycle: vi.fn(async (
+        origin,
+        epoch,
+        itemId,
+        annotationId,
+        expectedState,
+        nextState,
+      ) => {
+        const item = file.session.attachments.find((candidate) => candidate.id === itemId);
+        expect(item).toMatchObject({ annotationId, annotationLifecycle: { state: expectedState } });
+        file = {
+          ...file,
+          session: {
+            ...file.session,
+            updatedAt: nextState === "resolved"
+              ? "2026-07-11T10:01:00.000Z"
+              : "2026-07-11T10:02:00.000Z",
+            attachments: file.session.attachments.map((candidate) => candidate.id === itemId
+              ? {
+                  ...candidate,
+                  updatedAt: nextState === "resolved"
+                    ? "2026-07-11T10:01:00.000Z"
+                    : "2026-07-11T10:02:00.000Z",
+                  annotationLifecycle: nextState === "resolved"
+                    ? { state: "resolved" as const, resolvedAt: "2026-07-11T10:01:00.000Z" }
+                    : { state: "open" as const, resolvedAt: null },
+                }
+              : candidate),
+          },
+        };
+        return { ok: true, data: createReadback(file as CaptureSessionFileV1, origin, epoch) };
+      }),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    };
+    const controller = createPanelSessionController({
+      client,
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: (id) => clearTimeout(id),
+    });
+    await controller.initialize();
+    const item = file.session.attachments[0];
+
+    await controller.setAnnotationLifecycle(item.id, "resolved");
+    expect(controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [{
+        annotationId: item.annotationId,
+        annotationLifecycle: {
+          state: "resolved",
+          resolvedAt: "2026-07-11T10:01:00.000Z",
+        },
+      }] } },
+      status: { kind: "success", message: "Annotation resolved." },
+    });
+    await controller.setAnnotationLifecycle(item.id, "open");
+    expect(controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [{
+        annotationId: item.annotationId,
+        annotationLifecycle: { state: "open", resolvedAt: null },
+      }] } },
+      status: { kind: "success", message: "Annotation reopened." },
+    });
+  });
+
+  test("does not accept lifecycle transport success without exact next-state readback", async () => {
+    const record = createCaptureRecord("save", "Save changes");
+    const v2 = createV2SessionFile([record]);
+    const file: CaptureSessionFileV3 = {
+      ...v2,
+      schemaVersion: "0.3.0",
+      session: {
+        ...v2.session,
+        attachments: v2.session.attachments.map((item) => ({
+          ...item,
+          annotationLifecycle: { state: "open", resolvedAt: null },
+        })),
+      },
+    };
+    const readback = createReadback(file as CaptureSessionFileV1);
+    const client: PanelSessionClient = {
+      getActive: vi.fn(async () => ({ ok: true, data: createActiveData(readback) })),
+      updateIntent: vi.fn(),
+      updateAnnotationLifecycle: vi.fn(async () => ({ ok: true, data: readback })),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    };
+    const controller = createPanelSessionController({
+      client,
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: (id) => clearTimeout(id),
+    });
+    await controller.initialize();
+
+    await controller.setAnnotationLifecycle(file.session.attachments[0].id, "resolved");
+
+    expect(controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [{
+        annotationLifecycle: { state: "open", resolvedAt: null },
+      }] } },
+      status: {
+        kind: "error",
+        message: "Annotation state was not updated. Refresh and try again.",
+      },
+    });
+  });
+
   test("refresh cancels pending debounce before awaiting active readback", async () => {
     const harness = createControllerHarness();
     await harness.controller.initialize();
@@ -301,15 +588,19 @@ describe("panel session controller mutations and export readbacks", () => {
       ok: true,
       data: createActiveData(createReadback(createSessionFile([
         createCaptureRecord("other", "Other"),
-      ]), OTHER_ORIGIN)),
+      ]), OTHER_ORIGIN), undefined, ["att_other"]),
     });
     await secondRefresh;
-    first.resolve({ ok: true, data: createActiveData(createReadback(harness.file, ORIGIN)) });
+    first.resolve({
+      ok: true,
+      data: createActiveData(createReadback(harness.file, ORIGIN), undefined, ["att_save"]),
+    });
     await firstRefresh;
 
     expect(harness.controller.getSnapshot()).toMatchObject({
       origin: OTHER_ORIGIN,
       selectedItemId: "att_other",
+      currentItemIds: ["att_other"],
     });
   });
 
@@ -674,6 +965,25 @@ describe("panel session controller mutations and export readbacks", () => {
     });
   });
 
+  test("does not report removal success when authoritative readback still contains the item", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.client.removeItem = vi.fn(async () => ({
+      ok: true,
+      data: createReadback(harness.file),
+    }));
+
+    await harness.controller.removeItem("att_save");
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [{ id: "att_save" }, { id: "att_cancel" }] } },
+      status: {
+        kind: "error",
+        message: "Session item was not removed. Refresh and try again.",
+      },
+    });
+  });
+
   test("dirty selected remove and clear wait for the DOM caller to confirm discard", async () => {
     const harness = createControllerHarness();
     await harness.controller.initialize();
@@ -704,16 +1014,132 @@ describe("panel session controller mutations and export readbacks", () => {
         error: "A session clear is already in progress.",
       };
     });
+    harness.queueActive(createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: "clear-123",
+    }));
 
     await harness.controller.clearSession("clear-123");
+    harness.queueActive(createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: "clear-123",
+    }));
     await harness.controller.clearSession("clear-ignored");
 
-    expect(harness.client.calls.slice(-2)).toEqual([
+    expect(harness.client.calls.filter((call) => call.startsWith("clear:"))).toEqual([
       "clear:https://app.example.test:epoch-1:clear-123",
       "clear:https://app.example.test:epoch-1:clear-123",
     ]);
     expect(harness.controller.getSnapshot()).toMatchObject({
       clearPending: true,
+      activeClearOperationId: "clear-123",
+      status: {
+        kind: "saving",
+        message: "A session clear is already in progress.",
+      },
+    });
+  });
+
+  test("CLEAR_IN_PROGRESS adopts the different authoritative operation id before retry", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.client.clear = vi.fn(async (origin, epoch, operationId) => {
+      harness.client.calls.push(`clear:${origin}:${epoch}:${operationId}`);
+      return {
+        ok: false,
+        code: "CLEAR_IN_PROGRESS",
+        error: "A session clear is already in progress.",
+      };
+    });
+    const authoritativePending = createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: "clear-existing",
+    });
+    harness.queueActive(authoritativePending);
+
+    await harness.controller.clearSession("clear-new");
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: true,
+      activeClearOperationId: "clear-existing",
+      status: { kind: "saving" },
+    });
+
+    harness.queueActive(authoritativePending);
+    await harness.controller.clearSession("clear-ignored");
+
+    expect(harness.client.calls.filter((call) => call.startsWith("clear:"))).toEqual([
+      "clear:https://app.example.test:epoch-1:clear-new",
+      "clear:https://app.example.test:epoch-1:clear-existing",
+    ]);
+  });
+
+  test("CLEAR_IN_PROGRESS readback failure never projects the attempted id as authoritative", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.client.clear = vi.fn(async () => ({
+      ok: false,
+      code: "CLEAR_IN_PROGRESS",
+      error: "A session clear is already in progress.",
+    }));
+    harness.client.getActive = vi.fn(async () => {
+      throw new Error("secret readback failure");
+    });
+
+    await harness.controller.clearSession("clear-attempted");
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: false,
+      activeClearOperationId: null,
+      status: { kind: "error", message: "Panel action failed. Try again." },
+    });
+  });
+
+  test("CLEAR_IN_PROGRESS invalid pending readback fails closed without an attempted-id projection", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.client.clear = vi.fn(async () => ({
+      ok: false,
+      code: "CLEAR_IN_PROGRESS",
+      error: "A session clear is already in progress.",
+    }));
+    harness.queueActive(createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: " invalid-id ",
+    }));
+
+    await harness.controller.clearSession("clear-attempted");
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: false,
+      activeClearOperationId: null,
+      status: {
+        kind: "error",
+        message: "Session clear status is invalid. Refresh and try again.",
+      },
+    });
+  });
+
+  test("keeps an exact successful ACK pending until the durable readback becomes idle", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.client.clear = vi.fn(async (origin, epoch, operationId) => ({
+      ok: true,
+      data: {
+        ...createReadback(harness.file, origin, epoch ?? "epoch-1"),
+        clearPending: true,
+        activeClearOperationId: operationId,
+      },
+    }));
+
+    await harness.controller.clearSession("clear-pending-ack");
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: true,
+      activeClearOperationId: "clear-pending-ack",
       status: {
         kind: "saving",
         message: "A session clear is already in progress.",
@@ -825,6 +1251,11 @@ describe("panel session controller mutations and export readbacks", () => {
     });
     removed.resolve({ ok: true, data: createReadback(removeItemFromFile(removeHarness.file, "att_save")) });
     await removing;
+    expect(removeHarness.controller.getSnapshot()).toMatchObject({
+      sessionMutationPending: false,
+      file: { session: { attachments: [{ id: "att_cancel" }] } },
+      status: { kind: "success", message: "Session item removed." },
+    });
 
     const clearHarness = createControllerHarness();
     await clearHarness.controller.initialize();
@@ -840,6 +1271,79 @@ describe("panel session controller mutations and export readbacks", () => {
     });
     cleared.resolve({ ok: true, data: createReadback(emptySessionFile()) });
     await clearing;
+    expect(clearHarness.controller.getSnapshot()).toMatchObject({
+      clearPending: false,
+      activeClearOperationId: null,
+      sessionMutationPending: false,
+      file: { session: { attachments: [] } },
+      status: { kind: "success", message: "Session cleared." },
+    });
+  });
+
+  test("an invalid clear id cannot cancel an in-flight remove", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const removed = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    harness.client.removeItem = vi.fn(async () => removed.promise);
+
+    const removing = harness.controller.removeItem("att_save");
+    await flushMicrotasks();
+    await harness.controller.clearSession(" invalid-id ");
+    removed.resolve({ ok: true, data: createReadback(removeItemFromFile(harness.file, "att_save")) });
+    await removing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      sessionMutationPending: false,
+      file: { session: { attachments: [{ id: "att_cancel" }] } },
+      status: { kind: "success", message: "Session item removed." },
+    });
+  });
+
+  test("a missing selection cannot cancel an in-flight clear", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const cleared = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    harness.client.clear = vi.fn(async () => cleared.promise);
+
+    const clearing = harness.controller.clearSession("clear-select-noop");
+    await flushMicrotasks();
+    await harness.controller.selectItem("att_missing");
+    cleared.resolve({ ok: true, data: createReadback(emptySessionFile()) });
+    await clearing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: false,
+      activeClearOperationId: null,
+      sessionMutationPending: false,
+      file: { session: { attachments: [] } },
+      status: { kind: "success", message: "Session cleared." },
+    });
+  });
+
+  test("a remove rejected by authoritative pending clear cannot cancel its retry", async () => {
+    const harness = createControllerHarness();
+    harness.queueActive(createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: "clear-pending-retry",
+    }));
+    await harness.controller.initialize();
+    const cleared = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    harness.client.clear = vi.fn(async () => cleared.promise);
+
+    const clearing = harness.controller.clearSession("clear-pending-retry");
+    await flushMicrotasks();
+    await harness.controller.removeItem("att_save");
+    cleared.resolve({ ok: true, data: createReadback(emptySessionFile()) });
+    await clearing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: false,
+      activeClearOperationId: null,
+      sessionMutationPending: false,
+      file: { session: { attachments: [] } },
+      status: { kind: "success", message: "Session cleared." },
+    });
   });
 
   test("clear uses a new operation id after authoritative nonpending readback", async () => {
@@ -910,6 +1414,7 @@ describe("panel session controller mutations and export readbacks", () => {
     await harness.controller.clearSession("clear-original");
     expect(harness.controller.getSnapshot()).toMatchObject({
       clearPending: true,
+      activeClearOperationId: "clear-authoritative",
       sessionMutationPending: false,
       status: {
         kind: "saving",
@@ -1003,16 +1508,19 @@ describe("panel session controller mutations and export readbacks", () => {
     harness.queueActive(createActiveData({
       ...createReadback(harness.file),
       clearPending: true,
+      activeClearOperationId: "clear-original",
     }));
 
     await harness.controller.clearSession("clear-original");
     harness.queueActive(createActiveData({
       ...createReadback(harness.file),
       clearPending: true,
+      activeClearOperationId: "clear-original",
     }));
     await harness.controller.refreshActiveOrigin();
     expect(harness.controller.getSnapshot()).toMatchObject({
       clearPending: true,
+      activeClearOperationId: "clear-original",
       status: {
         kind: "saving",
         message: "A session clear is already in progress.",
@@ -1038,6 +1546,10 @@ describe("panel session controller mutations and export readbacks", () => {
     }));
 
     await harness.controller.initialize();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      clearPending: true,
+      activeClearOperationId: "clear-1",
+    });
     await harness.controller.clearSession("clear-new");
 
     expect(harness.client.calls.filter((call) => call.startsWith("clear:"))).toEqual([
@@ -1050,11 +1562,13 @@ describe("panel session controller mutations and export readbacks", () => {
     harness.queueActive(createActiveData({
       ...createReadback(harness.file),
       clearPending: true,
+      activeClearOperationId: "clear-authoritative",
     }));
 
     await harness.controller.initialize();
     expect(harness.controller.getSnapshot()).toMatchObject({
       clearPending: true,
+      activeClearOperationId: "clear-authoritative",
       status: {
         kind: "saving",
         message: "A session clear is already in progress.",
@@ -1065,7 +1579,207 @@ describe("panel session controller mutations and export readbacks", () => {
     await harness.controller.refreshActiveOrigin();
     expect(harness.controller.getSnapshot()).toMatchObject({
       clearPending: false,
+      activeClearOperationId: null,
       status: { kind: "ready" },
+    });
+  });
+
+  test("fails closed on a pending readback without a strict durable operation id", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const before = harness.controller.getSnapshot();
+    harness.queueActive(createActiveData({
+      ...createReadback(harness.file),
+      clearPending: true,
+      activeClearOperationId: " invalid-id ",
+    }));
+
+    await harness.controller.refreshActiveOrigin();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activeSupported: before.activeSupported,
+      clearPending: false,
+      activeClearOperationId: null,
+      file: before.file,
+      status: {
+        kind: "error",
+        message: "Session clear status is invalid. Refresh and try again.",
+      },
+    });
+  });
+
+  test.each(MALFORMED_CLEAR_PAIR_CASES)(
+    "fails closed on a non-authoritative clear pair: %s",
+    async (_label, createMalformedReadback) => {
+      const harness = createControllerHarness();
+      await harness.controller.initialize();
+      const before = harness.controller.getSnapshot();
+      harness.queueActive(createActiveData(
+        createMalformedReadback(createReadback(harness.file)) as ActiveSessionReadback,
+      ));
+
+      await harness.controller.refreshActiveOrigin();
+
+      expect(harness.controller.getSnapshot()).toMatchObject({
+        clearPending: false,
+        activeClearOperationId: null,
+        file: before.file,
+        status: {
+          kind: "error",
+          message: "Session clear status is invalid. Refresh and try again.",
+        },
+      });
+    },
+  );
+
+  test.each(STRUCTURALLY_INVALID_CLEAR_READBACK_CASES)(
+    "fails closed on a structurally invalid clear pair: %s",
+    async (_label, createInvalidReadback) => {
+      const harness = createControllerHarness();
+      await harness.controller.initialize();
+      const before = harness.controller.getSnapshot();
+      const invalid = createInvalidReadback(createReadback(harness.file));
+      harness.queueActive(createActiveData(invalid.value));
+
+      await expect(harness.controller.refreshActiveOrigin()).resolves.toBeUndefined();
+
+      expect(invalid.getterCalls()).toBe(0);
+      expect(harness.controller.getSnapshot()).toMatchObject({
+        clearPending: false,
+        activeClearOperationId: null,
+        file: before.file,
+        status: {
+          kind: "error",
+          message: "Session clear status is invalid. Refresh and try again.",
+        },
+      });
+    },
+  );
+
+  test.each(STRUCTURALLY_INVALID_CLEAR_READBACK_CASES)(
+    "readExport parses a structurally invalid readback before reading its fields: %s",
+    async (_label, createInvalidReadback) => {
+      const harness = createControllerHarness();
+      await harness.controller.initialize();
+      const invalid = createInvalidReadback(createReadback(harness.file));
+      harness.queueActive(createActiveData(invalid.value));
+
+      await expect(harness.controller.readExport()).resolves.toEqual({
+        ok: false,
+        code: "INVALID_SESSION_FILE",
+        error: "Session clear status is invalid. Refresh the panel and try again.",
+      });
+
+      expect(invalid.getterCalls()).toBe(0);
+    },
+  );
+
+  test("remove parses the authoritative readback before reading an accessor file", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const before = harness.controller.getSnapshot();
+    const invalid = { ...createReadback(removeItemFromFile(harness.file, "att_save")) };
+    let getterCalls = 0;
+    Object.defineProperty(invalid, "file", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return removeItemFromFile(harness.file, "att_save");
+      },
+    });
+    harness.client.removeItem = vi.fn(async () => ({
+      ok: true,
+      data: invalid as ActiveSessionReadback,
+    }));
+
+    await expect(harness.controller.removeItem("att_save")).resolves.toBeUndefined();
+
+    expect(getterCalls).toBe(0);
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      file: before.file,
+      selectedItemId: before.selectedItemId,
+      status: {
+        kind: "error",
+        message: "Session clear status is invalid. Refresh and try again.",
+      },
+    });
+  });
+
+  test.each([0, false, "", undefined])(
+    "fails closed on a falsey non-null active readback: %s",
+    async (readback) => {
+      const harness = createControllerHarness();
+      await harness.controller.initialize();
+      const before = harness.controller.getSnapshot();
+      harness.queueActive({
+        enabled: true,
+        origin: ORIGIN,
+        activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/settings" },
+        readback: readback as unknown as ActiveSessionReadback,
+      });
+
+      await expect(harness.controller.refreshActiveOrigin()).resolves.toBeUndefined();
+
+      expect(harness.controller.getSnapshot()).toMatchObject({
+        file: before.file,
+        selectedItemId: before.selectedItemId,
+        status: {
+          kind: "error",
+          message: "Session clear status is invalid. Refresh and try again.",
+        },
+      });
+    },
+  );
+
+  test("a falsey non-null clear readback cannot report success", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const before = harness.controller.getSnapshot();
+    harness.client.clear = vi.fn(async () => ({
+      ok: true,
+      data: 0 as unknown as ActiveSessionReadback,
+    }));
+
+    await expect(harness.controller.clearSession("clear-falsey-readback")).resolves.toBeUndefined();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      file: before.file,
+      selectedItemId: before.selectedItemId,
+      status: {
+        kind: "error",
+        message: "Session clear status is invalid. Refresh and try again.",
+      },
+    });
+  });
+
+  test("applies a parsed readback without invoking a transparent proxy get trap", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const legacyRecord = createCaptureRecord("legacy", "Legacy preview");
+    const readback = {
+      ...createReadback(emptySessionFile(ORIGIN)),
+      legacyRecord,
+    };
+    let legacyGets = 0;
+    const proxied = new Proxy(readback, {
+      get(target, property, receiver) {
+        if (property === "legacyRecord") {
+          legacyGets += 1;
+          throw new Error("legacyRecord get trap");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    harness.queueActive(createActiveData(proxied));
+
+    await expect(harness.controller.refreshActiveOrigin()).resolves.toBeUndefined();
+
+    expect(legacyGets).toBe(0);
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [] } },
+      legacyRecord,
+      status: { kind: "ready", message: "Selected element preview ready." },
     });
   });
 
@@ -1162,6 +1876,7 @@ describe("panel session controller mutations and export readbacks", () => {
     harness.queueActive(createActiveData({
       ...createReadback(harness.file),
       clearPending: true,
+      activeClearOperationId: "clear-export-pending",
     }));
     const pending = await harness.controller.readExport();
     expect(pending).toEqual({
@@ -1223,6 +1938,155 @@ describe("panel session controller mutations and export readbacks", () => {
       clearPending: false,
       sessionMutationPending: false,
       status: { kind: "ready", message: "Capture session ready." },
+    });
+  });
+
+  test("old clear success cannot overwrite a newer same-origin same-epoch snapshot", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const cleared = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    harness.client.clear = vi.fn(async () => cleared.promise);
+
+    const clearing = harness.controller.clearSession("clear-old-generation");
+    await flushMicrotasks();
+    harness.queueActive(createNewerSameGenerationActive());
+    await harness.controller.refreshActiveOrigin();
+
+    cleared.resolve({
+      ok: true,
+      data: createReadback(emptySessionFile(ORIGIN), ORIGIN, "epoch-1"),
+    });
+    await clearing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activePage: { pathname: "/newer" },
+      clearPending: true,
+      activeClearOperationId: "clear-newer-generation",
+      selectedItemId: "att_newer",
+      file: { session: { attachments: [{ id: "att_newer" }] } },
+      status: { kind: "saving", message: "A session clear is already in progress." },
+    });
+  });
+
+  test("old clear failure reread cannot overwrite a newer same-origin same-epoch snapshot", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const staleReread = createDeferred<SessionCommandResponse<ActiveSessionCommandData>>();
+    let activeReadCount = 0;
+    harness.client.clear = vi.fn(async () => ({
+      ok: false,
+      code: "STORAGE_ERROR",
+      error: "storage uncertain",
+    }));
+    harness.client.getActive = vi.fn(async () => {
+      activeReadCount += 1;
+      return activeReadCount === 1
+        ? staleReread.promise
+        : { ok: true, data: createNewerSameGenerationActive() };
+    });
+
+    const clearing = harness.controller.clearSession("clear-old-generation");
+    await flushMicrotasks();
+    await harness.controller.refreshActiveOrigin();
+    staleReread.resolve({
+      ok: true,
+      data: createActiveData({
+        ...createReadback(harness.file),
+        clearPending: true,
+        activeClearOperationId: "clear-stale-reread",
+      }),
+    });
+    await clearing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activePage: { pathname: "/newer" },
+      clearPending: true,
+      activeClearOperationId: "clear-newer-generation",
+      selectedItemId: "att_newer",
+      file: { session: { attachments: [{ id: "att_newer" }] } },
+      status: { kind: "saving", message: "A session clear is already in progress." },
+    });
+  });
+
+  test("old remove success cannot overwrite a newer same-origin same-epoch snapshot", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const removed = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    harness.client.removeItem = vi.fn(async () => removed.promise);
+
+    const removing = harness.controller.removeItem("att_save");
+    await flushMicrotasks();
+    harness.queueActive(createNewerSameGenerationActive());
+    await harness.controller.refreshActiveOrigin();
+
+    removed.resolve({
+      ok: true,
+      data: createReadback(removeItemFromFile(harness.file, "att_save")),
+    });
+    await removing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activePage: { pathname: "/newer" },
+      clearPending: true,
+      activeClearOperationId: "clear-newer-generation",
+      selectedItemId: "att_newer",
+      file: { session: { attachments: [{ id: "att_newer" }] } },
+      status: { kind: "saving", message: "A session clear is already in progress." },
+    });
+  });
+
+  test("old initialize continuation cannot overwrite a newer refresh snapshot", async () => {
+    const harness = createControllerHarness();
+    const staleInitialize = createDeferred<SessionCommandResponse<ActiveSessionCommandData>>();
+    let activeReadCount = 0;
+    harness.client.getActive = vi.fn(async () => {
+      activeReadCount += 1;
+      return activeReadCount === 1
+        ? staleInitialize.promise
+        : { ok: true, data: createNewerSameGenerationActive() };
+    });
+
+    const initializing = harness.controller.initialize();
+    await flushMicrotasks();
+    await harness.controller.refreshActiveOrigin();
+    staleInitialize.resolve({ ok: true, data: createActiveData(createReadback(harness.file)) });
+    await initializing;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activePage: { pathname: "/newer" },
+      clearPending: true,
+      activeClearOperationId: "clear-newer-generation",
+      selectedItemId: "att_newer",
+      file: { session: { attachments: [{ id: "att_newer" }] } },
+      status: { kind: "saving", message: "A session clear is already in progress." },
+    });
+  });
+
+  test("old refresh continuation cannot overwrite a newer same-generation refresh", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    const staleRefresh = createDeferred<SessionCommandResponse<ActiveSessionCommandData>>();
+    let activeReadCount = 0;
+    harness.client.getActive = vi.fn(async () => {
+      activeReadCount += 1;
+      return activeReadCount === 1
+        ? staleRefresh.promise
+        : { ok: true, data: createNewerSameGenerationActive() };
+    });
+
+    const first = harness.controller.refreshActiveOrigin();
+    await flushMicrotasks();
+    await harness.controller.refreshActiveOrigin("att_newer");
+    staleRefresh.resolve({ ok: true, data: createActiveData(createReadback(harness.file)) });
+    await first;
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      activePage: { pathname: "/newer" },
+      clearPending: true,
+      activeClearOperationId: "clear-newer-generation",
+      selectedItemId: "att_newer",
+      file: { session: { attachments: [{ id: "att_newer" }] } },
+      status: { kind: "saving", message: "A session clear is already in progress." },
     });
   });
 
@@ -1356,6 +2220,66 @@ describe("panel session controller mutations and export readbacks", () => {
       },
     });
   });
+
+  test("exposes only exact capture-bound diagnostics and clears them on mutation readbacks", async () => {
+    const harness = createControllerHarness();
+    const diagnostics = createMetadataDiagnostics(harness.file);
+    harness.queueActive({
+      ...createActiveData(createReadback(harness.file)),
+      metadataDiagnostics: diagnostics,
+    });
+
+    await harness.controller.initialize();
+    const first = harness.controller.getSnapshot();
+    expect(first.metadataDiagnostics).toEqual(diagnostics);
+    if (first.metadataDiagnostics?.device.status === "collected") {
+      first.metadataDiagnostics.device.deviceClass = "mobile";
+    }
+    expect(harness.controller.getSnapshot().metadataDiagnostics).toEqual(diagnostics);
+
+    await harness.controller.removeItem("att_cancel");
+    expect(harness.controller.getSnapshot().metadataDiagnostics).toBeNull();
+  });
+
+  test("fails closed for stale, content-bearing, and accessor diagnostics", async () => {
+    const staleHarness = createControllerHarness();
+    staleHarness.queueActive({
+      ...createActiveData(createReadback(staleHarness.file)),
+      metadataDiagnostics: {
+        ...createMetadataDiagnostics(staleHarness.file),
+        captureId: "different-capture",
+      },
+    });
+    await staleHarness.controller.initialize();
+    expect(staleHarness.controller.getSnapshot().metadataDiagnostics).toBeNull();
+
+    const malformedHarness = createControllerHarness();
+    malformedHarness.queueActive({
+      ...createActiveData(createReadback(malformedHarness.file)),
+      metadataDiagnostics: {
+        ...createMetadataDiagnostics(malformedHarness.file),
+        url: "https://secret.example.test",
+      } as unknown as MetadataDiagnosticsV1,
+    });
+    await malformedHarness.controller.initialize();
+    expect(malformedHarness.controller.getSnapshot().metadataDiagnostics).toBeNull();
+
+    const accessorHarness = createControllerHarness();
+    let getterCalls = 0;
+    const active = createActiveData(createReadback(accessorHarness.file));
+    Object.defineProperty(active, "metadataDiagnostics", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return createMetadataDiagnostics(accessorHarness.file);
+      },
+    });
+    accessorHarness.queueActive(active);
+    await accessorHarness.controller.initialize();
+    expect(accessorHarness.controller.getSnapshot().metadataDiagnostics).toBeNull();
+    expect(getterCalls).toBe(0);
+  });
 });
 
 function createControllerHarness() {
@@ -1374,6 +2298,13 @@ function createControllerHarness() {
       client.calls.push(`update:${origin}:${epoch}:${itemId}:${intent}`);
       harness.file = updateIntentInFile(harness.file, itemId, intent);
       return { ok: true, data: createReadback(harness.file, origin, epoch) };
+    },
+    async updateAnnotationLifecycle() {
+      return {
+        ok: false,
+        code: "STALE_SESSION",
+        error: "Annotation lifecycle is unavailable in the legacy fixture.",
+      };
     },
     async removeItem(origin, epoch, itemId) {
       client.calls.push(`remove:${origin}:${epoch}:${itemId}`);
@@ -1406,12 +2337,66 @@ function createActiveData(
   activePage = readback === null
     ? null
     : { tabId: 1, frameId: 0, origin: readback.origin, pathname: "/settings" },
+  currentItemIds?: string[],
 ): ActiveSessionCommandData {
   return {
     enabled: readback !== null,
     origin: readback?.origin ?? null,
     activePage,
     readback,
+    ...(currentItemIds ? { currentItemIds } : {}),
+  };
+}
+
+function createNewerSameGenerationActive(): ActiveSessionCommandData {
+  const record = createCaptureRecord("newer", "Newer");
+  record.pageUrl = `${ORIGIN}/newer`;
+  record.attachment.source = {
+    ...record.attachment.source,
+    url: `${ORIGIN}/newer`,
+  };
+  const file = createSessionFile([record]);
+  return createActiveData({
+    ...createReadback(file, ORIGIN, "epoch-1"),
+    clearPending: true,
+    activeClearOperationId: "clear-newer-generation",
+  }, {
+    tabId: 1,
+    frameId: 0,
+    origin: ORIGIN,
+    pathname: "/newer",
+  });
+}
+
+function createMetadataDiagnostics(file: CaptureSessionFileV1): MetadataDiagnosticsV1 {
+  return {
+    schemaVersion: "0.1.0",
+    kind: "ui-attach.metadata-only-diagnostics",
+    captureId: file.session.id,
+    scope: "capture",
+    observedAt: file.session.updatedAt,
+    consent: "explicit_capture",
+    authority: "capture_time",
+    replay: {
+      status: "collected",
+      attemptCount: 1,
+      verifiedCount: 1,
+      ambiguousCount: 0,
+      missingCount: 0,
+    },
+    device: {
+      status: "collected",
+      deviceClass: "desktop",
+      viewportClass: "large",
+      touch: "none",
+    },
+    network: { status: "not_requested" },
+    console: { status: "not_requested" },
+    executionAuthority: {
+      grantedByCapture: false,
+      browserControl: false,
+      liveDomMutation: false,
+    },
   };
 }
 
@@ -1521,6 +2506,22 @@ function createDeferred<T>(): Deferred<T> {
     reject = innerReject;
   });
   return { promise, resolve, reject };
+}
+
+function createV2SessionFile(records: OriginCaptureRecord[]): CaptureSessionFileV2 {
+  const legacyFile = createSessionFile(records);
+  return {
+    ...legacyFile,
+    schemaVersion: "0.2.0",
+    session: {
+      ...legacyFile.session,
+      attachments: legacyFile.session.attachments.map((item, index) => ({
+        ...item,
+        annotationId: `annotation:${index + 1}`,
+        updatedAt: item.createdAt,
+      })),
+    },
+  };
 }
 
 async function flushMicrotasks(): Promise<void> {

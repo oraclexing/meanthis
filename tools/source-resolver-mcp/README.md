@@ -16,24 +16,35 @@ The standalone server prefers `file://` workspace roots declared by the MCP clie
 
 Only `verified` proves a source location. Zero verified matches, multiple verified matches, stale source bytes, malformed or unknown anchors, malformed sidecars, traversal, symlink escape, and paths outside the declared workspace fail closed as a non-verified result. Output contains repository-relative locations rather than absolute paths.
 
+When a verified location includes `componentBreadcrumb`, it is same-file lexical evidence with `{ path, line, column, componentName }` frames ordered outer-to-inner and capped at the three most recent frames. It is returned only after current source bytes match the recorded hash; `candidate` and `unavailable` results omit it. It is not a React Fiber/runtime stack or cross-file inference, and the adapter never returns source text, `contentHash`, `workspaceRoot`, absolute paths, or browser/source write authority.
+
 ## Local use before publication
 
-Until the first registry publication, use this public-package candidate from the repository checkout. The recommended Codex setup is one command:
+Until the first registry publication, use this public-package candidate from a checkout of this repository. Run the commands below from the repository root. The package is not available from the npm registry yet.
+
+The package workspace provides the exact registration manager. After installing the checkout dependencies, build and install the standalone resolver for Codex with:
 
 ```powershell
-npm run setup:codex-source-resolver
+npm ci
+npm --workspace @meanthis/source-resolver-mcp run setup:codex
 ```
 
-It builds the minimal resolver workspace, resolves the current Node executable and built entry to absolute paths, backs up the active Codex config before a real registration change, calls Codex's own `mcp add`, and verifies the resulting readback. Repeating it is a no-op when the exact registration already exists. A same-name registration with a different command, entry, environment, working directory, an allow-list that omits `meanthis_resolve_source`, or a deny-list that includes it fails closed and is never overwritten.
+The command builds the resolver, resolves the current Node executable and built entry to absolute paths, backs up the active Codex config before a real registration change, calls Codex's own `mcp add`, and verifies the resulting readback. Repeating it is a no-op when the exact registration already exists. A same-name registration with a different command, entry, environment, working directory, an allow-list that omits `meanthis_resolve_source`, or a deny-list that includes it fails closed and is never overwritten.
 
 Inspect the current state without changing config, or preview an install action:
 
 ```powershell
-npm run doctor:codex-source-resolver
-npm run setup:codex-source-resolver -- --dry-run
+npm --workspace @meanthis/source-resolver-mcp run doctor:codex
+npm --workspace @meanthis/source-resolver-mcp run setup:codex -- --dry-run
 ```
 
-To remove only the exact registration owned by this checkout, run `npm run remove:codex-source-resolver`. A real add or remove first copies `$CODEX_HOME/config.toml`—or `~/.codex/config.toml` when `CODEX_HOME` is unset—to a timestamped sibling backup. A backup failure prevents the mutation.
+To remove only the exact registration owned by this checkout, run:
+
+```powershell
+npm --workspace @meanthis/source-resolver-mcp run remove:codex
+```
+
+A real add or remove first copies `$CODEX_HOME/config.toml`—or `~/.codex/config.toml` when `CODEX_HOME` is unset—to a timestamped sibling backup. A backup failure prevents the mutation.
 
 The package binary is `meanthis-source-resolver`, and the recommended MCP registration name is also `meanthis-source-resolver`. For transparency, the manual equivalent of the install command is:
 
@@ -52,27 +63,18 @@ The command runs a stdio server and intentionally has no interactive browser set
 
 ## Full bridge compatibility
 
-The `npm run setup:bridge:codex` path registers the public companion's three-tool `meanthis` product MCP server, including `meanthis_resolve_source` alongside progressive shared-capture reads. `setup:codex-bridge` remains a compatibility alias. Maintainers can opt into four additional legacy diagnostics with `meanthis mcp --compatibility`. Choose the standalone resolver when source verification is the only required capability; choose the full bridge only when the separate, explicitly approved browser-capture workflow is also needed.
+The public companion's `setup:bridge:codex` path registers the `meanthis` product MCP server with four read-only tools—`meanthis_list_captures`, metadata-only bounded `meanthis_wait_capture_change`, `meanthis_read_capture`, and `meanthis_resolve_source`—plus the narrow transient `meanthis_ack_capture_read` acknowledgement mutation. Choose the standalone resolver when source verification is the only required capability; choose the full bridge only when the separate, explicitly approved browser-capture workflow is also needed.
 
 Neither setup path publishes a package. The resolver and companion are already part of the nine-package public release candidate and remain unavailable from the registry until an explicit publication occurs.
 
 ## Verification
 
-From the repository root:
+From the repository root, run the focused workspace checks and then the public package verification:
 
 ```powershell
 npm --workspace @meanthis/source-resolver-mcp test
 npm --workspace @meanthis/source-resolver-mcp run build
-npm run doctor:codex-source-resolver
-npm run verify:source-mapping-package-packs
+npm run verify:packages
 ```
 
-The focused tests exercise the MCP client/server exchange, roots precedence and fallback, exact unwrapped input schema, unique verified resolution, fail-closed states, and the injected no-mutation registration-manager contract without starting the browser bridge. The package-pack verifier additionally installs the bounded package tarball into an offline consumer and drives its standalone stdio entry through a real MCP initialize, `roots/list`, and tool call. Doctor reads only the built-entry and exact Codex registration state.
-
-After the absolute-path registration above points to the current build, maintainers can run the authenticated fresh-Codex canary:
-
-```powershell
-npm run verify:codex-source-resolver-canary -- --model gpt-5.6-terra --codex codex.exe
-```
-
-`--codex` selects the exact CLI binary under test. Confirm the client version in the receipt and pass an absolute path when a desktop-bundled CLI differs from the `codex.exe` found on `PATH`. Codex CLI `0.146.0-alpha.3.1` cannot combine `--ignore-user-config` with an injected MCP registration. The harness therefore does not pass that flag: it reads back the installed selected registration and the installed MCP inventory, requires absolute command and entry paths, replaces and disables every ambient registration for the child process, and runs a no-model inventory preflight that requires exactly `meanthis-source-resolver` to remain enabled. The model-backed task is ephemeral and read-only, ignores repository rules, disables shell, plugins, apps, memories, multi-agent, browser, computer-use, in-app-browser, image-generation, and web-search surfaces, and leaves deferred MCP discovery available for the selected server. It must make exactly one resolver call, perform zero other command or tool actions, and return the exact verified result. The latest commit-bound `gpt-5.6-terra` cohort made zero resolver calls in `0/3` repetitions but reported the unattempted state honestly in `3/3`; the earlier Round 94 observations remain Terra `3/5` and mini `1/2`. That is surface-specific capability variance, not a resolver failure or general model ranking. This authenticated manual canary is outside deterministic release gates; see the sanitized [Round 95 report](../../docs/dogfood/2026-07-31-source-resolution-handoff-semantics-round-95.md).
+The focused tests exercise the MCP client/server exchange, roots precedence and fallback, exact unwrapped input schema, unique verified resolution, fail-closed states, and the injected no-mutation registration-manager contract without starting the browser bridge. The root package verification builds and pack-verifies the nine public workspaces in an isolated consumer. It does not publish a package, run an authenticated model canary, or prove a live Codex registration.

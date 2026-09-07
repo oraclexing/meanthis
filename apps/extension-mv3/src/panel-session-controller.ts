@@ -1,5 +1,12 @@
-import type { CaptureSessionFileV1 } from "@meanthis/hub-core";
-import type { UIAttachmentDisclosureMode } from "@meanthis/schema";
+import type {
+  CaptureSessionAnnotationLifecycleStateV3,
+  CaptureSessionFile,
+} from "@meanthis/hub-core";
+import {
+  validateMetadataDiagnosticsV1,
+  type MetadataDiagnosticsV1,
+  type UIAttachmentDisclosureMode,
+} from "@meanthis/schema";
 import type { OriginCaptureRecord } from "./capture-store";
 import type { ActivePageContext, ActiveSessionCommandData, SessionCommandResponse } from "./messages";
 import {
@@ -16,11 +23,14 @@ export interface PanelSessionSnapshot {
   activeSupported: boolean;
   activePage: ActivePageContext | null;
   clearPending: boolean;
+  activeClearOperationId: string | null;
   sessionMutationPending: boolean;
   origin: string | null;
   epoch: string | null;
-  file: CaptureSessionFileV1 | null;
+  file: CaptureSessionFile | null;
   legacyRecord: OriginCaptureRecord | null;
+  currentItemIds: readonly string[] | null;
+  metadataDiagnostics: MetadataDiagnosticsV1 | null;
   selectedItemId: string | null;
   viewMode: UIAttachmentDisclosureMode;
   intent: string;
@@ -47,9 +57,13 @@ export interface PanelSessionController {
   flushIntent(): Promise<boolean>;
   retryDirtyIntent(): Promise<void>;
   discardDirtyIntent(): Promise<void>;
+  setAnnotationLifecycle(
+    itemId: string,
+    nextState: CaptureSessionAnnotationLifecycleStateV3,
+  ): Promise<void>;
   removeItem(itemId: string): Promise<void>;
-  clearSession(operationId: string): Promise<void>;
-  readExport(): Promise<SessionFileResult<{ file: CaptureSessionFileV1; text: string; byteLength: number }>>;
+  clearSession(operationId: string, scope?: PanelSessionClearScope): Promise<void>;
+  readExport(): Promise<SessionFileResult<{ file: CaptureSessionFile; text: string; byteLength: number }>>;
   setViewMode(mode: UIAttachmentDisclosureMode): void;
   getSnapshot(): PanelSessionSnapshot;
 }
@@ -62,6 +76,14 @@ export interface PanelSessionClient {
     itemId: string,
     intent: string,
   ): Promise<SessionCommandResponse<ActiveSessionReadback>>;
+  updateAnnotationLifecycle(
+    origin: string,
+    epoch: string,
+    itemId: string,
+    annotationId: string,
+    expectedState: CaptureSessionAnnotationLifecycleStateV3,
+    nextState: CaptureSessionAnnotationLifecycleStateV3,
+  ): Promise<SessionCommandResponse<ActiveSessionReadback>>;
   removeItem(
     origin: string,
     epoch: string,
@@ -71,8 +93,11 @@ export interface PanelSessionClient {
     origin: string,
     epoch: string | null,
     operationId: string,
+    scope?: PanelSessionClearScope,
   ): Promise<SessionCommandResponse<ActiveSessionReadback>>;
 }
+
+export type PanelSessionClearScope = "live-page" | "active-origin";
 
 interface PanelSessionControllerOptions {
   client: PanelSessionClient;
@@ -84,6 +109,10 @@ interface SessionMutation {
   id: number;
   origin: string;
   epoch: string | null;
+}
+
+interface SnapshotRequest {
+  revision: number;
 }
 
 const DEBOUNCE_MS = 250;
@@ -99,6 +128,7 @@ export function createPanelSessionController(
   let intentRevision = 0;
   let stateRevision = 0;
   let refreshRequestSequence = 0;
+  let snapshotRequestRevision = 0;
   let lastFlushBlockMessage = "";
   let mutationSequence = 0;
   const activeMutations = new Set<number>();
@@ -114,6 +144,14 @@ export function createPanelSessionController(
   function setStatus(kind: PanelSessionSnapshot["status"]["kind"], message: string): void {
     snapshot = { ...snapshot, status: { kind, message } };
     stateRevision += 1;
+  }
+
+  function beginSnapshotRequest(): SnapshotRequest {
+    return { revision: ++snapshotRequestRevision };
+  }
+
+  function isSnapshotRequestCurrent(request: SnapshotRequest): boolean {
+    return request.revision === snapshotRequestRevision;
   }
 
   function beginMutation(
@@ -138,23 +176,31 @@ export function createPanelSessionController(
     return false;
   }
 
-  function isMutationCurrent(mutation: SessionMutation): boolean {
+  function isMutationCurrent(mutation: SessionMutation, request: SnapshotRequest): boolean {
     return (
+      isSnapshotRequestCurrent(request) &&
       activeMutations.has(mutation.id) &&
       snapshot.origin === mutation.origin &&
       snapshot.epoch === mutation.epoch
     );
   }
 
-  function isClearReconciliationCurrent(mutation: SessionMutation): boolean {
-    return snapshot.origin === mutation.origin && snapshot.epoch === mutation.epoch;
+  function isClearReconciliationCurrent(
+    mutation: SessionMutation,
+    request: SnapshotRequest,
+  ): boolean {
+    return isSnapshotRequestCurrent(request) &&
+      snapshot.origin === mutation.origin && snapshot.epoch === mutation.epoch;
   }
 
   function isActiveDataForMutationOrigin(
     data: ActiveSessionCommandData,
     mutation: SessionMutation,
   ): boolean {
-    return data.origin === mutation.origin || data.readback?.origin === mutation.origin;
+    const readback = data.readback === null
+      ? null
+      : parseAuthoritativeActiveSessionReadback(data.readback);
+    return data.origin === mutation.origin || readback?.origin === mutation.origin;
   }
 
   function cancelDebounce(): void {
@@ -164,8 +210,11 @@ export function createPanelSessionController(
     }
   }
 
-  async function loadActive(): Promise<SessionCommandResponse<ActiveSessionCommandData>> {
+  async function loadActive(
+    request: SnapshotRequest,
+  ): Promise<SessionCommandResponse<ActiveSessionCommandData> | null> {
     const active = await options.client.getActive();
+    if (!isSnapshotRequestCurrent(request)) return null;
     if (!active.ok) {
       setStatus("error", active.error);
       emit();
@@ -173,19 +222,28 @@ export function createPanelSessionController(
     return active;
   }
 
-  function applyActiveData(data: ActiveSessionCommandData, preferredItemId?: string | null): void {
+  function applyActiveData(
+    data: ActiveSessionCommandData,
+    preferredItemId?: string | null,
+  ): boolean {
     if (!data.enabled || !data.origin) {
       applyUnsupportedActive();
-      return;
+      return true;
     }
-    if (!data.readback) {
+    if (data.readback === null) {
       applyNoSession(data.origin, data.activePage);
-      return;
+      return true;
     }
     const rememberedItemId = preferredItemId === undefined
       ? data.selectedItemId ?? getRememberedPageSelection(data.activePage)
       : preferredItemId;
-    applyActive(data.readback, rememberedItemId, data.activePage);
+    return applyActive(
+      data.readback,
+      rememberedItemId,
+      data.activePage,
+      data.currentItemIds === undefined ? null : data.currentItemIds,
+      readActiveMetadataDiagnostics(data),
+    );
   }
 
   function getRememberedPageSelection(activePage: ActivePageContext | null): string | undefined {
@@ -240,8 +298,10 @@ export function createPanelSessionController(
     readback: ActiveSessionReadback | null,
     preferredItemId?: string | null,
     activePage: ActivePageContext | null = snapshot.activePage,
-  ): void {
-    if (!readback) {
+    currentItemIds: readonly string[] | null = snapshot.currentItemIds,
+    metadataDiagnostics: unknown = null,
+  ): boolean {
+    if (readback === null) {
       pendingClearOperationId = null;
       snapshot = {
         ...createEmptySnapshot(),
@@ -250,39 +310,54 @@ export function createPanelSessionController(
       };
       stateRevision += 1;
       emit();
-      return;
+      return true;
     }
-    if (!readback.clearPending) {
+    const parsedReadback = parseAuthoritativeActiveSessionReadback(readback);
+    if (parsedReadback === null) {
+      setStatus("error", "Session clear status is invalid. Refresh and try again.");
+      emit();
+      return false;
+    }
+    const clearStatus = parseAuthoritativeClearStatus(parsedReadback);
+    if (clearStatus === null) return false;
+    if (clearStatus.clearPending) {
+      pendingClearOperationId = clearStatus.activeClearOperationId;
+    } else {
       pendingClearOperationId = null;
-    } else if (readback.activeClearOperationId !== null) {
-      pendingClearOperationId = readback.activeClearOperationId;
     }
 
-    const file = cloneNullable(readback.file);
-    const legacyRecord = cloneNullable(readback.legacyRecord);
+    const file = cloneNullable(parsedReadback.file);
+    const legacyRecord = cloneNullable(parsedReadback.legacyRecord);
     const selectedItemId = chooseSelectedItemId(file, preferredItemId, activePage);
     const selectedItem = findPanelSessionItem(file, selectedItemId);
+    const validatedMetadataDiagnostics = validateBoundMetadataDiagnostics(
+      metadataDiagnostics,
+      file,
+    );
     rememberPageSelection(activePage, selectedItemId);
     const hasSessionItems = (file?.session.attachments.length ?? 0) > 0;
     snapshot = {
       ...snapshot,
       activeSupported: true,
       activePage,
-      clearPending: readback.clearPending,
+      clearPending: clearStatus.clearPending,
+      activeClearOperationId: clearStatus.activeClearOperationId,
       sessionMutationPending: activeMutations.size > 0,
-      origin: readback.origin,
-      epoch: readback.epoch,
+      origin: parsedReadback.origin,
+      epoch: parsedReadback.epoch,
       file,
       legacyRecord,
+      currentItemIds: currentItemIds === null ? null : [...currentItemIds],
+      metadataDiagnostics: validatedMetadataDiagnostics,
       selectedItemId,
       intent: selectedItem?.sourceRecord.intent ?? "",
       intentDirty: false,
       recovery: null,
-      status: readback.clearPending
+      status: clearStatus.clearPending
         ? { kind: "saving", message: "A session clear is already in progress." }
         : hasSessionItems
           ? { kind: "ready", message: "Capture session ready." }
-          : readback.legacyRecord
+          : parsedReadback.legacyRecord
             ? { kind: "ready", message: "Selected element preview ready." }
             : {
                 kind: "empty",
@@ -291,6 +366,7 @@ export function createPanelSessionController(
     };
     stateRevision += 1;
     emit();
+    return true;
   }
 
   function getCurrentMutationTarget(): { origin: string; epoch: string; itemId: string } | null {
@@ -317,7 +393,7 @@ export function createPanelSessionController(
     );
   }
 
-  async function flushCurrentIntent(): Promise<boolean> {
+  async function flushCurrentIntent(request: SnapshotRequest): Promise<boolean> {
     lastFlushBlockMessage = "";
     if (!snapshot.intentDirty) return true;
     if (snapshot.recovery) {
@@ -346,6 +422,7 @@ export function createPanelSessionController(
       target.itemId,
       capturedIntent,
     );
+    if (!isSnapshotRequestCurrent(request)) return false;
     if (!isStillCurrentIntentTarget(target, capturedIntent, capturedRevision)) {
       lastFlushBlockMessage = "Intent changed before export. Save again and retry.";
       return false;
@@ -357,7 +434,8 @@ export function createPanelSessionController(
       return false;
     }
 
-    applyActive(response.data, target.itemId);
+    if (!isSnapshotRequestCurrent(request)) return false;
+    if (!applyActive(response.data, target.itemId) || snapshot.clearPending) return false;
     setStatus("success", "Intent saved.");
     emit();
     return true;
@@ -367,9 +445,12 @@ export function createPanelSessionController(
     origin: string,
     epoch: string | null,
     operationId: string,
+    scope?: PanelSessionClearScope,
   ): Promise<SessionCommandResponse<ActiveSessionReadback>> {
     try {
-      return await options.client.clear(origin, epoch, operationId);
+      return scope === undefined
+        ? await options.client.clear(origin, epoch, operationId)
+        : await options.client.clear(origin, epoch, operationId, scope);
     } catch {
       return {
         ok: false,
@@ -383,19 +464,22 @@ export function createPanelSessionController(
     originalError: string,
     stableOperationId: string,
     mutation: SessionMutation,
+    request: SnapshotRequest,
   ): Promise<void> {
-    if (!isClearReconciliationCurrent(mutation)) return;
+    if (!isClearReconciliationCurrent(mutation, request)) return;
 
     let active: SessionCommandResponse<ActiveSessionCommandData>;
     try {
       active = await options.client.getActive();
     } catch {
+      if (!isClearReconciliationCurrent(mutation, request)) return;
       pendingClearOperationId = stableOperationId;
       setStatus("error", SAFE_PANEL_ERROR);
       emit();
       return;
     }
 
+    if (!isClearReconciliationCurrent(mutation, request)) return;
     if (!active.ok) {
       pendingClearOperationId = stableOperationId;
       setStatus("error", SAFE_PANEL_ERROR);
@@ -404,16 +488,19 @@ export function createPanelSessionController(
     }
 
     if (
-      !isClearReconciliationCurrent(mutation) ||
+      !isClearReconciliationCurrent(mutation, request) ||
       !isActiveDataForMutationOrigin(active.data, mutation)
     ) {
       return;
     }
 
-    const readback = active.data.readback;
-    applyActiveData(active.data);
-    if (readback?.clearPending) {
-      pendingClearOperationId = readback.activeClearOperationId ?? stableOperationId;
+    if (!isClearReconciliationCurrent(mutation, request)) return;
+    const applied = applyActiveData(active.data);
+    if (!applied) {
+      pendingClearOperationId = stableOperationId;
+      return;
+    }
+    if (snapshot.clearPending) {
       return;
     }
 
@@ -432,27 +519,30 @@ export function createPanelSessionController(
     },
 
     async initialize() {
-      const active = await loadActive();
-      if (!active.ok) return;
+      const request = beginSnapshotRequest();
+      const active = await loadActive(request);
+      if (!active || !active.ok || !isSnapshotRequestCurrent(request)) return;
       applyActiveData(active.data);
     },
 
     async refreshActiveOrigin(preferredCaptureItemId) {
-      cancelDebounce();
-      const requestId = ++refreshRequestSequence;
-      const startStateRevision = stateRevision;
-      const startActivePage = snapshot.activePage;
       if (snapshot.recovery) {
         setStatus("error", "Resolve the unsaved intent before changing this session.");
         emit();
         return;
       }
+      const request = beginSnapshotRequest();
+      cancelDebounce();
+      const requestId = ++refreshRequestSequence;
+      const startStateRevision = stateRevision;
+      const startActivePage = snapshot.activePage;
 
       if (snapshot.intentDirty) {
         const oldTarget = getCurrentMutationTarget();
         const capturedIntent = snapshot.intent;
         const capturedRevision = intentRevision;
         const active = await options.client.getActive();
+        if (!isSnapshotRequestCurrent(request)) return;
         if (requestId !== refreshRequestSequence) return;
         if (stateRevision !== startStateRevision) return;
         if (!active.ok) {
@@ -468,6 +558,7 @@ export function createPanelSessionController(
           oldTarget.itemId,
           capturedIntent,
         );
+        if (!isSnapshotRequestCurrent(request)) return;
         if (requestId !== refreshRequestSequence) return;
         if (!isStillCurrentIntentTarget(oldTarget, capturedIntent, capturedRevision)) return;
         if (!response.ok) {
@@ -487,7 +578,8 @@ export function createPanelSessionController(
           return;
         }
         if (stateRevision !== startStateRevision) return;
-        const activeOrigin = active.data.origin ?? active.data.readback?.origin ?? null;
+        if (!isSnapshotRequestCurrent(request)) return;
+        const activeOrigin = active.data.origin ?? getAuthoritativeReadbackOrigin(active.data.readback);
         if (activeOrigin === oldTarget.origin) {
           const preferredItemId = activeCaptureItemId ?? (
             sameActivePage(startActivePage, active.data.activePage)
@@ -502,6 +594,7 @@ export function createPanelSessionController(
       }
 
       const active = await options.client.getActive();
+      if (!isSnapshotRequestCurrent(request)) return;
       if (requestId !== refreshRequestSequence || stateRevision !== startStateRevision) return;
       if (!active.ok) {
         setStatus("error", active.error);
@@ -514,6 +607,7 @@ export function createPanelSessionController(
           ? snapshot.selectedItemId
           : undefined
       );
+      if (!isSnapshotRequestCurrent(request)) return;
       applyActiveData(active.data, preferredItemId);
     },
 
@@ -528,7 +622,13 @@ export function createPanelSessionController(
         emit();
         return;
       }
-      if (!(await flushCurrentIntent())) return;
+      const currentItem = findPanelSessionItem(snapshot.file, itemId);
+      if (!currentItem || (currentItem.id === snapshot.selectedItemId && !snapshot.intentDirty)) {
+        return;
+      }
+      const request = beginSnapshotRequest();
+      if (!(await flushCurrentIntent(request))) return;
+      if (!isSnapshotRequestCurrent(request)) return;
       const item = findPanelSessionItem(snapshot.file, itemId);
       if (!item) return;
       snapshot = {
@@ -568,21 +668,31 @@ export function createPanelSessionController(
       cancelDebounce();
       debounceId = options.setTimeout(() => {
         debounceId = null;
-        void flushCurrentIntent();
+        void flushCurrentIntent(beginSnapshotRequest());
       }, DEBOUNCE_MS);
       emit();
     },
 
     flushIntent() {
-      return flushCurrentIntent();
+      if (!snapshot.intentDirty) return Promise.resolve(true);
+      if (snapshot.recovery) {
+        lastFlushBlockMessage = "Resolve the unsaved intent before changing this session.";
+        setStatus("error", lastFlushBlockMessage);
+        emit();
+        return Promise.resolve(false);
+      }
+      return flushCurrentIntent(beginSnapshotRequest());
     },
 
     async retryDirtyIntent() {
       const recovery = snapshot.recovery;
       if (!recovery) {
-        await flushCurrentIntent();
+        if (!snapshot.intentDirty) return;
+        const request = beginSnapshotRequest();
+        await flushCurrentIntent(request);
         return;
       }
+      const request = beginSnapshotRequest();
       setStatus("saving", "Saving recovered intent.");
       emit();
       const response = await options.client.updateIntent(
@@ -591,6 +701,7 @@ export function createPanelSessionController(
         recovery.itemId,
         recovery.intent,
       );
+      if (!isSnapshotRequestCurrent(request)) return;
       if (!response.ok) {
         setStatus("error", response.error);
         emit();
@@ -600,21 +711,27 @@ export function createPanelSessionController(
       snapshot = { ...snapshot, recovery: null, intentDirty: false };
       stateRevision += 1;
       if (recovery.pendingOrigin) {
-        const active = await loadActive();
-        if (active.ok) {
+        const active = await loadActive(request);
+        if (active?.ok && isSnapshotRequestCurrent(request)) {
           applyActiveData(active.data);
         }
         return;
       }
+      if (!isSnapshotRequestCurrent(request)) return;
       applyActive(response.data, recovery.itemId);
     },
 
     async discardDirtyIntent() {
+      if (!snapshot.recovery && !snapshot.intentDirty) return;
       cancelDebounce();
+      const request = beginSnapshotRequest();
       if (snapshot.recovery) {
         const recovery = snapshot.recovery;
-        const active = await loadActive();
-        const activeOrigin = active.ok ? active.data.origin ?? active.data.readback?.origin ?? null : null;
+        const active = await loadActive(request);
+        if (!active || !isSnapshotRequestCurrent(request)) return;
+        const activeOrigin = active.ok
+          ? active.data.origin ?? getAuthoritativeReadbackOrigin(active.data.readback)
+          : null;
         if (
           active.ok &&
           (!recovery.pendingOrigin || activeOrigin === recovery.pendingOrigin)
@@ -647,6 +764,80 @@ export function createPanelSessionController(
       emit();
     },
 
+    async setAnnotationLifecycle(itemId, nextState) {
+      if (snapshot.clearPending) {
+        setStatus("saving", "A session clear is already in progress.");
+        emit();
+        return;
+      }
+      if (snapshot.recovery) {
+        setStatus("error", "Resolve the unsaved intent before changing this session.");
+        emit();
+        return;
+      }
+      const currentItem = findPanelSessionItem(snapshot.file, itemId);
+      if (!currentItem || !("annotationId" in currentItem) ||
+          typeof currentItem.annotationId !== "string") {
+        setStatus("error", "Annotation identity is unavailable. Refresh and try again.");
+        emit();
+        return;
+      }
+      const expectedState: CaptureSessionAnnotationLifecycleStateV3 =
+        "annotationLifecycle" in currentItem
+          ? currentItem.annotationLifecycle.state
+          : "open";
+      if (expectedState === nextState) return;
+      const request = beginSnapshotRequest();
+      if (!(await flushCurrentIntent(request))) return;
+      if (!isSnapshotRequestCurrent(request)) return;
+      const target = getCurrentMutationTarget();
+      if (!target) return;
+      const mutation = beginMutation(
+        nextState === "resolved" ? "Resolving annotation." : "Reopening annotation.",
+        target,
+      );
+      const response = await options.client.updateAnnotationLifecycle(
+        target.origin,
+        target.epoch,
+        itemId,
+        currentItem.annotationId,
+        expectedState,
+        nextState,
+      );
+      const current = isMutationCurrent(mutation, request);
+      const pendingChanged = finishMutation(mutation);
+      if (!current) {
+        if (pendingChanged) emit();
+        return;
+      }
+      if (!response.ok) {
+        setStatus("error", response.error);
+        emit();
+        return;
+      }
+      const readback = parseAuthoritativeActiveSessionReadback(response.data);
+      const updatedItem = readback?.file && findPanelSessionItem(readback.file, itemId);
+      const exactLifecycle = updatedItem && "annotationId" in updatedItem &&
+        updatedItem.annotationId === currentItem.annotationId &&
+        "annotationLifecycle" in updatedItem &&
+        updatedItem.annotationLifecycle.state === nextState &&
+        (nextState === "resolved"
+          ? updatedItem.annotationLifecycle.resolvedAt === updatedItem.updatedAt
+          : updatedItem.annotationLifecycle.resolvedAt === null);
+      if (!readback || !exactLifecycle) {
+        setStatus("error", "Annotation state was not updated. Refresh and try again.");
+        emit();
+        return;
+      }
+      if (!isSnapshotRequestCurrent(request)) return;
+      if (!applyActive(readback, itemId) || snapshot.clearPending) return;
+      setStatus(
+        "success",
+        nextState === "resolved" ? "Annotation resolved." : "Annotation reopened.",
+      );
+      emit();
+    },
+
     async removeItem(itemId) {
       if (snapshot.clearPending) {
         setStatus("saving", "A session clear is already in progress.");
@@ -663,13 +854,16 @@ export function createPanelSessionController(
         emit();
         return;
       }
-      if (!(await flushCurrentIntent())) return;
+      if (!findPanelSessionItem(snapshot.file, itemId)) return;
+      const request = beginSnapshotRequest();
+      if (!(await flushCurrentIntent(request))) return;
+      if (!isSnapshotRequestCurrent(request)) return;
       const target = getCurrentMutationTarget();
       if (!target) return;
       const preferred = choosePostRemoveSelection(snapshot.file, snapshot.selectedItemId, itemId);
       const mutation = beginMutation("Removing session item.", target);
       const response = await options.client.removeItem(target.origin, target.epoch, itemId);
-      const current = isMutationCurrent(mutation);
+      const current = isMutationCurrent(mutation, request);
       const pendingChanged = finishMutation(mutation);
       if (!current) {
         if (pendingChanged) emit();
@@ -680,12 +874,24 @@ export function createPanelSessionController(
         emit();
         return;
       }
-      applyActive(response.data, preferred);
+      const readback = parseAuthoritativeActiveSessionReadback(response.data);
+      if (readback === null) {
+        setStatus("error", "Session clear status is invalid. Refresh and try again.");
+        emit();
+        return;
+      }
+      if (findPanelSessionItem(readback.file, itemId)) {
+        setStatus("error", "Session item was not removed. Refresh and try again.");
+        emit();
+        return;
+      }
+      if (!isSnapshotRequestCurrent(request)) return;
+      if (!applyActive(readback, preferred) || snapshot.clearPending) return;
       setStatus("success", "Session item removed.");
       emit();
     },
 
-    async clearSession(operationId) {
+    async clearSession(operationId, scope) {
       if (snapshot.recovery) {
         setStatus("error", "Resolve the unsaved intent before changing this session.");
         emit();
@@ -697,29 +903,30 @@ export function createPanelSessionController(
         return;
       }
       if (!snapshot.origin) return;
+      if (!isDurableClearOperationId(operationId)) {
+        setStatus("error", "Clear operation ID is invalid. Refresh and try again.");
+        emit();
+        return;
+      }
+      const request = beginSnapshotRequest();
       pendingClearOperationId = pendingClearOperationId ?? operationId;
       const stableOperationId = pendingClearOperationId;
       const target = { origin: snapshot.origin, epoch: snapshot.epoch };
       const mutation = beginMutation("Clearing capture session.", target);
-      const response = await callClear(snapshot.origin, snapshot.epoch, stableOperationId);
-      const current = isMutationCurrent(mutation);
+      const response = await callClear(snapshot.origin, snapshot.epoch, stableOperationId, scope);
+      const current = isMutationCurrent(mutation, request);
       const pendingChanged = finishMutation(mutation);
       if (!current) {
         if (pendingChanged) emit();
         return;
       }
       if (!response.ok) {
-        if (response.code === "CLEAR_IN_PROGRESS") {
-          snapshot = { ...snapshot, clearPending: true };
-          setStatus("saving", response.error);
-          emit();
-          return;
-        }
-        await reconcileClearFailure(response.error, stableOperationId, mutation);
+        await reconcileClearFailure(response.error, stableOperationId, mutation, request);
         return;
       }
-      pendingClearOperationId = null;
-      applyActive(response.data);
+      if (!isSnapshotRequestCurrent(request)) return;
+      if (!applyActive(response.data)) return;
+      if (snapshot.clearPending) return;
       setStatus("success", "Session cleared.");
       emit();
     },
@@ -734,8 +941,12 @@ export function createPanelSessionController(
       if (activeMutations.size > 0) {
         return invalidExport("Session mutation is still in progress. Try again after it finishes.");
       }
-      if (!(await flushCurrentIntent())) {
+      const request = beginSnapshotRequest();
+      if (!(await flushCurrentIntent(request))) {
         return invalidExport(lastFlushBlockMessage || snapshot.status.message);
+      }
+      if (!isSnapshotRequestCurrent(request)) {
+        return invalidExport("Panel state changed before export. Save again and retry.");
       }
       if (activeMutations.size > 0) {
         return invalidExport("Session mutation is still in progress. Try again after it finishes.");
@@ -744,13 +955,17 @@ export function createPanelSessionController(
       const renderedOrigin = snapshot.origin;
       const renderedEpoch = snapshot.epoch;
       const active = await options.client.getActive();
-      if (stateRevision !== exportStateRevision) {
+      if (!isSnapshotRequestCurrent(request) || stateRevision !== exportStateRevision) {
         return invalidExport("Panel state changed before export. Save again and retry.");
       }
       if (!active.ok) return invalidExport(active.error);
-      const readback = active.data.readback;
+      const readback = active.data.readback === null
+        ? null
+        : parseAuthoritativeActiveSessionReadback(active.data.readback);
       if (!readback || !readback.file) {
-        return invalidExport("No active capture session to export.");
+        return invalidExport(active.data.readback === null
+          ? "No active capture session to export."
+          : "Session clear status is invalid. Refresh the panel and try again.");
       }
       if (readback.clearPending) {
         return invalidExport("Session clear is still in progress. Try again after it finishes.");
@@ -761,7 +976,18 @@ export function createPanelSessionController(
       if (readback.epoch !== renderedEpoch) {
         return invalidExport("Capture session changed before export. Refresh the panel and try again.");
       }
-      applyActive(readback, snapshot.selectedItemId);
+      if (!isSnapshotRequestCurrent(request)) {
+        return invalidExport("Panel state changed before export. Save again and retry.");
+      }
+      if (!applyActive(
+        readback,
+        snapshot.selectedItemId,
+        snapshot.activePage,
+        snapshot.currentItemIds,
+        readActiveMetadataDiagnostics(active.data),
+      )) {
+        return invalidExport("Session clear status is invalid. Refresh the panel and try again.");
+      }
       return serializeCaptureSessionFile(readback.file);
     },
 
@@ -782,11 +1008,14 @@ function createEmptySnapshot(): PanelSessionSnapshot {
     activeSupported: false,
     activePage: null,
     clearPending: false,
+    activeClearOperationId: null,
     sessionMutationPending: false,
     origin: null,
     epoch: null,
     file: null,
     legacyRecord: null,
+    currentItemIds: null,
+    metadataDiagnostics: null,
     selectedItemId: null,
     viewMode: "agent_safe",
     intent: "",
@@ -799,8 +1028,88 @@ function createEmptySnapshot(): PanelSessionSnapshot {
   };
 }
 
+type AuthoritativeClearStatus =
+  | { clearPending: false; activeClearOperationId: null }
+  | { clearPending: true; activeClearOperationId: string };
+
+const ACTIVE_SESSION_READBACK_KEYS: readonly string[] = [
+  "origin",
+  "epoch",
+  "clearPending",
+  "activeClearOperationId",
+  "file",
+  "legacyRecord",
+];
+
+function parseAuthoritativeClearStatus(
+  readback: unknown,
+): AuthoritativeClearStatus | null {
+  const fields = readExactOwnDataProperties(readback, ACTIVE_SESSION_READBACK_KEYS);
+  return fields === null ? null : parseClearStatusFields(fields);
+}
+
+function parseAuthoritativeActiveSessionReadback(
+  readback: unknown,
+): ActiveSessionReadback | null {
+  const fields = readExactOwnDataProperties(readback, ACTIVE_SESSION_READBACK_KEYS);
+  if (fields === null) return null;
+  const clearStatus = parseClearStatusFields(fields);
+  if (clearStatus === null) return null;
+  return {
+    origin: fields.origin as ActiveSessionReadback["origin"],
+    epoch: fields.epoch as ActiveSessionReadback["epoch"],
+    clearPending: clearStatus.clearPending,
+    activeClearOperationId: clearStatus.activeClearOperationId,
+    file: fields.file as CaptureSessionFile | null,
+    legacyRecord: fields.legacyRecord as OriginCaptureRecord | null,
+  };
+}
+
+function parseClearStatusFields(fields: Record<string, unknown>): AuthoritativeClearStatus | null {
+  if (fields.clearPending === false && fields.activeClearOperationId === null) {
+    return { clearPending: false, activeClearOperationId: null };
+  }
+  return fields.clearPending === true && isDurableClearOperationId(fields.activeClearOperationId)
+    ? { clearPending: true, activeClearOperationId: fields.activeClearOperationId }
+    : null;
+}
+
+function getAuthoritativeReadbackOrigin(readback: ActiveSessionReadback | null): string | null {
+  return readback === null ? null : parseAuthoritativeActiveSessionReadback(readback)?.origin ?? null;
+}
+
+function readExactOwnDataProperties(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.length !== expectedKeys.length ||
+      ownKeys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+    ) {
+      return null;
+    }
+    const fields: Record<string, unknown> = {};
+    for (const key of expectedKeys) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return null;
+      fields[key] = descriptor.value;
+    }
+    return fields;
+  } catch {
+    return null;
+  }
+}
+
+function isDurableClearOperationId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 &&
+    value.trim() === value && !/\p{Cc}/u.test(value);
+}
+
 function chooseSelectedItemId(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   preferredItemId: string | null | undefined,
   activePage: ActivePageContext | null,
 ): string | null {
@@ -812,7 +1121,7 @@ function chooseSelectedItemId(
 }
 
 function choosePostRemoveSelection(
-  file: CaptureSessionFileV1 | null,
+  file: CaptureSessionFile | null,
   selectedItemId: string | null,
   removedItemId: string,
 ): string | null {
@@ -844,8 +1153,10 @@ function getActiveCaptureItemId(
   data: ActiveSessionCommandData,
   preferredCaptureItemId: string | undefined,
 ): string | undefined {
-  if (!preferredCaptureItemId || !data.activePage || !data.readback?.file) return undefined;
-  const item = findPanelSessionItem(data.readback.file, preferredCaptureItemId);
+  if (!preferredCaptureItemId || !data.activePage || data.readback === null) return undefined;
+  const readback = parseAuthoritativeActiveSessionReadback(data.readback);
+  if (!readback?.file) return undefined;
+  const item = findPanelSessionItem(readback.file, preferredCaptureItemId);
   if (!item) return undefined;
   const record = item.sourceRecord as OriginCaptureRecord;
   let pathname: string;
@@ -863,7 +1174,7 @@ function getActiveCaptureItemId(
 }
 
 function invalidExport(error: string): SessionFileResult<{
-  file: CaptureSessionFileV1;
+  file: CaptureSessionFile;
   text: string;
   byteLength: number;
 }> {
@@ -880,9 +1191,40 @@ function cloneSnapshot(snapshot: PanelSessionSnapshot): PanelSessionSnapshot {
     activePage: snapshot.activePage ? { ...snapshot.activePage } : null,
     file: cloneNullable(snapshot.file),
     legacyRecord: cloneNullable(snapshot.legacyRecord),
+    currentItemIds: snapshot.currentItemIds === null ? null : [...snapshot.currentItemIds],
+    metadataDiagnostics: cloneNullable(snapshot.metadataDiagnostics),
     status: { ...snapshot.status },
     recovery: snapshot.recovery ? { ...snapshot.recovery } : null,
   };
+}
+
+function readActiveMetadataDiagnostics(data: ActiveSessionCommandData): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(data, "metadataDiagnostics");
+    return descriptor && descriptor.enumerable && Object.hasOwn(descriptor, "value")
+      ? descriptor.value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateBoundMetadataDiagnostics(
+  value: unknown,
+  file: CaptureSessionFile | null,
+): MetadataDiagnosticsV1 | null {
+  if (!file || value === null || value === undefined) return null;
+  const validation = validateMetadataDiagnosticsV1(value);
+  if (!validation.ok) return null;
+  const diagnostics = validation.value;
+  return diagnostics.captureId === file.session.id &&
+      diagnostics.authority === "capture_time" &&
+      diagnostics.consent === "explicit_capture" &&
+      diagnostics.observedAt <= file.session.updatedAt &&
+      diagnostics.network.status === "not_requested" &&
+      diagnostics.console.status === "not_requested"
+    ? diagnostics
+    : null;
 }
 
 function cloneNullable<T>(value: T | null): T | null {

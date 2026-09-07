@@ -7,11 +7,23 @@ import {
   ENGLISH_MESSAGES,
   createUiAttachI18n,
   localizeDocument,
+  translateWidgetLifecycleMessage,
 } from "./i18n";
 
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 
 describe("extension localization", () => {
+  test("keeps lifecycle-only widget translations outside store-confirmed locale catalogs", () => {
+    expect(translateWidgetLifecycleMessage("zh-CN", "in_page_widget_mark_resolved"))
+      .toBe("标为已解决");
+    expect(translateWidgetLifecycleMessage("zh_CN", "in_page_widget_reopen_annotation"))
+      .toBe("重新打开批注 {label}");
+    expect(translateWidgetLifecycleMessage("en-US", "in_page_widget_mark_resolved"))
+      .toBeNull();
+    expect(translateWidgetLifecycleMessage("zh-CN", "unknown"))
+      .toBeNull();
+  });
+
   test("ships complete English and Simplified Chinese Chrome locale catalogs", async () => {
     const [english, simplifiedChinese] = await Promise.all([
       readCatalog("en"),
@@ -45,10 +57,14 @@ describe("extension localization", () => {
     expect(simplifiedChinese.session?.message).toBe("所选元素");
     expect(english.remove_selected_element?.message).toBe("Remove selected element");
     expect(simplifiedChinese.remove_selected_element?.message).toBe("移除所选元素");
+    expect(english.open_annotation_actions?.message).toBe("Open actions for annotation");
+    expect(simplifiedChinese.open_annotation_actions?.message).toBe("打开标注操作");
+    expect(english.annotation_details?.message).toBe("Show annotation details");
+    expect(simplifiedChinese.annotation_details?.message).toBe("查看标注详情");
     expect(english.describe_change_help?.message).toBe("Write the result you want.");
     expect(simplifiedChinese.describe_change_help?.message).toBe("写下你希望得到的结果。");
-    expect(english.layout_relationship_optional?.message).toBe("Task note shortcuts (optional)");
-    expect(simplifiedChinese.layout_relationship_optional?.message).toBe("任务说明快捷项（可选）");
+    expect(english.layout_relationship_optional?.message).toBe("Use a task note shortcut (optional)");
+    expect(simplifiedChinese.layout_relationship_optional?.message).toBe("使用任务说明快捷项（可选）");
     expect(english.copy_content_recovery?.message).toBe("Copy options");
     expect(simplifiedChinese.copy_content_recovery?.message).toBe("复制选项");
     expect(english.relation_help?.message).toBe(
@@ -69,10 +85,42 @@ describe("extension localization", () => {
     expect(simplifiedChinese.relation_applied_feedback?.message).toBe(
       "说明已写入 {source}；{reference} 仅作为参照。",
     );
+    expect(english.in_page_widget_create_invitation?.message).toBe(
+      "Create connection invitation",
+    );
+    expect(simplifiedChinese.in_page_widget_create_invitation?.message).toBe(
+      "创建连接邀请",
+    );
+    expect(english.in_page_widget_open_full_side_panel?.message).toBe(
+      "Open full side panel",
+    );
+    expect(simplifiedChinese.in_page_widget_open_full_side_panel?.message).toBe(
+      "打开完整侧栏",
+    );
+    expect(english.in_page_widget_disclosure_acknowledge_failed?.message).toBe(
+      "MeanThis could not save your acknowledgement. Try again.",
+    );
+    expect(simplifiedChinese.in_page_widget_disclosure_acknowledge_failed?.message).toBe(
+      "MeanThis 无法保存你的确认，请重试。",
+    );
+    expect(english.in_page_widget_copy_succeeded?.message).toContain("{count}");
+    expect(simplifiedChinese.in_page_widget_copy_succeeded?.message).toContain("{count}");
+    expect(english.in_page_widget_retry_clear?.message).toBe(
+      "Retry clearing page annotations",
+    );
+    expect(simplifiedChinese.in_page_widget_retry_clear?.message).toBe(
+      "重试清除页面标注",
+    );
+    expect(english.in_page_widget_clear_pending?.message).toBe(
+      "Clearing page annotations is still pending. Retry to confirm completion.",
+    );
+    expect(simplifiedChinese.in_page_widget_clear_pending?.message).toBe(
+      "页面标注仍在清除中。请重试以确认清除完成。",
+    );
     expect(english.relationship?.message).toBe("Shortcut");
     expect(simplifiedChinese.relationship?.message).toBe("快捷项");
-    expect(english.use_in_task_note?.message).toBe("Fill task note");
-    expect(simplifiedChinese.use_in_task_note?.message).toBe("填入任务说明");
+    expect(english.use_in_task_note?.message).toBe("Generate and fill");
+    expect(simplifiedChinese.use_in_task_note?.message).toBe("生成并填入");
     expect(english.view_exact_handoff?.message).toBe("Preview copy content");
     expect(simplifiedChinese.view_exact_handoff?.message).toBe("预览复制内容");
     expect(english.saved_review_capture_details?.message).toBe("Capture details");
@@ -91,6 +139,24 @@ describe("extension localization", () => {
     expect(simplifiedChinese.page_access_limit?.message).toBe(
       "侧栏无需关闭；在工具栏中选择 MeanThis 后，侧栏会自动刷新。",
     );
+    expect(english.page_access_enable_automatic?.message).toBe(
+      "Enable automatic access to web pages",
+    );
+    expect(simplifiedChinese.page_access_enable_automatic?.message).toBe(
+      "开启自动跟随普通网页",
+    );
+    expect(english.page_access_automatic_explanation?.message).toBe(
+      "Chrome will keep MeanThis authorized for ordinary HTTP(S) pages. MeanThis captures only after you choose Add elements or another explicit capture action.",
+    );
+    expect(simplifiedChinese.page_access_automatic_explanation?.message).toBe(
+      "Chrome 将持续授权 MeanThis 访问普通 HTTP(S) 页面；只有你选择“添加元素”或执行其他明确的捕捉操作后，MeanThis 才会捕捉内容。",
+    );
+    expect(english.page_access_automatic_denied?.message).toContain("not granted");
+    expect(simplifiedChinese.page_access_automatic_denied?.message).toContain("未授予");
+    expect(english.page_access_automatic_failed?.message).toContain("could not be enabled");
+    expect(simplifiedChinese.page_access_automatic_failed?.message).toContain("无法开启");
+    expect(english.page_access_automatic_not_ready?.message).toContain("still cannot access");
+    expect(simplifiedChinese.page_access_automatic_not_ready?.message).toContain("仍无法访问");
     expect(english.first_capture_disclosure_heading?.message).toBe(
       "Before your first capture",
     );
@@ -99,6 +165,9 @@ describe("extension localization", () => {
     );
     expect(english.first_capture_disclosure_data?.message).toBe(
       "A selected reference can include the page URL and title; the canonical top-page-to-selected-frame origin/path route; element structure, accessibility facts, labels, styles, bounds, locator and replay evidence, selected text (including hidden descendant text), nearby text, your task notes, optional source anchors, and iframe origin/path boundaries.",
+    );
+    expect(english.first_capture_disclosure_diagnostics?.message).toBe(
+      "If you turn on the optional one-shot private troubleshooting summary, it may include only replay result counts and coarse device, viewport, and touch classes. It does not include page content, addresses, exact dimensions, user agent, network or console data, screenshots, HAR, or debugger/CDP data. The option is off by default and applies only to the next capture. The private summary is copied only when you choose Copy summary; a connected local Agent may separately receive the disclosed coarse diagnostics.",
     );
     expect(english.first_capture_disclosure_local?.message).toBe(
       "Captures and session state stay in this browser profile. Copies leave only when you choose to copy, export, or connect the optional local agent bridge.",
@@ -124,6 +193,9 @@ describe("extension localization", () => {
     expect(simplifiedChinese.first_capture_disclosure_data?.message).toBe(
       "所选引用可能包含页面 URL 与标题、从顶层页面到所选 frame 的规范化 origin/path route，以及元素结构、无障碍事实、标签、样式、边界、定位与 replay 证据、所选文本（包括隐藏后代文本）、附近文本、你的任务说明、可选 source anchor 与 iframe origin/path boundary。",
     );
+    expect(simplifiedChinese.first_capture_disclosure_diagnostics?.message).toBe(
+      "如果你打开可选的一次性私有排障摘要，它只会包含 replay 结果计数及粗粒度的设备、视口和触控类别；不包含页面内容、地址、精确尺寸、user agent、网络或 console 数据、截图、HAR 或 debugger/CDP 数据。该选项默认关闭，只对下一次捕获有效。只有选择“复制摘要”才会复制私有摘要；已连接的本地 Agent 仍可能通过另行披露并授权的通道接收这些粗粒度诊断。",
+    );
     expect(simplifiedChinese.first_capture_disclosure_local?.message).toBe(
       "捕获内容和会话状态保存在此浏览器配置中；只有当你选择复制、导出或连接可选的本地 Agent 桥接时，副本才会离开。",
     );
@@ -141,6 +213,22 @@ describe("extension localization", () => {
     );
     expect(simplifiedChinese.not_now?.message).toBe("暂不");
     expect(simplifiedChinese.review_data_disclosure?.message).toBe("查看数据披露");
+    expect(english.in_page_widget_collect_basic_diagnostics_label?.message).toBe(
+      "Add a private troubleshooting summary to the next capture",
+    );
+    expect(english.in_page_widget_collect_basic_diagnostics_help?.message).toBe(
+      "Includes replay result counts and coarse device classes. No page content, address, exact size, user agent, network, console, screenshot, or HAR. Used once. This summary is copied only when you choose Copy summary; a connected local Agent may separately receive the disclosed coarse diagnostics.",
+    );
+    expect(simplifiedChinese.in_page_widget_collect_basic_diagnostics_label?.message).toBe(
+      "为下一次捕获添加私有排障摘要",
+    );
+    expect(simplifiedChinese.in_page_widget_collect_basic_diagnostics_help?.message).toBe(
+      "仅包含 replay 结果计数及粗粒度设备类别；不含页面内容、地址、精确尺寸、user agent、网络、console、截图或 HAR。仅使用一次；只有选择“复制摘要”才会复制。已连接的本地 Agent 仍可能通过另行披露并授权的 Agent-safe 通道接收这些粗粒度诊断。",
+    );
+    expect(english.in_page_widget_private_debug_summary_not_copied?.message)
+      .toBe("Not copied yet");
+    expect(simplifiedChinese.in_page_widget_private_debug_summary_not_copied?.message)
+      .toBe("尚未复制");
   });
 
   test("uses browser messages and safely fills named runtime values", () => {

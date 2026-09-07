@@ -1,6 +1,9 @@
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { EXTENSION_RUNTIME_FILES } from "./extension-release-artifact.mjs";
+import {
+  assertExtensionWidgetRuntime,
+  deriveExtensionRuntimeFiles,
+} from "./extension-release-artifact.mjs";
 import {
   extensionProfileOutDir,
   parseExtensionSurfaceProfile,
@@ -31,20 +34,26 @@ async function collectFiles(directory, prefix = "") {
 
 await collectFiles(distPath);
 artifactFiles.sort();
-if (JSON.stringify(artifactFiles) !== JSON.stringify(EXTENSION_RUNTIME_FILES)) {
+const widgetHtml = await readFile(new URL("widget.html", dist), "utf8");
+const extensionRuntimeFiles = deriveExtensionRuntimeFiles(widgetHtml);
+if (JSON.stringify(artifactFiles) !== JSON.stringify(extensionRuntimeFiles)) {
   throw new Error("Extension artifact file set is not stable");
 }
 
-for (const file of EXTENSION_RUNTIME_FILES) {
-  const bytes = await readFile(new URL(file, dist));
+const runtimeEntries = await Promise.all(extensionRuntimeFiles.map(async (file) => ({
+  path: file,
+  bytes: await readFile(new URL(file, dist)),
+})));
+for (const { bytes, path: file } of runtimeEntries) {
   if (bytes.length === 0) {
     throw new Error(`Extension artifact must be non-empty: ${file}`);
   }
 }
+assertExtensionWidgetRuntime(runtimeEntries);
 
 const manifest = JSON.parse(await readFile(new URL("manifest.json", dist), "utf8"));
 const javascriptSources = new Map(await Promise.all(
-  EXTENSION_RUNTIME_FILES.filter((file) => file.endsWith(".js")).map(async (file) => [
+  extensionRuntimeFiles.filter((file) => file.endsWith(".js")).map(async (file) => [
     file,
     await readFile(new URL(file, dist), "utf8"),
   ]),
@@ -105,6 +114,7 @@ const expectedPermissions = [
   "activeTab",
   "alarms",
   "contextMenus",
+  "nativeMessaging",
   "scripting",
   "sidePanel",
   "storage",
@@ -114,15 +124,33 @@ if (JSON.stringify([...(manifest.permissions ?? [])].sort()) !== JSON.stringify(
   throw new Error("Extension manifest permissions are not minimal and stable");
 }
 
-if ("host_permissions" in manifest || "content_scripts" in manifest) {
-  throw new Error("Extension manifest must not request unconditional host access");
+if ("content_scripts" in manifest) {
+  throw new Error("Extension manifest must not request static content access");
 }
 
-const expectedOptionalHostPermissions = [
-  "http://127.0.0.1/*",
-  "http://*/*",
-  "https://*/*",
-];
+if (surfaceProfile === "development") {
+  if (JSON.stringify(manifest.host_permissions) !== JSON.stringify([
+    "http://127.0.0.1/*",
+  ])) {
+    throw new Error("Development extension must pre-authorize only the isolated loopback QA owner");
+  }
+  if (JSON.stringify(manifest.externally_connectable) !== JSON.stringify({
+    matches: ["http://127.0.0.1/*"],
+  })) {
+    throw new Error("Development extension must restrict its reload control to loopback");
+  }
+} else {
+  if ("host_permissions" in manifest) {
+    throw new Error("Consumer extension must not request unconditional host access");
+  }
+  if ("externally_connectable" in manifest) {
+    throw new Error("Consumer extension must not expose the development reload control");
+  }
+}
+
+const expectedOptionalHostPermissions = surfaceProfile === "development"
+  ? ["http://*/*", "https://*/*"]
+  : ["http://127.0.0.1/*", "http://*/*", "https://*/*"];
 if (JSON.stringify(manifest.optional_host_permissions) !== JSON.stringify(expectedOptionalHostPermissions)) {
   throw new Error("Extension optional host access must remain explicit and user-scoped");
 }
@@ -133,6 +161,20 @@ if (!backgroundScript.includes("assets/content.js")) {
 
 if (manifest.side_panel?.default_path !== "panel.html") {
   throw new Error("Extension manifest side panel path is not stable");
+}
+
+const widgetResources = manifest.web_accessible_resources;
+if (!Array.isArray(widgetResources)
+  || widgetResources.length !== 1
+  || JSON.stringify(widgetResources[0]?.resources) !== JSON.stringify(["widget.html"])
+  || JSON.stringify(widgetResources[0]?.matches)
+    !== JSON.stringify(["http://*/*", "https://*/*"])
+  || widgetResources[0]?.use_dynamic_url !== false) {
+  throw new Error("Extension manifest widget surface is not stable");
+}
+
+if (!widgetHtml.includes('id="meanthis-widget-root"')) {
+  throw new Error("Extension widget artifact is missing its mount point");
 }
 
 if (JSON.stringify(manifest.options_ui) !== JSON.stringify({

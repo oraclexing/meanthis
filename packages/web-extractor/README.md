@@ -6,6 +6,8 @@ English | [中文](./README_zh.md)
 
 Deterministic browser-side DOM extraction for UI attachments. It captures element facts, accessibility metadata, bounds, computed styles, nearby context, locator candidates, and disclosure audit metadata. The default disclosure mode is `agent_safe`.
 
+Computed style capture is intentionally allowlisted. In addition to `display`, `color`, and `backgroundColor`, new attachments can carry bounded optional layout facts for position, box sizing, dimensions, spacing, flex alignment, overflow, typography, and border radius. Every optional value is limited to 512 UTF-8 bytes; unknown style keys fail validation. The extractor does not collect `cssText`, custom properties, background images or URLs, transition/animation values, or a full stylesheet. These values are capture-time browser observations, not verified source-CSS claims.
+
 When an instrumented element carries both `data-ui-attach-build-id` and `data-ui-attach-source-id`, the extractor copies them into an experimental opaque `sourceAnchor`. Partial or malformed anchors are omitted. The extractor never reads a path-bearing source attribute and never treats the page value as verified.
 
 ## Resource limits

@@ -1,12 +1,18 @@
 import {
   createAttachmentId,
   isUIAttachmentSourceAnchor,
+  UI_ATTACHMENT_COMPUTED_STYLE_FIELDS,
+  UI_ATTACHMENT_COMPUTED_STYLE_VALUE_MAX_BYTES,
   UI_ATTACHMENT_REPLAY_LOCATOR_MAX_CHARACTERS,
   UI_ATTACHMENT_SCHEMA_VERSION,
   UI_ATTACH_SOURCE_ANCHOR_SCHEMA_VERSION,
   UI_ATTACH_SOURCE_BUILD_ID_ATTRIBUTE,
+  UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+  UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
   UI_ATTACH_SOURCE_ID_ATTRIBUTE,
   type UIAttachment,
+  type UIAttachmentContentPart,
+  type UIAttachmentComputedStyleField,
   type UIAttachmentDisclosureMode,
   type UIAttachmentElement,
   type UIAttachmentLocator,
@@ -81,6 +87,10 @@ const MAX_PAGE_CONTROLLED_TEXT_CHARACTERS = 16_000;
 const MAX_ELEMENT_ATTRIBUTES = 256;
 const MAX_FORM_LABELS = 64;
 const MAX_ATTACHMENT_ID_TEXT_SEED_CHARACTERS = 128;
+const MAX_CONTENT_PARTS = 64;
+const MAX_CONTENT_PART_NODES = 512;
+const MAX_CONTENT_PART_BYTES = 16_000;
+const MIN_RESERVED_SEMANTIC_CONTENT_PART_BYTES = 64;
 const MAX_ATTACHMENT_SERIALIZED_CHARACTERS = 128 * 1024;
 const MAX_EMBEDDED_URL_STARTS = 64;
 const MAX_ARIA_LABEL_REFERENCES = 64;
@@ -145,6 +155,7 @@ export function extractElementAttachment(
       display: computed.display || null,
       color: computed.color || null,
       backgroundColor: computed.backgroundColor || null,
+      ...captureComputedStyleFacts(computed, audit),
     },
     context,
     locatorBundle: deriveLocatorBundleDisclosure(
@@ -169,11 +180,62 @@ function enforceAttachmentBudget(attachment: UIAttachment): UIAttachment {
   return attachment;
 }
 
+function captureComputedStyleFacts(
+  computed: CSSStyleDeclaration,
+  audit: DisclosureAudit,
+): Record<UIAttachmentComputedStyleField, string | null> {
+  const facts = {} as Record<UIAttachmentComputedStyleField, string | null>;
+  for (const field of UI_ATTACHMENT_COMPUTED_STYLE_FIELDS) {
+    const value = redactOptionalDisclosureValue(
+      computed[field] || null,
+      `style.${field}`,
+      audit,
+    );
+    facts[field] = typeof value === "string" &&
+        utf8ByteLength(value) <= UI_ATTACHMENT_COMPUTED_STYLE_VALUE_MAX_BYTES
+      ? value
+      : null;
+  }
+  return facts;
+}
+
+function deriveComputedStyleFactsDisclosure(
+  style: UIAttachment["style"],
+  audit: DisclosureAudit,
+): Partial<Record<UIAttachmentComputedStyleField, string | null>> {
+  const facts: Partial<Record<UIAttachmentComputedStyleField, string | null>> = {};
+  for (const field of UI_ATTACHMENT_COMPUTED_STYLE_FIELDS) {
+    if (!Object.hasOwn(style, field)) continue;
+    facts[field] = redactOptionalDisclosureValue(
+      style[field],
+      `style.${field}`,
+      audit,
+    ) ?? null;
+  }
+  return facts;
+}
+
 function extractOpaqueSourceAnchor(
   element: HTMLElement,
 ): UIAttachmentSourceAnchor | undefined {
-  const buildId = element.getAttribute(UI_ATTACH_SOURCE_BUILD_ID_ATTRIBUTE);
-  const sourceId = element.getAttribute(UI_ATTACH_SOURCE_ID_ATTRIBUTE);
+  return extractOpaqueSourceAnchorPair(
+    element,
+    UI_ATTACH_SOURCE_CALLSITE_BUILD_ID_ATTRIBUTE,
+    UI_ATTACH_SOURCE_CALLSITE_ID_ATTRIBUTE,
+  ) ?? extractOpaqueSourceAnchorPair(
+    element,
+    UI_ATTACH_SOURCE_BUILD_ID_ATTRIBUTE,
+    UI_ATTACH_SOURCE_ID_ATTRIBUTE,
+  );
+}
+
+function extractOpaqueSourceAnchorPair(
+  element: HTMLElement,
+  buildIdAttribute: string,
+  sourceIdAttribute: string,
+): UIAttachmentSourceAnchor | undefined {
+  const buildId = element.getAttribute(buildIdAttribute);
+  const sourceId = element.getAttribute(sourceIdAttribute);
   if (buildId === null || sourceId === null) return undefined;
 
   const candidate = {
@@ -211,6 +273,9 @@ export function deriveAttachmentDisclosure(
       "element.accessibleName",
       audit,
     ),
+    ...(attachment.element.contentParts === undefined
+      ? {}
+      : { contentParts: deriveContentPartsDisclosure(attachment.element.contentParts, audit) }),
   };
   const style = {
     display: redactOptionalDisclosureValue(
@@ -224,6 +289,7 @@ export function deriveAttachmentDisclosure(
       "style.backgroundColor",
       audit,
     ) ?? null,
+    ...deriveComputedStyleFactsDisclosure(attachment.style, audit),
   };
   const context = {
     ...attachment.context,
@@ -262,6 +328,19 @@ export function deriveAttachmentDisclosure(
     sourceMode,
     targetMode,
   );
+  const structurallyBudgetedAttachment =
+    structuralRedaction.attachment.element.contentParts === undefined
+      ? structuralRedaction.attachment
+      : {
+          ...structuralRedaction.attachment,
+          element: {
+            ...structuralRedaction.attachment.element,
+            contentParts: deriveContentPartsDisclosure(
+              structuralRedaction.attachment.element.contentParts,
+              audit,
+            ),
+          },
+        };
   carryKnownSensitiveFields(attachment.policy, audit);
   for (const field of structuralRedaction.redactedFields) {
     markSensitiveField(audit, field, true);
@@ -280,7 +359,7 @@ export function deriveAttachmentDisclosure(
   return {
     ok: true,
     attachment: enforceAttachmentBudget({
-      ...structuralRedaction.attachment,
+      ...structurallyBudgetedAttachment,
       policy: {
         ...capabilityPolicy,
         disclosureMode: derivedPolicy.disclosureMode,
@@ -307,6 +386,7 @@ function buildElement(
       role: redactText(inferRole(element), "element.role", audit),
       text: redactText(selectedText, "element.text", audit),
       accessibleName: accessibleName.value,
+      contentParts: collectElementContentParts(element, selectedText, audit),
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -318,6 +398,425 @@ function buildElement(
     },
     conciseRoleName: accessibleName.conciseRoleName,
   };
+}
+
+function collectElementContentParts(
+  root: HTMLElement,
+  selectedText: string,
+  audit: DisclosureAudit,
+): UIAttachmentContentPart[] {
+  type ContentPartCandidate = {
+    element: HTMLElement;
+    kind: UIAttachmentContentPart["kind"];
+    role: string | null;
+    textParts: string[];
+    textTruncated: boolean;
+    includeExplicitAccessibleName: boolean;
+  };
+  type SemanticContext = {
+    element: HTMLElement;
+    role: string | null;
+    currentCandidate: ContentPartCandidate | null;
+  };
+
+  const parts: UIAttachmentContentPart[] = [];
+  const candidates: ContentPartCandidate[] = [];
+  let visitedNodes = 0;
+  let remainingTextCharacters = MAX_PAGE_CONTROLLED_TEXT_CHARACTERS;
+  const byteBudget = { remaining: MAX_CONTENT_PART_BYTES };
+  const inlineFlowCache = new WeakMap<HTMLElement, boolean>();
+
+  const createCandidate = (
+    element: HTMLElement,
+    role: string | null,
+    includeExplicitAccessibleName: boolean,
+  ): ContentPartCandidate => {
+    const candidate = {
+      element,
+      kind: inferContentPartKind(element, role),
+      role,
+      textParts: [],
+      textTruncated: false,
+      includeExplicitAccessibleName,
+    };
+    candidates.push(candidate);
+    return candidate;
+  };
+
+  const appendCandidateText = (candidate: ContentPartCandidate, value: string) => {
+    if (!value || remainingTextCharacters <= 0) return;
+    const part = value.slice(0, remainingTextCharacters);
+    if (part) {
+      candidate.textParts.push(part);
+      remainingTextCharacters -= part.length;
+    }
+    if (part.length < value.length) candidate.textTruncated = true;
+  };
+
+  const addPart = (
+    candidate: ContentPartCandidate,
+    partByteBudget: { remaining: number },
+  ) => {
+    if (parts.length >= MAX_CONTENT_PARTS || partByteBudget.remaining <= 0) return;
+    const { element, kind, role } = candidate;
+    const text = getCandidateText(candidate);
+    const partText = takeBudgetedContentPartText(
+      text,
+      "element.text",
+      audit,
+      partByteBudget,
+    );
+    if (!partText && kind === "text") return;
+    const explicitAccessibleName = candidate.includeExplicitAccessibleName
+      ? getExplicitContentPartAccessibleName(element)
+      : null;
+    const accessibleName = takeBudgetedContentPartText(
+      explicitAccessibleName ?? partText,
+      "element.accessibleName",
+      audit,
+      partByteBudget,
+    );
+    if (!partText && !accessibleName) return;
+    parts.push({
+      kind,
+      tagName: element.tagName.toLowerCase(),
+      role: redactText(role, "element.role", audit),
+      text: partText,
+      accessibleName,
+    });
+  };
+
+  const visit = (
+    element: HTMLElement,
+    inheritedSemanticContext: SemanticContext | null,
+  ) => {
+    if (visitedNodes >= MAX_CONTENT_PART_NODES) return;
+    visitedNodes += 1;
+    if (isContentPartHidden(element)) return;
+
+    const role = inferRole(element);
+    const kind = inferContentPartKind(element, role);
+    let semanticContext = inheritedSemanticContext;
+    if (kind !== "text") {
+      if (inheritedSemanticContext) inheritedSemanticContext.currentCandidate = null;
+      semanticContext = {
+        element,
+        role,
+        currentCandidate: createCandidate(element, role, true),
+      };
+    }
+
+    let child: ChildNode | null = element.firstChild;
+    while (child) {
+      if (visitedNodes >= MAX_CONTENT_PART_NODES) break;
+      const nextSibling = child.nextSibling;
+      if (
+        child.nodeType === child.TEXT_NODE ||
+        child.nodeType === child.CDATA_SECTION_NODE
+      ) {
+        visitedNodes += 1;
+        const value = child.nodeValue ?? "";
+        if (value) {
+          let candidate: ContentPartCandidate;
+          if (semanticContext) {
+            candidate = semanticContext.currentCandidate ??= createCandidate(
+              semanticContext.element,
+              semanticContext.role,
+              false,
+            );
+          } else {
+            candidate = createCandidate(element, role, true);
+          }
+          appendCandidateText(candidate, value);
+        }
+      } else if (child instanceof HTMLElement) {
+        visit(child, semanticContext);
+      } else {
+        visitedNodes += 1;
+      }
+      child = nextSibling;
+    }
+  };
+
+  visit(root, null);
+
+  const coalescedCandidates: ContentPartCandidate[] = [];
+  for (const candidate of candidates) {
+    const previous = coalescedCandidates.at(-1);
+    if (previous && canCoalesceGenericText(previous, candidate)) {
+      previous.textParts.push(...candidate.textParts);
+      previous.textTruncated ||= candidate.textTruncated;
+      continue;
+    }
+    coalescedCandidates.push(candidate);
+  }
+
+  const meaningfulCandidates = coalescedCandidates.filter(hasPotentialContent);
+  const selectedCandidates = selectBoundedCandidates(meaningfulCandidates);
+  let laterSemanticCandidates = selectedCandidates.filter(
+    isPrioritySemanticCandidate,
+  ).length;
+  for (const candidate of selectedCandidates) {
+    if (parts.length >= MAX_CONTENT_PARTS || byteBudget.remaining <= 0) break;
+    if (isPrioritySemanticCandidate(candidate)) laterSemanticCandidates -= 1;
+    withReservedContentPartByteBudget(
+      byteBudget,
+      laterSemanticCandidates,
+      (partByteBudget) => addPart(candidate, partByteBudget),
+    );
+  }
+  if (parts.length === 0) {
+    const role = inferRole(root);
+    const fallback: ContentPartCandidate = {
+      element: root,
+      kind: inferContentPartKind(root, role),
+      role,
+      textParts: [selectedText],
+      textTruncated: false,
+      includeExplicitAccessibleName: true,
+    };
+    addPart(fallback, byteBudget);
+  }
+  return parts;
+
+  function getCandidateText(candidate: ContentPartCandidate): string {
+    const collectedText = candidate.textParts.join("");
+    return candidate.textTruncated
+      ? markTextTruncated(collectedText, MAX_PAGE_CONTROLLED_TEXT_CHARACTERS)
+      : collectedText;
+  }
+
+  function getExplicitContentPartAccessibleName(element: HTMLElement): string | null {
+    return element.getAttribute("aria-label") ??
+      element.getAttribute("alt") ??
+      getInputButtonAccessibleName(element) ??
+      element.getAttribute("title");
+  }
+
+  function hasPotentialContent(candidate: ContentPartCandidate): boolean {
+    if (normalizeText(getCandidateText(candidate))) return true;
+    return candidate.includeExplicitAccessibleName &&
+      hasExplicitContentPartAccessibleName(candidate.element);
+  }
+
+  function isPrioritySemanticCandidate(candidate: ContentPartCandidate): boolean {
+    return isSemanticContentPart(candidate.kind, candidate.role) ||
+      (
+        candidate.includeExplicitAccessibleName &&
+        hasExplicitContentPartAccessibleName(candidate.element)
+      );
+  }
+
+  function selectBoundedCandidates(
+    source: ContentPartCandidate[],
+  ): ContentPartCandidate[] {
+    if (source.length <= MAX_CONTENT_PARTS) return source;
+    const semanticCandidates = source.filter(isPrioritySemanticCandidate);
+    const selected = new Set(
+      semanticCandidates.slice(0, MAX_CONTENT_PARTS),
+    );
+    let remainingSlots = MAX_CONTENT_PARTS - selected.size;
+    if (remainingSlots > 0) {
+      for (const candidate of source) {
+        if (remainingSlots <= 0) break;
+        if (isPrioritySemanticCandidate(candidate)) continue;
+        selected.add(candidate);
+        remainingSlots -= 1;
+      }
+    }
+    return source.filter((candidate) => selected.has(candidate));
+  }
+
+  function canCoalesceGenericText(
+    left: ContentPartCandidate,
+    right: ContentPartCandidate,
+  ): boolean {
+    return isGenericTextCandidate(left) &&
+      isGenericTextCandidate(right) &&
+      sharesInlineFlow(left.element, right.element);
+  }
+
+  function isGenericTextCandidate(candidate: ContentPartCandidate): boolean {
+    return candidate.kind === "text" &&
+      candidate.role === null &&
+      !hasExplicitContentPartAccessibleName(candidate.element);
+  }
+
+  function hasExplicitContentPartAccessibleName(element: HTMLElement): boolean {
+    return normalizeText(getExplicitContentPartAccessibleName(element)) !== null;
+  }
+
+  function sharesInlineFlow(left: HTMLElement, right: HTMLElement): boolean {
+    if (left === right) return true;
+    const leftAncestors = new Set<HTMLElement>();
+    let current: HTMLElement | null = left;
+    let remainingDepth = MAX_CONTENT_PART_NODES;
+    while (current && remainingDepth > 0) {
+      leftAncestors.add(current);
+      if (current === root) break;
+      current = current.parentElement;
+      remainingDepth -= 1;
+    }
+    current = right;
+    remainingDepth = MAX_CONTENT_PART_NODES;
+    while (current && !leftAncestors.has(current) && remainingDepth > 0) {
+      if (current === root) return false;
+      current = current.parentElement;
+      remainingDepth -= 1;
+    }
+    if (!current) return false;
+    return hasInlinePath(left, current) && hasInlinePath(right, current);
+  }
+
+  function hasInlinePath(element: HTMLElement, ancestor: HTMLElement): boolean {
+    let current: HTMLElement | null = element;
+    while (current && current !== ancestor) {
+      if (!isInlineFlowElement(current)) return false;
+      current = current.parentElement;
+    }
+    return current === ancestor;
+  }
+
+  function isInlineFlowElement(element: HTMLElement): boolean {
+    const cached = inlineFlowCache.get(element);
+    if (cached !== undefined) return cached;
+    const display = element.ownerDocument.defaultView?.getComputedStyle(element).display ?? "";
+    const isInline = display === "contents" || display.startsWith("inline");
+    inlineFlowCache.set(element, isInline);
+    return isInline;
+  }
+}
+
+function isSemanticContentPart(
+  kind: UIAttachmentContentPart["kind"],
+  role: string | null,
+): boolean {
+  return kind !== "text" || role !== null;
+}
+
+function shouldReserveStoredContentPartBytes(part: UIAttachmentContentPart): boolean {
+  return isSemanticContentPart(part.kind, part.role) || part.accessibleName !== null;
+}
+
+function withReservedContentPartByteBudget(
+  globalBudget: { remaining: number },
+  laterSemanticCandidates: number,
+  disclose: (localBudget: { remaining: number }) => void,
+): void {
+  const reservedBytes = Math.min(
+    globalBudget.remaining,
+    laterSemanticCandidates * MIN_RESERVED_SEMANTIC_CONTENT_PART_BYTES,
+  );
+  const availableBytes = globalBudget.remaining - reservedBytes;
+  if (availableBytes <= 0) return;
+  const localBudget = { remaining: availableBytes };
+  disclose(localBudget);
+  globalBudget.remaining -= availableBytes - localBudget.remaining;
+}
+
+function inferContentPartKind(
+  element: HTMLElement,
+  role: string | null,
+): UIAttachmentContentPart["kind"] {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "time") return "time";
+  if (tagName === "a" || role === "link") return "link";
+  if (tagName === "button" || role === "button") return "button";
+  if (tagName === "img" || role === "img") return "image";
+  if (
+    ["input", "textarea", "select"].includes(tagName) ||
+    ["checkbox", "radio", "slider", "searchbox", "textbox", "combobox", "switch"].includes(
+      role ?? "",
+    )
+  ) return "form_control";
+  return "text";
+}
+
+function isContentPartHidden(element: HTMLElement): boolean {
+  if (element.hidden || element.getAttribute("aria-hidden") === "true") return true;
+  const computed = element.ownerDocument.defaultView?.getComputedStyle(element);
+  return computed?.display === "none" || computed?.visibility === "hidden";
+}
+
+function deriveContentPartsDisclosure(
+  parts: UIAttachmentContentPart[],
+  audit: DisclosureAudit,
+): UIAttachmentContentPart[] {
+  const disclosedParts: UIAttachmentContentPart[] = [];
+  const byteBudget = { remaining: MAX_CONTENT_PART_BYTES };
+  const boundedParts = parts.slice(0, MAX_CONTENT_PARTS);
+  let laterSemanticParts = boundedParts.filter(shouldReserveStoredContentPartBytes).length;
+  for (const part of boundedParts) {
+    if (byteBudget.remaining <= 0) break;
+    if (shouldReserveStoredContentPartBytes(part)) laterSemanticParts -= 1;
+    let text: string | null = null;
+    let accessibleName: string | null = null;
+    withReservedContentPartByteBudget(
+      byteBudget,
+      laterSemanticParts,
+      (partByteBudget) => {
+        text = takeBudgetedContentPartText(
+          part.text,
+          "element.text",
+          audit,
+          partByteBudget,
+        );
+        accessibleName = takeBudgetedContentPartText(
+          part.accessibleName,
+          "element.accessibleName",
+          audit,
+          partByteBudget,
+        );
+      },
+    );
+    if (!text && !accessibleName) continue;
+    disclosedParts.push({
+      ...part,
+      tagName: redactDisclosureValue(part.tagName, "element.tagName", audit),
+      role: redactText(part.role, "element.role", audit),
+      text,
+      accessibleName,
+    });
+  }
+  return disclosedParts;
+}
+
+function takeBudgetedContentPartText(
+  value: string | null,
+  field: "element.text" | "element.accessibleName",
+  audit: DisclosureAudit,
+  byteBudget: { remaining: number },
+): string | null {
+  if (!value || byteBudget.remaining <= 0) return null;
+  if (
+    (
+      value.length > MAX_PAGE_CONTROLLED_TEXT_CHARACTERS ||
+      isTruncatedText(value)
+    ) &&
+    shouldRedactText(audit.disclosureMode)
+  ) {
+    markSensitiveField(audit, field, true);
+    const boundedRedaction = limitTextToUtf8BytesWithMarker(
+      "[redacted:declared-sensitive]",
+      byteBudget.remaining,
+    );
+    const consumedBytes = utf8ByteLength(boundedRedaction);
+    if (consumedBytes <= 0) return null;
+    byteBudget.remaining -= consumedBytes;
+    return boundedRedaction;
+  }
+  const normalized = normalizeText(value);
+  if (!normalized) return null;
+
+  // `normalizeText` applies a fixed, page-controlled input limit. Redact that complete
+  // bounded value before applying the independently shrinking output byte budget.
+  const disclosed = redactText(normalized, field, audit);
+  if (!disclosed) return null;
+  const bounded = limitTextToUtf8BytesWithMarker(disclosed, byteBudget.remaining);
+  const consumedBytes = utf8ByteLength(bounded);
+  if (consumedBytes <= 0) return null;
+  byteBudget.remaining -= consumedBytes;
+  return bounded;
 }
 
 function inferRole(element: HTMLElement): string | null {
@@ -1055,6 +1554,40 @@ function limitLocatorValue(value: string | null): string | null {
 
 function limitTextWithMarker(value: string, maxCharacters: number): string {
   return value.length > maxCharacters ? markTextTruncated(value, maxCharacters) : value;
+}
+
+function limitTextToUtf8BytesWithMarker(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const markerBytes = utf8ByteLength(TRUNCATION_MARKER);
+  const contentBytes = Math.max(0, maxBytes - markerBytes);
+  let consumedBytes = 0;
+  let markedEnd = 0;
+  for (const character of value) {
+    const characterBytes = utf8CodePointByteLength(character.codePointAt(0) ?? 0);
+    if (consumedBytes + characterBytes > maxBytes) {
+      return markerBytes <= maxBytes
+        ? `${value.slice(0, markedEnd)}${TRUNCATION_MARKER}`
+        : TRUNCATION_MARKER.slice(0, maxBytes);
+    }
+    consumedBytes += characterBytes;
+    if (consumedBytes <= contentBytes) markedEnd += character.length;
+  }
+  return value;
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const character of value) {
+    bytes += utf8CodePointByteLength(character.codePointAt(0) ?? 0);
+  }
+  return bytes;
+}
+
+function utf8CodePointByteLength(codePoint: number): number {
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
 }
 
 function markTextTruncated(value: string, maxCharacters: number): string {
@@ -1985,6 +2518,7 @@ function redactKnownSensitiveAttachmentFields(
     "style.display",
     "style.color",
     "style.backgroundColor",
+    ...UI_ATTACHMENT_COMPUTED_STYLE_FIELDS.map((field) => `style.${field}`),
     "context.parentSummary",
     "context.nearbyText",
     "context.selectorHints",
@@ -2018,11 +2552,27 @@ function redactKnownSensitiveAttachmentFields(
         role: redactScalar(attachment.element.role, "element.role"),
         text: redactScalar(attachment.element.text, "element.text"),
         accessibleName: redactScalar(attachment.element.accessibleName, "element.accessibleName"),
+        ...(attachment.element.contentParts === undefined
+          ? {}
+          : {
+              contentParts: attachment.element.contentParts.map((part) => ({
+                ...part,
+                tagName: redactScalar(part.tagName, "element.tagName") ?? "",
+                role: redactScalar(part.role, "element.role"),
+                text: redactScalar(part.text, "element.text"),
+                accessibleName: redactScalar(part.accessibleName, "element.accessibleName"),
+              })),
+            }),
       },
       style: {
         display: redactScalar(attachment.style.display, "style.display"),
         color: redactScalar(attachment.style.color, "style.color"),
         backgroundColor: redactScalar(attachment.style.backgroundColor, "style.backgroundColor"),
+        ...Object.fromEntries(UI_ATTACHMENT_COMPUTED_STYLE_FIELDS.flatMap((field) =>
+          Object.hasOwn(attachment.style, field)
+            ? [[field, redactScalar(attachment.style[field] ?? null, `style.${field}`)]]
+            : []
+        )),
       },
       context: {
         ...attachment.context,
@@ -2121,6 +2671,10 @@ function redactRecognizedSensitiveTextInternal(value: string, redactUrlUserInfo:
   );
   redacted = redacted.replace(
     /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+    "[redacted:secret]",
+  );
+  redacted = redacted.replace(
+    /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[opusr]_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[A-Za-z0-9_-]{35}|npm_[A-Za-z0-9]{36})(?![A-Za-z0-9_-])/g,
     "[redacted:secret]",
   );
   redacted = redacted.replace(

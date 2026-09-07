@@ -33,6 +33,11 @@ async function readManifest(path: string) {
     minimum_chrome_version?: string;
     name?: string;
     permissions?: string[];
+    web_accessible_resources?: Array<{
+      resources?: string[];
+      matches?: string[];
+      use_dynamic_url?: boolean;
+    }>;
   };
 }
 
@@ -83,6 +88,7 @@ describe("extension package policy", () => {
       "activeTab",
       "alarms",
       "contextMenus",
+      "nativeMessaging",
       "scripting",
       "sidePanel",
       "storage",
@@ -96,6 +102,20 @@ describe("extension package policy", () => {
     ]);
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.content_scripts).toBeUndefined();
+  });
+
+  test("exposes only the widget document while its module stays extension-owned", async () => {
+    const manifest = await readManifest(
+      resolve(workspaceRoot, "apps/extension-mv3/public/manifest.json"),
+    );
+
+    expect(manifest.web_accessible_resources).toEqual([{
+      resources: ["widget.html"],
+      matches: ["http://*/*", "https://*/*"],
+      use_dynamic_url: false,
+    }]);
+    expect(manifest.web_accessible_resources?.flatMap((entry) => entry.resources ?? []))
+      .not.toContain("assets/widget.js");
   });
 
   test("ships the product identity and complete Chromium icon set", async () => {
@@ -146,7 +166,7 @@ describe("extension package policy", () => {
     expect(source128.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
     expect(source128.readUInt32BE(16)).toBe(128);
     expect(source128.readUInt32BE(20)).toBe(128);
-    expect(pngAlphaBounds(source128)).toEqual({ minX: 16, minY: 16, maxX: 111, maxY: 111 });
+    expect(pngAlphaBounds(source128)).toEqual({ minX: 3, minY: 17, maxX: 124, maxY: 118 });
     expect(source32).toContain("redrawn for 32 pixels");
     expect(source16).toContain("drawn directly on a 16 pixel grid");
     for (const opticalMaster of [source32, source16]) {
@@ -156,14 +176,14 @@ describe("extension package policy", () => {
     expect(pngAlphaBounds(icon)).toEqual({ minX: 0, minY: 0, maxX: 15, maxY: 15 });
   });
 
-  test("keeps toolbar icons full-canvas and the 128px store icon in its 96px safe area", async () => {
+  test("keeps toolbar icons horizontally edge-filling and enlarges the 128px store icon without clipping", async () => {
     const [icon32, icon48, icon128] = await Promise.all([32, 48, 128].map((size) => readFile(
       resolve(workspaceRoot, `apps/extension-mv3/public/icons/meanthis-${size}.png`),
     )));
 
-    expect(pngAlphaBounds(icon32)).toEqual({ minX: 0, minY: 0, maxX: 31, maxY: 31 });
-    expect(pngAlphaBounds(icon48)).toEqual({ minX: 0, minY: 0, maxX: 47, maxY: 47 });
-    expect(pngAlphaBounds(icon128)).toEqual({ minX: 16, minY: 16, maxX: 111, maxY: 111 });
+    expect(pngAlphaBounds(icon32)).toEqual({ minX: 0, minY: 1, maxX: 31, maxY: 30 });
+    expect(pngAlphaBounds(icon48)).toEqual({ minX: 0, minY: 3, maxX: 47, maxY: 45 });
+    expect(pngAlphaBounds(icon128)).toEqual({ minX: 3, minY: 17, maxX: 124, maxY: 118 });
   });
 
   test("restricts local storage before controller registration and keeps content storage-free", async () => {
@@ -210,6 +230,7 @@ describe("extension package policy", () => {
       "activeTab",
       "alarms",
       "contextMenus",
+      "nativeMessaging",
       "scripting",
       "sidePanel",
       "storage",
@@ -218,8 +239,8 @@ describe("extension package policy", () => {
       expect(privacy).toContain(`\`${permission}\``);
       expect(privacyZh).toContain(`\`${permission}\``);
     }
-    expect(privacy.match(/^## /gm)).toHaveLength(9);
-    expect(privacyZh.match(/^## /gm)).toHaveLength(9);
+    expect(privacy.match(/^## /gm)).toHaveLength(10);
+    expect(privacyZh.match(/^## /gm)).toHaveLength(10);
     expect(privacy).toContain("## Chrome Web Store Limited Use");
     expect(privacyZh).toContain("## Chrome Web Store Limited Use");
     expect(privacy).toContain("complies with the [Chrome Web Store User Data Policy]");

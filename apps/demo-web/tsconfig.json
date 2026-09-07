@@ -7,12 +7,7 @@
     "outDir": "dist"
   },
   "references": [
-    { "path": "../../packages/schema" },
-    { "path": "../../packages/prompt" },
-    { "path": "../../packages/hub-core" },
-    { "path": "../../packages/web-extractor" },
-    { "path": "../../packages/web-picker" },
-    { "path": "../../packages/replay" }
+    { "path": "../../packages/web-picker" }
   ],
-  "include": ["src/main.ts", "src/replay-dom.ts", "src/ui-attach-runtime.ts"]
+  "include": ["src/main.ts"]
 }

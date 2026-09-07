@@ -8,11 +8,17 @@ import {
 describe("createCurrentOverlayRestoreItem", () => {
   test("creates a bounded replay descriptor only for the current canonical route", () => {
     const record = createRecord();
+    record.intent = "Current marker note";
+    record.attachment.selectionPoint = {
+      kind: "element_relative_pointer",
+      xRatio: 0.25,
+      yRatio: 0.75,
+    };
     const receipt = {
       origin: "https://app.example.test",
       epoch: "epoch-1",
       itemId: "att_save",
-      label: "A",
+      annotationLabel: "1",
     };
 
     expect(createCurrentOverlayRestoreItem(
@@ -22,7 +28,9 @@ describe("createCurrentOverlayRestoreItem", () => {
     )).toEqual({
       itemId: "att_save",
       attachmentId: "att_save",
-      label: "A",
+      label: "1",
+      taskNote: "Current marker note",
+      anchor: { xRatio: 0.25, yRatio: 0.75 },
       locators: [{
         strategy: "playwright.testId",
         value: 'page.getByTestId("save")',
@@ -84,7 +92,7 @@ describe("createCurrentOverlayRestoreItem", () => {
         origin: "https://app.example.test",
         epoch: "epoch-1",
         itemId: "att_save",
-        label: "A",
+        annotationLabel: "1",
       },
       "https://app.example.test/settings",
     )?.locators).toEqual([
@@ -136,7 +144,7 @@ describe("createCurrentOverlayRestoreItem", () => {
         origin: "https://app.example.test",
         epoch: "epoch-1",
         itemId: "att_save",
-        label: "A",
+        annotationLabel: "1",
       },
       "https://app.example.test/alice/status/1952521961831320123",
     )?.locators).toEqual([{
@@ -175,7 +183,7 @@ describe("createCurrentOverlayRestoreItem", () => {
         origin: "https://app.example.test",
         epoch: "epoch-1",
         itemId: "att_save",
-        label: "A",
+        annotationLabel: "1",
       },
       "https://app.example.test/items/stable-item",
     )).toBeNull();
@@ -221,7 +229,7 @@ describe("createCurrentOverlayRestoreItem", () => {
         origin: "https://app.example.test",
         epoch: "epoch-1",
         itemId: "att_save",
-        label: "A",
+        annotationLabel: "1",
       },
       "https://app.example.test/settings",
     )?.locators).toEqual([roleLocator]);
@@ -242,7 +250,7 @@ describe("createCurrentOverlayRestoreItem", () => {
       origin: "https://app.example.test",
       epoch: "epoch-1",
       itemId: "att_save",
-      label: "A",
+      annotationLabel: "1",
     };
     const target = { isConnected: true } as HTMLElement;
     const trackCurrentRoute = vi.fn();
@@ -278,7 +286,7 @@ describe("createCurrentOverlayRestoreItem", () => {
       origin: "https://app.example.test",
       epoch: "epoch-1",
       itemId: "att_save",
-      label: "A",
+      annotationLabel: "1",
     };
     const target = { isConnected: true } as HTMLElement;
     const trackCurrentRoute = vi.fn();

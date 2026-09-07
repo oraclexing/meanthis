@@ -14,21 +14,51 @@ export const UI_ATTACH_SOURCE_RESOLUTION_KIND = "ui-attach.source-resolution" as
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
 const INTRINSIC_TAG_NAME = /^[a-z][A-Za-z0-9-]*$/;
+const COMPONENT_IDENTIFIER = /^[A-Z][A-Za-z0-9_$]*$/;
 const MAX_SOURCE_MAP_ENTRIES = 100_000;
 const MAX_SIDECAR_BYTES = 32 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_CANDIDATES = 5;
 const MAX_WORKSPACE_ROOTS = 32;
+const MAX_COMPONENT_BREADCRUMB_FRAMES = 3;
 
-export interface UIAttachSourceMapEntry {
+export interface UIAttachComponentBreadcrumbFrame {
+  path: string;
+  line: number;
+  column: number;
+  componentName: string;
+}
+
+interface UIAttachSourceMapEntryBase {
   sourceId: string;
   path: string;
   line: number;
   column: number;
-  tagName: string;
   componentName: string | null;
+  componentBreadcrumb?: UIAttachComponentBreadcrumbFrame[];
   contentHash: string;
 }
+
+export interface UIAttachIntrinsicSourceMapEntry extends UIAttachSourceMapEntryBase {
+  tagName: string;
+  callsiteKind?: never;
+  callsiteName?: never;
+}
+
+export interface UIAttachConfiguredJsxComponentSourceMapEntry
+  extends UIAttachSourceMapEntryBase {
+  tagName?: never;
+  callsiteKind: "configured_jsx_component";
+  callsiteName: string;
+}
+
+export type UIAttachSourceMapEntry =
+  | UIAttachIntrinsicSourceMapEntry
+  | UIAttachConfiguredJsxComponentSourceMapEntry;
+
+export type UIAttachSourceLocation =
+  | Omit<UIAttachIntrinsicSourceMapEntry, "sourceId" | "contentHash">
+  | Omit<UIAttachConfiguredJsxComponentSourceMapEntry, "sourceId" | "contentHash">;
 
 export interface UIAttachSourceMapSidecarV1 {
   schemaVersion: typeof UI_ATTACH_SOURCE_MAP_SIDECAR_SCHEMA_VERSION;
@@ -71,7 +101,7 @@ export type UIAttachSourceResolutionV1 =
       status: "verified";
       buildId: string;
       sourceId: string;
-      location: Omit<UIAttachSourceMapEntry, "sourceId" | "contentHash">;
+      location: UIAttachSourceLocation;
     }
   | {
       schemaVersion: typeof UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION;
@@ -86,6 +116,109 @@ export type UIAttachSourceResolutionV1 =
       status: "unavailable";
       reason: UIAttachSourceExactFailureReason;
     };
+
+const UI_ATTACH_SOURCE_EXACT_FAILURE_REASONS = new Set<UIAttachSourceExactFailureReason>([
+  "source_anchor_missing",
+  "source_anchor_invalid",
+  "workspace_unavailable",
+  "workspace_limit_exceeded",
+  "workspace_no_match",
+  "workspace_ambiguous",
+  "sidecar_missing",
+  "sidecar_unreadable",
+  "sidecar_outside_workspace",
+  "sidecar_too_large",
+  "sidecar_invalid",
+  "build_mismatch",
+  "source_id_not_found",
+  "source_path_outside_workspace",
+  "source_file_missing",
+  "source_file_unreadable",
+  "source_file_too_large",
+  "source_hash_mismatch",
+]);
+
+export function normalizeUIAttachSourceResolutionV1(
+  value: unknown,
+): UIAttachSourceResolutionV1 | null {
+  try {
+    const verified = readExactOwnDataFields(value, [
+      "schemaVersion",
+      "kind",
+      "status",
+      "buildId",
+      "sourceId",
+      "location",
+    ]);
+    if (
+      verified !== null &&
+      verified.schemaVersion === UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION &&
+      verified.kind === UI_ATTACH_SOURCE_RESOLUTION_KIND &&
+      verified.status === "verified" &&
+      isOpaqueId(verified.buildId) &&
+      isOpaqueId(verified.sourceId)
+    ) {
+      const location = normalizeSourceLocation(verified.location);
+      if (location !== null) {
+        return {
+          schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
+          kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
+          status: "verified",
+          buildId: verified.buildId,
+          sourceId: verified.sourceId,
+          location,
+        };
+      }
+    }
+
+    const candidate = readExactOwnDataFields(value, [
+      "schemaVersion",
+      "kind",
+      "status",
+      "exactFailureReason",
+      "candidates",
+    ]);
+    if (
+      candidate !== null &&
+      candidate.schemaVersion === UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION &&
+      candidate.kind === UI_ATTACH_SOURCE_RESOLUTION_KIND &&
+      candidate.status === "candidate" &&
+      isSourceExactFailureReason(candidate.exactFailureReason)
+    ) {
+      const candidates = normalizeSourceResolutionCandidates(candidate.candidates);
+      if (candidates !== null) {
+        return {
+          schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
+          kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
+          status: "candidate",
+          exactFailureReason: candidate.exactFailureReason,
+          candidates,
+        };
+      }
+    }
+
+    const unavailable = readExactOwnDataFields(value, [
+      "schemaVersion",
+      "kind",
+      "status",
+      "reason",
+    ]);
+    return unavailable !== null &&
+      unavailable.schemaVersion === UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION &&
+      unavailable.kind === UI_ATTACH_SOURCE_RESOLUTION_KIND &&
+      unavailable.status === "unavailable" &&
+      isSourceExactFailureReason(unavailable.reason)
+      ? {
+          schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
+          kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
+          status: "unavailable",
+          reason: unavailable.reason,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface ResolveUIAttachSourceOptions {
   workspaceRoot: string;
@@ -112,7 +245,12 @@ export function createSourceMapSidecar(
     throw new Error(`MeanThis source sidecar exceeded ${MAX_SOURCE_MAP_ENTRIES} entries.`);
   }
   const entries = mappings
-    .map((entry) => ({ ...entry }))
+    .map((entry) => entry.componentBreadcrumb === undefined
+      ? { ...entry }
+      : {
+          ...entry,
+          componentBreadcrumb: entry.componentBreadcrumb.map((frame) => ({ ...frame })),
+        })
     .sort(compareSourceMapEntries);
   const sidecar: UIAttachSourceMapSidecarV1 = {
     schemaVersion: UI_ATTACH_SOURCE_MAP_SIDECAR_SCHEMA_VERSION,
@@ -210,18 +348,13 @@ export async function resolveUIAttachSource(
     return fallback("source_hash_mismatch", candidates);
   }
 
-  const {
-    sourceId: _entrySourceId,
-    contentHash: _entryContentHash,
-    ...location
-  } = entry;
   return {
     schemaVersion: UI_ATTACH_SOURCE_RESOLUTION_SCHEMA_VERSION,
     kind: UI_ATTACH_SOURCE_RESOLUTION_KIND,
     status: "verified",
     buildId: anchor.buildId,
     sourceId: anchor.sourceId,
-    location,
+    location: toSourceLocation(entry),
   };
 }
 
@@ -373,28 +506,255 @@ function isCandidate(value: unknown): value is UIAttachSourceCandidate {
 }
 
 function isSourceMapEntry(value: unknown): value is UIAttachSourceMapEntry {
-  return (
-    hasExactKeys(value, [
+  if (!isRecord(value) || !isValidSourceMapEntryBase(value)) return false;
+  if ("callsiteKind" in value) {
+    return hasExactKeys(value, [
       "sourceId",
       "path",
       "line",
       "column",
-      "tagName",
+      "callsiteKind",
+      "callsiteName",
       "componentName",
       "contentHash",
-    ]) &&
-    isOpaqueId(value.sourceId) &&
+    ], ["componentBreadcrumb"]) &&
+      value.callsiteKind === "configured_jsx_component" &&
+      typeof value.callsiteName === "string" &&
+      COMPONENT_IDENTIFIER.test(value.callsiteName);
+  }
+  return hasExactKeys(value, [
+    "sourceId",
+    "path",
+    "line",
+    "column",
+    "tagName",
+    "componentName",
+    "contentHash",
+  ], ["componentBreadcrumb"]) &&
+    typeof value.tagName === "string" &&
+    INTRINSIC_TAG_NAME.test(value.tagName);
+}
+
+function isValidSourceMapEntryBase(
+  value: Record<string, unknown>,
+): boolean {
+  return isOpaqueId(value.sourceId) &&
     isSafeRelativePath(value.path) &&
     isPositiveSafeInteger(value.line) &&
     isPositiveSafeInteger(value.column) &&
-    typeof value.tagName === "string" &&
-    INTRINSIC_TAG_NAME.test(value.tagName) &&
     (value.componentName === null || (
       typeof value.componentName === "string" &&
-      /^[A-Z][A-Za-z0-9_$]*$/.test(value.componentName)
+      COMPONENT_IDENTIFIER.test(value.componentName)
     )) &&
-    isOpaqueId(value.contentHash)
+    (!("componentBreadcrumb" in value) || isComponentBreadcrumb(
+      value.componentBreadcrumb,
+      value.path,
+    )) &&
+    isOpaqueId(value.contentHash);
+}
+
+function isComponentBreadcrumb(
+  value: unknown,
+  entryPath: string,
+): value is UIAttachComponentBreadcrumbFrame[] {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= MAX_COMPONENT_BREADCRUMB_FRAMES &&
+    value.every((frame) =>
+      hasExactKeys(frame, ["path", "line", "column", "componentName"]) &&
+      isSafeRelativePath(frame.path) &&
+      frame.path === entryPath &&
+      isPositiveSafeInteger(frame.line) &&
+      isPositiveSafeInteger(frame.column) &&
+      typeof frame.componentName === "string" &&
+      COMPONENT_IDENTIFIER.test(frame.componentName)
+    );
+}
+
+function normalizeSourceLocation(value: unknown): UIAttachSourceLocation | null {
+  const configured = readExactOwnDataFields(value, [
+    "path",
+    "line",
+    "column",
+    "callsiteKind",
+    "callsiteName",
+    "componentName",
+  ], ["componentBreadcrumb"]);
+  if (
+    configured !== null &&
+    isValidSourceLocationBase(configured) &&
+    configured.callsiteKind === "configured_jsx_component" &&
+    typeof configured.callsiteName === "string" &&
+    COMPONENT_IDENTIFIER.test(configured.callsiteName)
+  ) {
+    const componentBreadcrumb = normalizeComponentBreadcrumb(
+      configured.componentBreadcrumb,
+      configured.path,
+      Object.hasOwn(configured, "componentBreadcrumb"),
+    );
+    if (componentBreadcrumb !== null) {
+      const location = {
+        path: configured.path,
+        line: configured.line,
+        column: configured.column,
+        callsiteKind: configured.callsiteKind,
+        callsiteName: configured.callsiteName,
+        componentName: configured.componentName,
+      } satisfies UIAttachSourceLocation;
+      return componentBreadcrumb === undefined
+        ? location
+        : { ...location, componentBreadcrumb };
+    }
+  }
+
+  const intrinsic = readExactOwnDataFields(value, [
+    "path",
+    "line",
+    "column",
+    "tagName",
+    "componentName",
+  ], ["componentBreadcrumb"]);
+  if (
+    intrinsic !== null &&
+    isValidSourceLocationBase(intrinsic) &&
+    typeof intrinsic.tagName === "string" &&
+    INTRINSIC_TAG_NAME.test(intrinsic.tagName)
+  ) {
+    const componentBreadcrumb = normalizeComponentBreadcrumb(
+      intrinsic.componentBreadcrumb,
+      intrinsic.path,
+      Object.hasOwn(intrinsic, "componentBreadcrumb"),
+    );
+    if (componentBreadcrumb !== null) {
+      const location = {
+        path: intrinsic.path,
+        line: intrinsic.line,
+        column: intrinsic.column,
+        tagName: intrinsic.tagName,
+        componentName: intrinsic.componentName,
+      } satisfies UIAttachSourceLocation;
+      return componentBreadcrumb === undefined
+        ? location
+        : { ...location, componentBreadcrumb };
+    }
+  }
+  return null;
+}
+
+function isValidSourceLocationBase(value: Record<string, unknown>): value is Record<string, unknown> & {
+  path: string;
+  line: number;
+  column: number;
+  componentName: string | null;
+} {
+  return isSafeRelativePath(value.path) &&
+    isPositiveSafeInteger(value.line) &&
+    isPositiveSafeInteger(value.column) &&
+    (value.componentName === null || (
+      typeof value.componentName === "string" &&
+      COMPONENT_IDENTIFIER.test(value.componentName)
+    ));
+}
+
+function normalizeComponentBreadcrumb(
+  value: unknown,
+  entryPath: string,
+  present: boolean,
+): UIAttachComponentBreadcrumbFrame[] | undefined | null {
+  if (!present) return undefined;
+  const values = readDenseOwnDataArray(value, 1, MAX_COMPONENT_BREADCRUMB_FRAMES);
+  if (values === null) return null;
+  const frames: UIAttachComponentBreadcrumbFrame[] = [];
+  for (const frameValue of values) {
+    const frame = readExactOwnDataFields(frameValue, [
+      "path",
+      "line",
+      "column",
+      "componentName",
+    ]);
+    if (
+      frame === null ||
+      !isSafeRelativePath(frame.path) ||
+      frame.path !== entryPath ||
+      !isPositiveSafeInteger(frame.line) ||
+      !isPositiveSafeInteger(frame.column) ||
+      typeof frame.componentName !== "string" ||
+      !COMPONENT_IDENTIFIER.test(frame.componentName)
+    ) {
+      return null;
+    }
+    frames.push({
+      path: frame.path,
+      line: frame.line,
+      column: frame.column,
+      componentName: frame.componentName,
+    });
+  }
+  return frames;
+}
+
+function normalizeSourceResolutionCandidates(
+  value: unknown,
+): UIAttachSourceCandidate[] | null {
+  const values = readDenseOwnDataArray(value, 1, MAX_CANDIDATES);
+  if (values === null) return null;
+  const candidates: UIAttachSourceCandidate[] = [];
+  for (const candidateValue of values) {
+    const candidate = readExactOwnDataFields(candidateValue, [
+      "path",
+      "line",
+      "column",
+      "confidence",
+    ]);
+    if (candidate === null || !isCandidate(candidate)) return null;
+    candidates.push({
+      path: candidate.path,
+      line: candidate.line,
+      column: candidate.column,
+      confidence: candidate.confidence,
+    });
+  }
+  return candidates;
+}
+
+function isSourceExactFailureReason(
+  value: unknown,
+): value is UIAttachSourceExactFailureReason {
+  return typeof value === "string" && UI_ATTACH_SOURCE_EXACT_FAILURE_REASONS.has(
+    value as UIAttachSourceExactFailureReason,
   );
+}
+
+function toSourceLocation(entry: UIAttachSourceMapEntry): UIAttachSourceLocation {
+  if (entry.callsiteKind === "configured_jsx_component") {
+    const location = {
+      path: entry.path,
+      line: entry.line,
+      column: entry.column,
+      callsiteKind: entry.callsiteKind,
+      callsiteName: entry.callsiteName,
+      componentName: entry.componentName,
+    };
+    return entry.componentBreadcrumb === undefined
+      ? location
+      : {
+          ...location,
+          componentBreadcrumb: entry.componentBreadcrumb.map((frame) => ({ ...frame })),
+        };
+  }
+  const location = {
+    path: entry.path,
+    line: entry.line,
+    column: entry.column,
+    tagName: entry.tagName,
+    componentName: entry.componentName,
+  };
+  return entry.componentBreadcrumb === undefined
+    ? location
+    : {
+        ...location,
+        componentBreadcrumb: entry.componentBreadcrumb.map((frame) => ({ ...frame })),
+      };
 }
 
 function isSafeRelativePath(value: unknown): value is string {
@@ -454,9 +814,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys<T extends string>(
   value: unknown,
   keys: readonly T[],
+  optionalKeys: readonly string[] = [],
 ): value is Record<T, unknown> {
   if (!isRecord(value)) return false;
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  const allowed = [...new Set([...keys, ...optionalKeys])].sort();
+  return actual.length >= expected.length &&
+    actual.every((key) => allowed.includes(key)) &&
+    expected.every((key) => actual.includes(key));
+}
+
+function readExactOwnDataFields(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const actual: string[] = [];
+  const fields: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = Reflect.get(descriptors, key) as PropertyDescriptor | undefined;
+    if (!descriptor?.enumerable) continue;
+    if (typeof key !== "string" || !("value" in descriptor)) return null;
+    actual.push(key);
+    fields[key] = descriptor.value;
+  }
+  const expected = [...keys];
+  const allowed = new Set([...keys, ...optionalKeys]);
+  return actual.length >= expected.length &&
+    actual.every((key) => allowed.has(key)) &&
+    expected.every((key) => actual.includes(key))
+    ? fields
+    : null;
+}
+
+function readDenseOwnDataArray(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const lengthDescriptor = Reflect.get(descriptors, "length") as PropertyDescriptor | undefined;
+  if (
+    !lengthDescriptor ||
+    !("value" in lengthDescriptor) ||
+    typeof lengthDescriptor.value !== "number" ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < minimumLength ||
+    lengthDescriptor.value > maximumLength
+  ) {
+    return null;
+  }
+  const length = lengthDescriptor.value as number;
+  const result: unknown[] = [];
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (key === "length") continue;
+    if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) return null;
+    const index = Number(key);
+    const descriptor = descriptors[key];
+    if (
+      index >= length ||
+      !descriptor?.enumerable ||
+      !("value" in descriptor)
+    ) {
+      return null;
+    }
+  }
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor?.enumerable || !("value" in descriptor)) return null;
+    result.push(descriptor.value);
+  }
+  return result;
 }

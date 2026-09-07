@@ -4,13 +4,25 @@ import { describe, expect, test, vi } from "vitest";
 import type { ContextCaptureResult } from "./capture";
 import { createCaptureRecord } from "../test/session-fixtures";
 import { createSelectionSurfaceController } from "./selection-surface";
-import { createTestClickCaptureController } from "./test-click-capture";
-import type { CaptureToken } from "./session-state";
+import { createCaptureSelectionController } from "./capture-selection-controller";
+import type { RuntimeCaptureToken } from "./messages";
 
-const TOKEN: CaptureToken = {
+const TOKEN: RuntimeCaptureToken = {
   origin: "https://app.example.test",
   epoch: "epoch-1",
   operationId: "op-1",
+  replacement: null,
+  routeLease: {
+    epoch: "route-epoch-1",
+    tabId: 7,
+    selectedFrameId: 0,
+    segments: [{
+      frameId: 0,
+      documentId: "document-1",
+      origin: "https://app.example.test",
+      pathname: "/settings",
+    }],
+  },
 };
 
 describe("selection surface", () => {
@@ -57,7 +69,7 @@ describe("selection surface", () => {
       hitTest,
     });
     const captureTarget = vi.fn(async () => createCaptureResult());
-    const controller = createTestClickCaptureController({
+    const controller = createCaptureSelectionController({
       root: document,
       beginCapture: async () => ({ ok: true, data: TOKEN }),
       captureTarget,
@@ -70,12 +82,15 @@ describe("selection surface", () => {
       pointerEventTarget: surface.eventTarget,
       resolveTarget: (event) => surface.resolveTarget(event),
       onEnabledChange: (enabled) => surface.setEnabled(enabled),
-      isTrustedClickEvent: () => true,
+      isTrustedActivationEvent: () => true,
     });
 
     controller.setEnabled(true);
     const host = document.querySelector<HTMLElement>("[data-ui-attach-selection-surface]");
     expect(host).not.toBeNull();
+    expect(host?.hasAttribute("data-ui-attach-ignore")).toBe(false);
+    expect(document.querySelector("[data-ui-attach-selection-frame-guard]")
+      ?.hasAttribute("data-ui-attach-ignore")).toBe(true);
     expect(
       document.querySelector("[data-ui-attach-selection-frame-guard]")?.textContent,
     ).toContain("iframe { pointer-events: none !important; }");
@@ -98,7 +113,11 @@ describe("selection surface", () => {
     await flushAsyncWork();
 
     expect(click.defaultPrevented).toBe(true);
-    expect(captureTarget).toHaveBeenCalledWith(frame);
+    expect(captureTarget).toHaveBeenCalledWith(frame, {
+      kind: "element_relative_pointer",
+      xRatio: 0.0625,
+      yRatio: 1 / 6,
+    });
     expect(hitTest).toHaveBeenCalledOnce();
 
     controller.disableForNavigation();
@@ -159,6 +178,75 @@ describe("selection surface", () => {
     }));
 
     expect(resolved).toBe(button);
+    surface.dispose();
+  });
+
+  test("descends through open shadow roots when resolving the painted target", () => {
+    document.body.innerHTML = '<div id="shadow-host"></div>';
+    const host = document.querySelector("#shadow-host");
+    if (!(host instanceof HTMLDivElement)) throw new Error("shadow host fixture missing");
+    const shadow = host.attachShadow({ mode: "open" });
+    const button = document.createElement("button");
+    button.textContent = "Open inner action";
+    shadow.append(button);
+    Object.defineProperty(shadow, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => button),
+    });
+    const surface = createSelectionSurfaceController({
+      root: document,
+      hitTest: () => host,
+    });
+    surface.setEnabled(true);
+    const eventTarget = surface.eventTarget;
+    if (!(eventTarget instanceof ShadowRoot)) throw new Error("selection shadow root missing");
+
+    let resolved: HTMLElement | null = null;
+    eventTarget.addEventListener("click", (event) => {
+      resolved = surface.resolveTarget(event as MouseEvent);
+    }, { once: true });
+    eventTarget.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      composed: true,
+      clientX: 40,
+      clientY: 60,
+    }));
+
+    expect(resolved).toBe(button);
+    expect(shadow.elementFromPoint).toHaveBeenCalledWith(40, 60);
+    surface.dispose();
+  });
+
+  test("stops at a closed shadow host without exposing its internal target", () => {
+    document.body.innerHTML = '<div id="shadow-host" aria-label="Opaque component host"></div>';
+    const host = document.querySelector("#shadow-host");
+    if (!(host instanceof HTMLDivElement)) throw new Error("shadow host fixture missing");
+    const closed = host.attachShadow({ mode: "closed" });
+    const button = document.createElement("button");
+    button.textContent = "Closed private action";
+    closed.append(button);
+    const surface = createSelectionSurfaceController({
+      root: document,
+      hitTest: () => host,
+    });
+    surface.setEnabled(true);
+    const eventTarget = surface.eventTarget;
+    if (!(eventTarget instanceof ShadowRoot)) throw new Error("selection shadow root missing");
+
+    let resolved: HTMLElement | null = null;
+    eventTarget.addEventListener("click", (event) => {
+      resolved = surface.resolveTarget(event as MouseEvent);
+    }, { once: true });
+    eventTarget.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      composed: true,
+      clientX: 40,
+      clientY: 60,
+    }));
+
+    expect(host.shadowRoot).toBeNull();
+    expect(resolved).toBe(host);
+    expect(resolved).not.toBe(button);
     surface.dispose();
   });
 
@@ -302,6 +390,8 @@ describe("selection surface", () => {
     surface.setEnabled(true);
     const host = document.querySelector<HTMLElement>("[data-ui-attach-selection-surface]");
     if (!host) throw new Error("selection surface missing");
+    expect(host.hasAttribute("data-ui-attach-ignore")).toBe(false);
+    expect(ignored?.closest("[data-ui-attach-ignore]")).not.toBeNull();
 
     let resolved: HTMLElement | null | undefined;
     const observe = (event: MouseEvent): void => {

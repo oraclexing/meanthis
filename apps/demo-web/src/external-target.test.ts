@@ -21,23 +21,17 @@ describe("external target harness", () => {
     expect(html).not.toContain("<script");
   });
 
-  it("links to the external target from the main demo", async () => {
+  it("keeps the SDK workbench and extension-target guidance explicit", async () => {
     const html = await readFile(demoIndexPath, "utf8");
 
-    expect(html).toContain("id=\"external-target-link\"");
-    expect(html).toContain("href=\"/external-target.html?token=external-secret#billing\"");
-    expect(html).toContain("id=\"compatibility-fixtures-link\"");
-    expect(html).toContain("href=\"/compatibility-fixtures.html?token=compat-secret#fixtures\"");
-  });
-
-  it("keeps extension target guidance separate from standalone demo controls", async () => {
-    const html = await readFile(demoIndexPath, "utf8");
-
-    expect(html).toContain("id=\"standalone-demo-tools\"");
-    expect(html).toContain("id=\"standalone-demo-output\"");
-    expect(html).toContain("id=\"extension-demo-guide\" data-ui-attach-ignore hidden");
-    expect(html).toContain("Choose <strong>Add elements</strong> in MeanThis");
-    expect(html).toContain("#extension-demo-guide[hidden]");
+    expect(html).toContain('<script type="module" src="./src/main.ts"></script>');
+    expect(html).not.toContain('src="/src/main.ts"');
+    expect(html).toContain("id=\"sdk-widget-demo-stage\"");
+    expect(html).toContain("id=\"sdk-widget-demo-guide\"");
+    expect(html).toContain("id=\"extension-demo-guide\" class=\"guide\" data-ui-attach-ignore hidden");
+    expect(html).toContain("The SDK owner is disabled so the browser extension can claim this page.");
+    expect(html).not.toContain("bookmarklet");
+    expect(html).not.toContain("injected runtime");
   });
 
   it("serves compatibility fixtures for extension smoke testing", async () => {

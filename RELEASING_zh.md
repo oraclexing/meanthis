@@ -17,7 +17,7 @@ npm audit --audit-level=moderate
 git diff --check
 ```
 
-`npm run build` 会编译九个公共 package、demo 与 consumer extension，运行公共示例，并在临时 offline consumer 中验证 package tarball。
+`npm run build` 会编译九个公共 package、demo 与 consumer extension，运行公共示例，并在临时的缓存优先 consumer 中验证 package tarball。该 consumer 使用 `--prefer-offline`，所以冷缓存下 npm 仍可能访问已配置的 registry。
 
 `npm run pack:extension` 会在 `output/extension-mv3/consumer/<version>/` 下生成未签名的 consumer ZIP 与 checksum manifest。该 artifact 是本地完整性 candidate，不是签名或 publisher attestation。
 

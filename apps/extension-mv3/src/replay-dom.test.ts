@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { createPersistentOverlayController } from "./persistent-overlays";
+import { createPersistentOverlayController } from "@meanthis/web-picker";
 import { createDomReplayPage, resolveDomReplayTarget } from "./replay-dom";
 
 describe("createDomReplayPage", () => {
