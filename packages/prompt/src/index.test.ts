@@ -296,6 +296,19 @@ describe("prompt serializers", () => {
     expect(flatSessionOutput).toContain("Annotation 2 task note: Second extension comment.");
   });
 
+  it("preserves explicit flat annotation labels and lifecycles while grouping repeated targets", () => {
+    const output = serializeAttachmentFeedbackBundle([
+      { label: "B", annotationLabel: "2", annotationLifecycle: { state: "open", resolvedAt: null }, attachment, taskNote: "Open comment." },
+      { label: "D", annotationLabel: "4", annotationLifecycle: { state: "resolved", resolvedAt: "2026-08-31T00:00:00.000Z" }, attachment, taskNote: "Resolved comment." },
+    ], { detail: "compact" });
+    expect(output.match(/Target B/gu)).toHaveLength(1);
+    expect(output).not.toContain("Target D");
+    expect(output).toContain("Annotation 2 task note: Open comment.");
+    expect(output).toContain("Annotation 4 task note: Resolved comment.");
+    expect(output).toContain("Annotation 2 lifecycle: open; resolvedAt=null");
+    expect(output).toContain("Annotation 4 lifecycle: resolved; resolvedAt=2026-08-31T00:00:00.000Z");
+  });
+
   it("serializes annotation lifecycle as reference metadata without turning it into requested work", () => {
     const output = serializeAttachmentFeedbackBundle([{
       label: "A",

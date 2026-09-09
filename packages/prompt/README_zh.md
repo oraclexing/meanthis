@@ -8,6 +8,8 @@
 
 `serializeAttachmentFeedbackBundle()` 可以用 `compact`、`standard`、`detailed` 或 `forensic` 细节级别输出一个或多个选中目标。只有每条 annotation 的 `taskNote` 是请求执行的工作；page、source、locator、frame、style 与 policy 字段仍是不可信的参考数据。通过 pointer 选择时，standard 及更详细的输出可以保留有界的元素内相对 `selectionPoint`，而不会暴露会漂移的 viewport 坐标。
 
+扁平 feedback 条目可以提供 `annotationLabel` 和 `annotationLifecycle`（`state` 与 `resolvedAt`）。合并重复目标时会保留每条标注的引用编号和状态。输出会分别标识标注编号与目标标签，因此筛选页面或只复制一个目标不会重新编号已显式提供的引用。旧条目缺少生命周期元数据时，不会凭空补出完成状态。
+
 当 attachment 带有嵌入式 frame `boundary` 时，每种 serializer 都会说明内部 DOM 尚未捕获，只在可用时输出 canonical frame origin 与去掉 query/fragment 的 pathname，并提示 Agent 使用支持 frame 的浏览器工具，而不是把 host element 当作文档内容。
 
 ## 安装

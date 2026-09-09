@@ -17,6 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   applyLocalBridgeWindowsProtectedAcl,
   inspectLocalBridgeWindowsProtectedAcl,
+  inspectLocalBridgeWindowsProtectedAclBatch,
   type ApplyLocalBridgeMcpHttpAcl,
   type InspectLocalBridgeMcpHttpAcl,
   type LocalBridgeMcpHttpAclTargetKind,
@@ -461,12 +462,13 @@ async function readExistingCredentialForReuse(
   options: LocalBridgeAgentTokenOptions,
 ): Promise<string> {
   try {
-    const directoryBefore = await lstat(paths.directory);
-    const fileBefore = await lstat(paths.path);
+    const [directoryBefore, fileBefore] = await Promise.all([
+      lstat(paths.directory),
+      lstat(paths.path),
+    ]);
     assertDirectoryStats(directoryBefore);
     assertCredentialFileStats(fileBefore);
-    await inspectExistingPath(paths.directory, "directory", options);
-    await inspectExistingPath(paths.path, "file", options);
+    await inspectExistingPaths(paths, options);
 
     const token = await readCredentialWithoutMutation(
       paths.path,
@@ -483,8 +485,7 @@ async function readExistingCredentialForReuse(
       throw invalidExistingCredential();
     }
 
-    await inspectExistingPath(paths.directory, "directory", options);
-    await inspectExistingPath(paths.path, "file", options);
+    await inspectExistingPaths(paths, options);
     const [directoryFinal, fileFinal] = await Promise.all([
       lstat(paths.directory),
       lstat(paths.path),
@@ -545,6 +546,26 @@ async function inspectExistingPath(
     if ((stats.mode & 0o777) !== expectedMode) {
       throw new Error("permissions mismatch");
     }
+  } catch {
+    throw new LocalBridgeAgentCredentialPermissionError();
+  }
+}
+
+async function inspectExistingPaths(
+  paths: CredentialPaths,
+  options: LocalBridgeAgentTokenOptions,
+): Promise<void> {
+  try {
+    const platform = options.processPlatform ?? process.platform;
+    if (platform === "win32" && !options.inspectAcl) {
+      await inspectLocalBridgeWindowsProtectedAclBatch([
+        { path: paths.directory, kind: "directory" },
+        { path: paths.path, kind: "file" },
+      ]);
+      return;
+    }
+    await inspectExistingPath(paths.directory, "directory", options);
+    await inspectExistingPath(paths.path, "file", options);
   } catch {
     throw new LocalBridgeAgentCredentialPermissionError();
   }

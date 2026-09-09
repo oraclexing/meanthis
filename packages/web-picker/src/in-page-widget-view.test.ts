@@ -144,6 +144,7 @@ describe("sanitizeInPageWidgetViewModel", () => {
 
     expect(sanitized).toEqual({
       mode: "collapsed",
+      selectionEnabled: false,
       readiness: "ready",
       bridgeState: "unavailable",
       bridgeInvitationRemainingSeconds: null,
@@ -171,6 +172,7 @@ describe("sanitizeInPageWidgetViewModel", () => {
       lifecycleControlProposal: null,
       activeItemId: null,
       taskNote: "",
+      recoveryDraft: null,
       shortcuts: [],
       busyAction: null,
       status: null,
@@ -469,6 +471,25 @@ describe("createInPageWidgetView", () => {
 
     view.dispose();
     vi.useRealTimers();
+  });
+
+  test("uses capture authority for the settings toggle instead of inferring it from layout", () => {
+    const callbacks = { onStartSelection: vi.fn(), onStopSelection: vi.fn() };
+    const view = createInPageWidgetView({
+      document,
+      initialModel: model({ mode: "details", selectionEnabled: true }),
+      callbacks,
+    });
+    document.body.append(view.element);
+    expect(actionButton(view.element, "toggle-selection").getAttribute("aria-pressed")).toBe("true");
+    actionButton(view.element, "toggle-selection").click();
+    expect(callbacks.onStopSelection).toHaveBeenCalledOnce();
+    expect(callbacks.onStartSelection).not.toHaveBeenCalled();
+    view.update(model({ mode: "details", selectionEnabled: false }));
+    expect(actionButton(view.element, "toggle-selection").getAttribute("aria-pressed")).toBe("false");
+    actionButton(view.element, "toggle-selection").click();
+    expect(callbacks.onStartSelection).toHaveBeenCalledOnce();
+    view.dispose();
   });
 
   test("renders a compact workbar whose primary controls call real product actions", () => {
@@ -1704,6 +1725,86 @@ describe("createInPageWidgetView", () => {
     }
   });
 
+  test("keeps the connected task editor and selection during input and status refreshes", () => {
+    let state = model({ taskNote: "alpha beta" });
+    const view = createInPageWidgetView({ document, initialModel: state, callbacks: {
+      onTaskNoteChange: (_id, note) => {
+        state = { ...state, taskNote: note };
+        view.update(state);
+      },
+    } });
+    document.body.append(view.element);
+    const textarea = view.element.querySelector<HTMLTextAreaElement>(".meanthis-task-note")!;
+    textarea.focus();
+    const removed: Node[] = [];
+    const observer = new MutationObserver((records) => records.forEach((record) => removed.push(...record.removedNodes)));
+    observer.observe(view.element, { childList: true, subtree: true });
+    textarea.setSelectionRange(5, 5);
+    textarea.setRangeText("!", 5, 5, "end");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(view.element.querySelector(".meanthis-task-note")).toBe(textarea);
+    expect(textarea.selectionStart).toBe(6);
+    textarea.setSelectionRange(7, 11, "backward");
+    textarea.scrollTop = 23;
+    const valueSetter = vi.spyOn(textarea, "value", "set");
+    view.update({ ...state, bridgeState: "pending", status: { kind: "info", message: "Refreshing" } });
+    expect(valueSetter).not.toHaveBeenCalled();
+    expect([textarea.selectionStart, textarea.selectionEnd, textarea.selectionDirection, textarea.scrollTop])
+      .toEqual([7, 11, "backward", 23]);
+    expect(document.activeElement).toBe(textarea);
+    textarea.setRangeText("gamma", 7, 11, "end");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(state.taskNote).toBe("alpha! gamma");
+    view.update({ ...state, taskNote: "External replacement", targets: [
+      { itemId: "item-b", label: "C", name: "Renamed target" },
+    ] });
+    expect(view.element.querySelector(".meanthis-task-note")).toBe(textarea);
+    expect(textarea.value).toBe("External replacement");
+    expect(textarea.getAttribute("aria-label")).toBe("Task note for target C");
+    observer.takeRecords().forEach((record) => removed.push(...record.removedNodes));
+    expect(removed.some((node) => node === textarea || node.contains(textarea))).toBe(false);
+    observer.disconnect();
+    view.dispose();
+  });
+
+  test("preserves composing text on refresh but resets it on target or mode changes", () => {
+    const onTaskNoteChange = vi.fn();
+    const onCloseEditor = vi.fn();
+    const view = createInPageWidgetView({ document, initialModel: model(), callbacks: { onTaskNoteChange, onCloseEditor } });
+    document.body.append(view.element);
+    const textarea = view.element.querySelector<HTMLTextAreaElement>(".meanthis-task-note")!;
+    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    textarea.value = "输入";
+    view.update(model({ bridgeState: "pending" }));
+    expect(view.element.querySelector(".meanthis-task-note")).toBe(textarea);
+    expect(textarea.value).toBe("输入");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    escape(textarea);
+    expect(onTaskNoteChange).not.toHaveBeenCalled();
+    expect(onCloseEditor).not.toHaveBeenCalled();
+    textarea.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(onTaskNoteChange).toHaveBeenLastCalledWith("item-b", "输入");
+    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    view.update(model({ activeItemId: "item-a", taskNote: "New target" }));
+    const next = view.element.querySelector<HTMLTextAreaElement>(".meanthis-task-note")!;
+    expect(next).not.toBe(textarea);
+    expect(next.value).toBe("New target");
+    next.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    textarea.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(onTaskNoteChange).toHaveBeenCalledTimes(1);
+    escape(next);
+    expect(onCloseEditor).not.toHaveBeenCalled();
+    next.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    escape(next);
+    expect(onCloseEditor).toHaveBeenCalledWith("item-a");
+    view.update(model({ mode: "details" }));
+    view.update(model({ taskNote: "Reopened" }));
+    expect(view.element.querySelector<HTMLTextAreaElement>(".meanthis-task-note")!.value).toBe("Reopened");
+    view.dispose();
+  });
+
   test("handles Escape by state while ignoring IME composition", () => {
     const callbacks = {
       onCloseEditor: vi.fn(),
@@ -1746,6 +1847,76 @@ describe("createInPageWidgetView", () => {
     const readyEscape = escape(actionButton(view.element, "toggle-selection"));
     expect(callbacks.onCollapse).toHaveBeenCalledOnce();
     expect(readyEscape.defaultPrevented).toBe(true);
+  });
+
+  test.each([true, false])("shows a separate recovery draft with targets=%s", (hasTarget) => {
+    const onDiscardRecovery = vi.fn();
+    const onTaskNoteChange = vi.fn();
+    const state = model({ mode: hasTarget ? "editing" : "ready", targets: hasTarget ? model().targets : [],
+      activeItemId: hasTarget ? "item-b" : null, recoveryDraft: "Lost target\n完整草稿", taskNote: "Canonical note" });
+    const view = createInPageWidgetView({ document, initialModel: state, callbacks: { onDiscardRecovery, onTaskNoteChange } });
+    document.body.append(view.element);
+    const draft = view.element.querySelector<HTMLTextAreaElement>(".meanthis-recovery-draft")!;
+    expect(draft.value).toBe("Lost target\n完整草稿");
+    expect(draft.readOnly).toBe(true);
+    expect(draft.getAttribute("aria-label")).toBe("Unsaved task note");
+    if (hasTarget) expect(view.element.querySelector<HTMLTextAreaElement>(".meanthis-task-note")!.value).toBe("Canonical note");
+    draft.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(onTaskNoteChange).not.toHaveBeenCalled();
+    actionButton(view.element, "discard-recovery").click();
+    expect(onDiscardRecovery).toHaveBeenCalledOnce();
+    view.update({ ...state, recoveryDraft: null });
+    expect(view.element.querySelector(".meanthis-recovery-draft")).toBeNull();
+    view.dispose();
+  });
+
+  test("preserves allowed multiline recovery text without trimming or assigning it to taskNote", () => {
+    const draft = `  start\r\n${"中文 ".repeat(1000)}\nend  `;
+    const sanitized = sanitizeInPageWidgetViewModel(model({ recoveryDraft: draft, taskNote: "Current item" }));
+    expect(sanitized.recoveryDraft).toBe(draft.replace(/\r\n/g, "\n"));
+    expect(sanitized.taskNote).toBe("Current item");
+  });
+
+  test("restores recovery selection only while the same draft remains", () => {
+    const state = model({ recoveryDraft: "first line\nsecond line" });
+    const view = createInPageWidgetView({ document, initialModel: state });
+    document.body.append(view.element);
+    const draft = view.element.querySelector<HTMLTextAreaElement>(".meanthis-recovery-draft")!;
+    draft.focus();
+    draft.setSelectionRange(2, 15, "backward");
+    view.update({ ...state, siteTargetCount: 5 });
+    const refreshed = view.element.querySelector<HTMLTextAreaElement>(".meanthis-recovery-draft")!;
+    expect(document.activeElement).toBe(refreshed);
+    expect([refreshed.selectionStart, refreshed.selectionEnd, refreshed.selectionDirection]).toEqual([2, 15, "backward"]);
+    view.update({ ...state, recoveryDraft: "Different recovery" });
+    const changed = view.element.querySelector<HTMLTextAreaElement>(".meanthis-recovery-draft")!;
+    expect([changed.selectionStart, changed.selectionEnd]).not.toEqual([2, 15]);
+    view.update({ ...state, recoveryDraft: null });
+    expect(view.element.querySelector(".meanthis-recovery-draft")).toBeNull();
+    view.dispose();
+  });
+
+  test("keeps the settings scrollbar and viewport during bridge countdown updates", () => {
+    const state = model({ mode: "details", bridgeState: "pending", bridgeInvitationRemainingSeconds: 65 });
+    const view = createInPageWidgetView({ document, initialModel: state });
+    document.body.append(view.element);
+    const panel = view.element.querySelector<HTMLElement>(".meanthis-panel")!;
+    const targets = view.element.querySelector<HTMLElement>(".meanthis-target-list")!;
+    actionButton(view.element, "open-settings").focus();
+    panel.scrollTop = 240;
+    targets.scrollLeft = 90;
+    view.update({ ...state, bridgeInvitationRemainingSeconds: 64 });
+    expect(view.element.querySelector(".meanthis-panel")).toBe(panel);
+    expect(panel.scrollTop).toBe(240);
+    expect(view.element.querySelector<HTMLElement>(".meanthis-target-list")!.scrollLeft).toBe(90);
+    expect(document.activeElement).toBe(actionButton(view.element, "open-settings"));
+    view.update({ ...state, bridgeState: "connected", bridgeInvitationRemainingSeconds: null });
+    expect(view.element.querySelector(".meanthis-panel")).toBe(panel);
+    expect(panel.scrollTop).toBe(240);
+    view.update(model({ mode: "ready" }));
+    view.update(state);
+    expect(view.element.querySelector<HTMLElement>(".meanthis-panel")!.scrollTop).toBe(0);
+    view.dispose();
   });
 
   test("provides deterministic focus and preserves it across controlled updates", () => {

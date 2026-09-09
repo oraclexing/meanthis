@@ -20,7 +20,8 @@ const MAX_PRIVATE_HANDSHAKE_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const MAX_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_WORKBAR_WIDTH = 292;
-const MIN_WORKBAR_WIDTH = 240;
+const MIN_WORKBAR_WIDTH = 200;
+const MIN_SCOPE_WIDTH = 240;
 const MAX_WORKBAR_WIDTH = 480;
 const DEFAULT_SCOPE_HEIGHT = 224;
 const MIN_SCOPE_HEIGHT = 128;
@@ -839,7 +840,7 @@ export function parseInPageWidgetLayoutMessage(
       keys.length !== 4 || !Object.hasOwn(record, "width") ||
       !Object.hasOwn(record, "height") ||
       typeof record.width !== "number" || !Number.isInteger(record.width) ||
-      record.width < MIN_WORKBAR_WIDTH || record.width > MAX_WORKBAR_WIDTH ||
+      record.width < MIN_SCOPE_WIDTH || record.width > MAX_WORKBAR_WIDTH ||
       typeof record.height !== "number" || !Number.isInteger(record.height) ||
       record.height < MIN_SCOPE_HEIGHT || record.height > MAX_SCOPE_HEIGHT
     ) return null;
@@ -911,8 +912,10 @@ function createHostStyle(
       : "18px",
     "box-shadow": workbar
       ? "0 14px 34px rgb(0 0 0 / 38%), 0 2px 8px rgb(0 0 0 / 24%)"
+      : interactive && layout === "collapsed"
+      ? "0 6px 18px rgb(0 0 0 / 24%), 0 1px 4px rgb(0 0 0 / 16%)"
       : "none",
-    "color-scheme": "light dark",
+    "color-scheme": "dark",
     transition: interactive && !reducedMotion
       ? "width 170ms cubic-bezier(0.2, 0.8, 0.2, 1), height 170ms cubic-bezier(0.2, 0.8, 0.2, 1), border-radius 170ms cubic-bezier(0.2, 0.8, 0.2, 1)"
       : "none",
@@ -986,6 +989,8 @@ function createFrameStyle(root: Document): string {
     height: "100%",
     border: "0",
     borderRadius: "inherit",
+    colorScheme: "dark",
+    backgroundColor: "transparent",
     pointerEvents: "auto",
   });
   return style.cssText;

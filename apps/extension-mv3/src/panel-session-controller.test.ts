@@ -150,6 +150,115 @@ describe("panel session controller intent and recovery", () => {
     vi.useRealTimers();
   });
 
+  test("setting an unchanged task note does not create a dirty draft", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.controller.setIntent(harness.controller.getSnapshot().intent);
+    expect(harness.controller.getSnapshot().intentDirty).toBe(false);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.client.calls).toEqual(["getActive"]);
+    harness.controller.setIntent("Real draft");
+    harness.controller.setIntent("Real draft");
+    expect(harness.controller.getSnapshot()).toMatchObject({ intent: "Real draft", intentDirty: true });
+  });
+
+  test("external deletion updates the list while preserving the removed target draft separately", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.controller.setIntent("Keep this removed-target draft");
+    harness.file = removeItemFromFile(harness.file, "att_cancel");
+    const remainingIntent = harness.file.session.attachments[0].sourceRecord.intent;
+    harness.client.updateIntent = vi.fn(async () => ({ ok: false, code: "ITEM_NOT_FOUND", error: "Target was removed" }));
+    const observations: ReturnType<typeof harness.controller.getSnapshot>[] = [];
+    harness.controller.subscribe((snapshot) => observations.push(snapshot));
+    await harness.controller.refreshActiveOrigin();
+    expect(harness.client.updateIntent).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      file: { session: { attachments: [{ id: "att_save" }] } },
+      selectedItemId: "att_save", intent: remainingIntent, intentDirty: false,
+      recovery: { oldOrigin: ORIGIN, oldEpoch: "epoch-1", itemId: "att_cancel", intent: "Keep this removed-target draft" },
+    });
+    expect(harness.controller.getSnapshot().file?.session.attachments).toHaveLength(1);
+    await expect(harness.controller.flushIntent()).resolves.toBe(false);
+    const afterDeletion = observations.filter((snapshot) => snapshot.file?.session.attachments.length === 1);
+    expect(afterDeletion.length).toBeGreaterThan(0);
+    expect(afterDeletion.every((snapshot) => snapshot.recovery?.intent === "Keep this removed-target draft")).toBe(true);
+    harness.file = removeItemFromFile(harness.file, "att_save");
+    await harness.controller.refreshActiveOrigin();
+    expect(harness.controller.getSnapshot().file?.session.attachments).toEqual([]);
+    expect(harness.controller.getSnapshot().recovery?.intent).toBe("Keep this removed-target draft");
+    expect(harness.client.updateIntent).not.toHaveBeenCalled();
+    await harness.controller.discardDirtyIntent();
+    expect(harness.controller.getSnapshot().recovery).toBeNull();
+    expect(harness.controller.getSnapshot().file?.session.attachments).toEqual([]);
+  });
+
+  test("discarding a separated same-session draft is local and cannot be superseded by a readback", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.controller.setIntent("Recover this draft");
+    harness.file = removeItemFromFile(harness.file, "att_cancel");
+    await harness.controller.refreshActiveOrigin();
+    const authoritativeFile = harness.controller.getSnapshot().file;
+    harness.client.getActive = vi.fn(() => new Promise(() => {}));
+    void harness.controller.discardDirtyIntent();
+    expect(harness.client.getActive).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot().recovery).toBeNull();
+    expect(harness.controller.getSnapshot().file).toEqual(authoritativeFile);
+    expect(harness.controller.getSnapshot().intentDirty).toBe(false);
+  });
+
+  test.each(["malformed", "different epoch", "superseded"])(
+    "recovery refresh preserves the draft against %s readback",
+    async (kind) => {
+      const harness = createControllerHarness();
+      await harness.controller.initialize();
+      harness.controller.setIntent("Unpublished old-target draft");
+      harness.file = removeItemFromFile(harness.file, "att_cancel");
+      await harness.controller.refreshActiveOrigin();
+      const before = harness.controller.getSnapshot();
+      const oldResponse = createActiveData(createReadback(createSessionFile([
+        createCaptureRecord("stale", "Stale target"),
+      ])));
+      if (kind === "superseded") {
+        let resolveOld!: (response: SessionCommandResponse<ActiveSessionCommandData>) => void;
+        const originalGetActive = harness.client.getActive;
+        harness.client.getActive = vi.fn()
+          .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+          .mockImplementation(originalGetActive);
+        const pending = harness.controller.refreshActiveOrigin();
+        await harness.controller.refreshActiveOrigin();
+        resolveOld({ ok: true, data: oldResponse });
+        await pending;
+      } else {
+        oldResponse.readback = kind === "malformed"
+          ? { ...oldResponse.readback!, clearPending: 1 } as unknown as ActiveSessionReadback
+          : { ...oldResponse.readback!, epoch: "other-generation" };
+        harness.queueActive(oldResponse);
+        await harness.controller.refreshActiveOrigin();
+      }
+      expect(harness.controller.getSnapshot().file).toEqual(before.file);
+      expect(harness.controller.getSnapshot().recovery).toEqual(before.recovery);
+      expect(harness.controller.getSnapshot().intent).toEqual(before.intent);
+    },
+  );
+
+  test("a rejected same-session note save still applies the authoritative list", async () => {
+    const harness = createControllerHarness();
+    await harness.controller.initialize();
+    harness.controller.setIntent("Foreign-page draft");
+    harness.file = removeItemFromFile(harness.file, "att_save");
+    harness.client.updateIntent = vi.fn(async () => ({ ok: false, code: "UNTRUSTED_SENDER", error: "Target is on another page" }));
+    await harness.controller.refreshActiveOrigin();
+    expect(harness.client.updateIntent).toHaveBeenCalledOnce();
+    expect(harness.controller.getSnapshot().file?.session.attachments).toHaveLength(1);
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      selectedItemId: "att_cancel", intentDirty: false,
+      recovery: { itemId: "att_cancel", intent: "Foreign-page draft" },
+    });
+    expect(harness.controller.getSnapshot().intent).not.toBe("Foreign-page draft");
+  });
+
   test("debounces intent writes at exactly 250ms and emits deterministic snapshots", async () => {
     const harness = createControllerHarness();
     const snapshots: string[] = [];

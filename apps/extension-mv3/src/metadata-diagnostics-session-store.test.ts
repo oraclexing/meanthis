@@ -9,6 +9,7 @@ import {
   METADATA_DIAGNOSTICS_SESSION_KIND,
   METADATA_DIAGNOSTICS_SESSION_SCHEMA_VERSION,
   createMetadataDiagnosticsSessionStore,
+  canBindMetadataDiagnosticsSessionIdentity,
   getMetadataDiagnosticsSessionStorageKey,
   type MetadataDiagnosticsSessionBindingV1,
   type MetadataDiagnosticsSessionFingerprintItemV1,
@@ -216,7 +217,7 @@ describe("metadata diagnostics session store", () => {
     expect(storage.removeCalls).toBe(0);
   });
 
-  test("serializes a replacement write behind stale cleanup so the new binding survives", async () => {
+  test.each([false, true])("serializes a replacement write behind stale cleanup (unrepresentable=%s)", async (unrepresentable) => {
     const storage = new MemoryStorage();
     const store = createMetadataDiagnosticsSessionStore({ storage });
     const key = getMetadataDiagnosticsSessionStorageKey(ORIGIN);
@@ -242,7 +243,7 @@ describe("metadata diagnostics session store", () => {
     const staleCleanup = store.removeUnlessCurrent(ORIGIN, async () => {
       announceRead();
       await readBarrier;
-      return {
+      return unrepresentable ? null : {
         epoch: EPOCH,
         captureId: CAPTURE_ID,
         fingerprint: [],
@@ -480,3 +481,13 @@ describe("metadata diagnostics session store", () => {
     expect(storage.peek(key)).toBeTruthy();
   });
 });
+
+test.each([[128, true], [129, false], [132, false]])(
+  "diagnostics identity expressibility checks the item-id boundary (%i)", (length, accepted) => {
+    expect(canBindMetadataDiagnosticsSessionIdentity(ORIGIN, {
+      epoch: EPOCH,
+      captureId: CAPTURE_ID,
+      fingerprint: [{ itemId: "x".repeat(length), capturedAt: "2026-08-31T00:00:00.000Z" }],
+    })).toBe(accepted);
+  },
+);

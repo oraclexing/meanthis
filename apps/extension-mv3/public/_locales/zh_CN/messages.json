@@ -1,4 +1,9 @@
 {
+  "unsaved_task_note": { "message": "未保存的任务说明" },
+  "captured_page": { "message": "捕获来源页面" },
+  "captured_page_unavailable": { "message": "捕获来源页面不可用" },
+  "captured_page_elsewhere": { "message": "此目标捕获自另一页面。请打开来源页面，再恢复标记或重新检查目标。" },
+  "open_captured_page": { "message": "打开来源页面" },
   "toolbar_widget_unavailable": { "message": "MeanThis 无法启动页内工具。请再次点击 MeanThis 图标打开侧边面板。" },
   "comparison_check": { "message": "查看变化" },
   "comparison_copy": { "message": "复制对比" },
@@ -467,6 +472,7 @@
   "clear_saved_site_aria": { "message": "清除 {origin} 的已保存数据" },
   "clear_all_saved_captures": { "message": "清除全部已保存捕获" },
   "confirm_clear_saved_site": { "message": "要清除 {origin} 的已保存 UI 引用会话吗？此站点的捕获目标与意图都会移除。" },
+  "confirm_clear_saved_site_dirty": { "message": "要清除 {origin} 的已保存 UI 引用会话吗？此站点的捕获目标和当前正在编辑的未保存任务说明都会移除。" },
   "confirm_clear_all_saved_sites": { "message": "要清除全部已保存 UI 引用会话吗？所有站点的捕获目标与意图都会移除；扩展偏好、已导出文件和剪贴板内容不会清除。" },
   "saved_site_cleared": { "message": "已清除该保存捕捉。" },
   "all_saved_captures_cleared": { "message": "已清除全部保存的捕获。" },

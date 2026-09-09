@@ -121,6 +121,7 @@ let liveOverlayStateRevision = 0;
 let overlayProjectionApplicationRevision = 0;
 let appliedOverlayProjection: OverlayProjectionDescriptor | null = null;
 let acknowledgedOverlayProjection: OverlayProjectionDescriptor | null = null;
+let rejectedOverlayRecovery: OverlayProjectionDescriptor | null = null;
 let clearProjectionFence: ClearProjectionReference | null = null;
 let overlayVisibilityRevision = 0;
 let overlayScopeVisibilityRevision = 0;
@@ -529,6 +530,7 @@ async function refreshOverlayDescriptors(expectedRevision: number): Promise<void
 function handleOverlayRouteChange(): void {
   liveOverlayStateRevision += 1;
   overlayProjectionApplicationRevision += 1;
+  rejectedOverlayRecovery = null;
   captureSelection.disableForNavigation();
   overlayCoordinator.applySelectionPreview(null);
   clearAppliedOverlayProjection();
@@ -667,11 +669,18 @@ async function applyOverlayProjection(
   if (accepted) {
     appliedOverlayProjection = projection;
     acknowledgedOverlayProjection = projection;
+    rejectedOverlayRecovery = null;
     if (itemCount > 0) persistentOverlays.setActionsEnabled(true);
     return true;
   }
   clearAppliedOverlayProjection(projection);
-  if (effectiveOverlaysVisible()) void requestOverlayRestore(liveOverlayStateRevision, true);
+  // The worker may return the identical rejected projection on restore. Allow
+  // one recovery attempt, then remain fail-closed until fresh state arrives.
+  if (effectiveOverlaysVisible() && (!rejectedOverlayRecovery ||
+      !sameOverlayProjectionDescriptor(rejectedOverlayRecovery, projection))) {
+    rejectedOverlayRecovery = { ...projection, subject: { ...projection.subject } };
+    void requestOverlayRestore(liveOverlayStateRevision, true);
+  }
   return false;
 }
 

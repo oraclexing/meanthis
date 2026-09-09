@@ -37,6 +37,7 @@ import {
   type TimeDisplayPreference,
 } from "./settings-preferences";
 import type { OverlayRebindStatus } from "./messages";
+import { getPanelSessionAnnotationLabels } from "./panel-session-model";
 
 export interface PanelAgentCopyInput {
   file: CaptureSessionFile | null;
@@ -729,14 +730,23 @@ function buildPanelFeedbackCopy(
   items: CaptureSessionFile["session"]["attachments"],
   translate: UiAttachTranslate,
 ): PanelAgentCopyResult {
+  const annotationLabels = getPanelSessionAnnotationLabels(input.file);
   const candidates = items.length > 0
     ? items.map((item, index) => ({
         label: item.labels.find((label) => label.trim()) ?? String.fromCharCode(65 + index),
+        annotationLabel: annotationLabels.get(item.id),
+        annotationLifecycle: "annotationLifecycle" in item ? item.annotationLifecycle : null,
         taskNote: resolvePanelItemIntent(item, input.selectedItemId, input.intent),
         record: item.sourceRecord as OriginCaptureRecord,
       }))
     : input.selectedRecord
-      ? [{ label: "A", taskNote: input.intent.trim(), record: input.selectedRecord }]
+      ? [{
+          label: "A",
+          annotationLabel: undefined,
+          annotationLifecycle: null,
+          taskNote: input.intent.trim(),
+          record: input.selectedRecord,
+        }]
       : [];
   if (candidates.length === 0) {
     return { ok: false, error: translate("no_selected_capture") };
@@ -755,6 +765,8 @@ function buildPanelFeedbackCopy(
     }
     entries.push({
       label: candidate.label,
+      annotationLabel: candidate.annotationLabel,
+      annotationLifecycle: candidate.annotationLifecycle,
       taskNote: candidate.taskNote,
       attachment: disclosure.record.attachment,
     });

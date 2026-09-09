@@ -340,6 +340,11 @@ export const ENGLISH_MESSAGES = {
   session: "Selected elements",
   editing_target: "Editing {label} · {target}",
   target_details: "Target details",
+  captured_page: "Captured page",
+  unsaved_task_note: "Unsaved task note",
+  captured_page_unavailable: "Captured page unavailable",
+  captured_page_elsewhere: "This target was captured on another page. Open its page, then restore or recheck the target.",
+  open_captured_page: "Open captured page",
   elements_count: "{count} of 26 elements",
   clear_selected_elements: "Clear selected elements",
   captured_elements_aria: "Captured elements",
@@ -546,6 +551,8 @@ export const ENGLISH_MESSAGES = {
     "Clear selected elements for this page and its embedded frames? Saved selections for every affected site will be discarded.",
   confirm_clear_saved_site:
     "Clear the saved UI reference session for {origin}? Captured targets and intents for this site will be removed.",
+  confirm_clear_saved_site_dirty:
+    "Clear the saved UI reference session for {origin}? Captured targets and the unsaved task note currently being edited for this site will be removed.",
   confirm_clear_all_saved_sites:
     "Clear every saved UI reference session? Captured targets and intents for all sites will be removed. Extension preferences, exported files, and clipboard contents are not cleared.",
   clipboard_failed: "Clipboard write failed. Select the text and copy manually.",

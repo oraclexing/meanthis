@@ -1,5 +1,6 @@
 import type { CaptureSessionFile } from "@meanthis/hub-core";
 import type { UIAttachment, UIAttachmentDisclosureMode } from "@meanthis/schema";
+import { formatAnnotationLabel } from "@meanthis/web-picker";
 import type { OriginCaptureRecord } from "./capture-store";
 import { deriveCaptureRecordDisclosure, type CaptureRecordDisclosureResult } from "./disclosure-view";
 import type { ActivePageContext } from "./messages";
@@ -12,6 +13,16 @@ export interface PanelSessionRow {
   capturedAt: string;
   sourceDisclosureMode: UIAttachmentDisclosureMode;
   selected: boolean;
+}
+
+/** Matches overlay numbering: assign against the full session before any UI/copy scope filter. */
+export function getPanelSessionAnnotationLabels(
+  file: CaptureSessionFile | null,
+): ReadonlyMap<string, string> {
+  return new Map((file?.session.attachments ?? []).map((item, index) => [
+    item.id,
+    formatAnnotationLabel(index),
+  ]));
 }
 
 export interface PanelSessionRowGroup {

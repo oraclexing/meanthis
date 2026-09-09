@@ -161,6 +161,12 @@ const SAVED_ATTACHMENT_REF_KEYS = [
 type PageAccessRecoveryKind = "permission" | "content";
 type PageAccessAutomaticFeedback = "denied" | "failed" | "not_ready" | null;
 type CurrentRebindObservation = OverlayRebindStatusData & { documentId?: string };
+type DirtyIntentIdentity = Readonly<{
+  origin: string;
+  epoch: string;
+  itemId: string;
+  intent: string;
+}>;
 
 export interface PanelDependencies {
   controller: PanelSessionController;
@@ -711,6 +717,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     | "publish_failed"
     | "clear_failed" = "idle";
   let localBridgeRefresh = Promise.resolve();
+  const localBridgeRefreshInFlight = new Map<"connection" | "heartbeat", Promise<void>>();
   let storedSessionSummaries: StoredOriginSessionSummary[] = [];
   let storedSessionReview: StoredSessionReviewData | null = null;
   let storedSessionHandoff: StoredSessionHandoffData | null = null;
@@ -719,6 +726,9 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   let storedSessionRestoreRevision = 0;
   let storedSessionsBusy = false;
   let storedSessionsRenderSignature: string | null = null;
+  let sessionGroupContext: string | null = null;
+  let sessionGroupSelectedItemId: string | null = null;
+  const sessionGroupOpenStates = new Map<string, boolean>();
 
   options.controller.subscribe((snapshot) => {
     latestSnapshot = snapshot;
@@ -1566,30 +1576,45 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       : t("bridge_trust_ask_help");
   }
 
+  function enqueueLocalBridgeRefresh(
+    kind: "connection" | "heartbeat",
+    operation: () => Promise<void>,
+  ): void {
+    if (localBridgeRefreshInFlight.has(kind)) return;
+    const run = localBridgeRefresh.then(operation, operation).catch(() => undefined);
+    localBridgeRefresh = run;
+    localBridgeRefreshInFlight.set(kind, run);
+    void run.then(() => {
+      if (localBridgeRefreshInFlight.get(kind) === run) {
+        localBridgeRefreshInFlight.delete(kind);
+      }
+    });
+  }
+
   function requestLocalBridgeRefresh(): void {
     if (!deps.localBridge || !localBridgeStatus.pending) return;
-    localBridgeRefresh = localBridgeRefresh
-      .then(async () => {
+    enqueueLocalBridgeRefresh("connection", async () => {
+      try {
         const previousPending = localBridgeStatus.pending;
         localBridgeStatus = await deps.localBridge!.refreshConnection();
         renderLocalBridgeStatus(localBridgeStatus);
         if (previousPending && localBridgeStatus.connected) {
           await requestLocalBridgePublish(latestSnapshot);
         }
-      })
-      .catch(() => {
+      } catch {
         elements.localBridgeStatus.textContent = t("waiting_approval_bridge_unavailable");
         renderLocalBridgeReadAcknowledgement({
           ...localBridgeStatus,
           readAcknowledgementState: "unavailable",
         });
-      });
+      }
+    });
   }
 
   function requestLocalBridgeHeartbeat(): void {
     if (!deps.localBridge || !localBridgeStatus.connected) return;
-    localBridgeRefresh = localBridgeRefresh
-      .then(async () => {
+    enqueueLocalBridgeRefresh("heartbeat", async () => {
+      try {
         localBridgeStatus = await deps.localBridge!.refreshConnectionAndHeartbeat();
         renderLocalBridgeStatus(localBridgeStatus);
         if (
@@ -1602,8 +1627,7 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
           // operation was a publish or a panel-channel revocation.
           await requestLocalBridgePublish(latestSnapshot);
         }
-      })
-      .catch(() => {
+      } catch {
         if (localBridgeShareState !== "clear_failed") {
           localBridgeShareState = "publish_failed";
         }
@@ -1612,7 +1636,8 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
           ...localBridgeStatus,
           readAcknowledgementState: "unavailable",
         });
-      });
+      }
+    });
   }
 
   function requestLocalBridgePublish(snapshot: PanelSessionSnapshot): Promise<void> {
@@ -2954,15 +2979,15 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   async function clearStoredOrigin(origin: string): Promise<void> {
     const summary = storedSessionSummaries.find((candidate) => candidate.origin === origin);
     if (!summary || !options.storedSessions || storedSessionsBusy) return;
-    if (
-      latestSnapshot.origin === origin &&
-      latestSnapshot.epoch === summary.epoch &&
-      latestSnapshot.activeSupported
-    ) {
-      await clearSession();
-      return;
-    }
-    if (!options.confirm(t("confirm_clear_saved_site", { origin }))) return;
+    const dirtyIntentIdentity = readDirtyIntentIdentity(latestSnapshot);
+    const dirtyIntentBelongsToTarget = isDirtyIntentForStoredOrigin(
+      dirtyIntentIdentity,
+      summary,
+    );
+    if (!options.confirm(t(
+      dirtyIntentBelongsToTarget ? "confirm_clear_saved_site_dirty" : "confirm_clear_saved_site",
+      { origin },
+    ))) return;
     storedSessionsBusy = true;
     renderStoredSessions();
     let response: SessionCommandResponse<ActiveSessionReadback>;
@@ -2996,12 +3021,61 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       renderStoredSessions();
       return;
     }
-    await options.controller.refreshActiveOrigin().catch(() => undefined);
+    if (
+      !readback.clearPending &&
+      isDirtyIntentForStoredOrigin(dirtyIntentIdentity, summary) &&
+      sameDirtyIntentIdentity(dirtyIntentIdentity, readDirtyIntentIdentity(latestSnapshot))
+    ) {
+      await options.controller.discardDirtyIntent().catch(() => undefined);
+    }
+    if (!readback.clearPending) {
+      await options.controller.refreshActiveOrigin().catch(() => undefined);
+    }
     await refreshStoredSessions();
     elements.savedSites.hidden = false;
     elements.savedSitesStatus.textContent = readback.clearPending
       ? t("clear_in_progress")
       : t("saved_site_cleared");
+  }
+
+  function readDirtyIntentIdentity(snapshot: PanelSessionSnapshot): DirtyIntentIdentity | null {
+    if (snapshot.recovery) {
+      return {
+        origin: snapshot.recovery.oldOrigin,
+        epoch: snapshot.recovery.oldEpoch,
+        itemId: snapshot.recovery.itemId,
+        intent: snapshot.recovery.intent,
+      };
+    }
+    if (!snapshot.intentDirty || !snapshot.origin || !snapshot.epoch || !snapshot.selectedItemId) {
+      return null;
+    }
+    return {
+      origin: snapshot.origin,
+      epoch: snapshot.epoch,
+      itemId: snapshot.selectedItemId,
+      intent: snapshot.intent,
+    };
+  }
+
+  function isDirtyIntentForStoredOrigin(
+    identity: DirtyIntentIdentity | null,
+    summary: StoredOriginSessionSummary,
+  ): boolean {
+    return identity !== null &&
+      identity.origin === summary.origin &&
+      (identity.epoch === summary.epoch || summary.clearPending);
+  }
+
+  function sameDirtyIntentIdentity(
+    left: DirtyIntentIdentity | null,
+    right: DirtyIntentIdentity | null,
+  ): boolean {
+    return left !== null && right !== null &&
+      left.origin === right.origin &&
+      left.epoch === right.epoch &&
+      left.itemId === right.itemId &&
+      left.intent === right.intent;
   }
 
   async function clearAllStoredOrigins(): Promise<void> {
@@ -3084,6 +3158,8 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       snapshot.recovery !== null
     );
     elements.intentRecovery.hidden = snapshot.recovery === null;
+    const recoveryDraft = snapshot.recovery?.intent ?? "";
+    if (elements.intentRecoveryDraft.value !== recoveryDraft) elements.intentRecoveryDraft.value = recoveryDraft;
     const clearPending = snapshot.clearPending;
     const sessionMutationPending = snapshot.sessionMutationPending;
     const selectedRow = rows.find((row) => row.id === snapshot.selectedItemId);
@@ -3397,6 +3473,17 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     );
   }
 
+  function selectedCapturedPageRoute(record: OriginCaptureRecord | undefined): string | null {
+    if (!record?.pageUrl) return null;
+    try {
+      const url = new URL(record.pageUrl);
+      if (url.username || url.password || url.origin !== record.origin) return null;
+      return canonicalStoredRouteUrl(url.origin, url.pathname);
+    } catch {
+      return null;
+    }
+  }
+
   function renderSelectedTargetSummary(
     row: ReturnType<typeof summarizePanelSessionRows>[number] | undefined,
     previewEnabled: boolean,
@@ -3404,6 +3491,10 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
   ): void {
     captureComparison?.sync(snapshot, previewEnabled);
     const previousItemId = elements.selectedTargetDetails.dataset.selectedItemId;
+    elements.selectedTargetPage.textContent = "";
+    elements.selectedTargetPageHelp.hidden = true;
+    elements.selectedTargetOpenPage.hidden = true;
+    elements.selectedTargetOpenPage.onclick = null;
     if (!row) {
       elements.selectedTargetSummary.hidden = true;
       elements.selectedTargetSummary.textContent = "";
@@ -3427,6 +3518,27 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       target: summarizeTargetKind(row.target),
     });
     elements.selectedTargetDetails.hidden = false;
+    const record = findPanelSessionItem(snapshot.file, row.id)?.sourceRecord as OriginCaptureRecord | undefined;
+    const capturedRoute = selectedCapturedPageRoute(record);
+    elements.selectedTargetPage.textContent = capturedRoute ?? t("captured_page_unavailable");
+    const foreignPage = Boolean(capturedRoute && record &&
+      (!snapshot.activePage || !isCurrentPageRecord(record, snapshot.activePage)));
+    elements.selectedTargetPageHelp.hidden = !foreignPage;
+    elements.selectedTargetPageHelp.textContent = foreignPage ? t("captured_page_elsewhere") : "";
+    elements.selectedTargetOpenPage.hidden = !foreignPage || !options.openSavedRoute;
+    if (foreignPage && capturedRoute && options.openSavedRoute) {
+      const itemId = row.id;
+      const origin = snapshot.origin;
+      const epoch = snapshot.epoch;
+      elements.selectedTargetOpenPage.onclick = () => {
+        // Recheck the source binding at click time; a stale selected-item handler
+        // must not open a page belonging to a replaced session or selection.
+        const current = findPanelSessionItem(latestSnapshot.file, itemId)?.sourceRecord as OriginCaptureRecord | undefined;
+        if (latestSnapshot.selectedItemId !== itemId || latestSnapshot.origin !== origin || latestSnapshot.epoch !== epoch ||
+            selectedCapturedPageRoute(current) !== capturedRoute) return;
+        void runPanelAction(() => options.openSavedRoute!(capturedRoute));
+      };
+    }
     elements.selectedTargetFull.textContent = `${row.label} · ${row.target}`;
     elements.selectedTargetCapturedAt.textContent = formatDisplayTime(
       row.capturedAt,
@@ -3453,6 +3565,20 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
     groups: ReturnType<typeof groupPanelSessionRows>,
     clearPending: boolean,
   ): void {
+    const context = JSON.stringify([snapshot.origin, snapshot.epoch]);
+    if (context !== sessionGroupContext) {
+      sessionGroupOpenStates.clear();
+      sessionGroupSelectedItemId = null;
+    } else {
+      // Read the live DOM before rebuilding; native details toggles can precede
+      // their queued toggle event when a session notification arrives.
+      for (const group of elements.sessionList.querySelectorAll<HTMLDetailsElement>("details[data-session-group-key]")) {
+        sessionGroupOpenStates.set(group.dataset.sessionGroupKey!, group.open);
+      }
+    }
+    const selectionChanged = sessionGroupSelectedItemId !== snapshot.selectedItemId;
+    sessionGroupContext = context;
+    sessionGroupSelectedItemId = snapshot.selectedItemId;
     clearOverlayPreview();
     const rows = groups.flatMap((group) => group.rows);
     const currentCount = groups.find((group) => group.current)?.rows.length ?? 0;
@@ -3481,7 +3607,10 @@ export async function initializePanel(options: PanelDependencies): Promise<void>
       const details = document.createElement("details");
       details.className = `session-group${group.current ? " current" : ""}`;
       details.dataset.sessionGroupKey = group.key;
-      details.open = group.current || group.rows.some((row) => row.selected);
+      const selected = group.rows.some((row) => row.selected);
+      details.open = selectionChanged && selected
+        ? true
+        : sessionGroupOpenStates.get(group.key) ?? (group.current || selected);
 
       const summary = document.createElement("summary");
       summary.setAttribute(
@@ -4905,6 +5034,9 @@ function queryPanelElements() {
     selectedTargetFull: query<HTMLElement>("#selected-target-full"),
     selectedTargetCapturedAt: query<HTMLElement>("#selected-target-captured-at"),
     selectedTargetSource: query<HTMLElement>("#selected-target-source"),
+    selectedTargetPage: query<HTMLElement>("#selected-target-page"),
+    selectedTargetPageHelp: query<HTMLElement>("#selected-target-page-help"),
+    selectedTargetOpenPage: query<HTMLButtonElement>("#selected-target-open-page"),
     selectedTargetRebindRow: query<HTMLElement>("#selected-target-rebind-row"),
     selectedTargetRebindStatus: query<HTMLElement>("#selected-target-rebind-status"),
     removeSelectedItem: query<HTMLButtonElement>("#remove-selected-item"),
@@ -4970,6 +5102,7 @@ function queryPanelElements() {
     clearSession: query<HTMLButtonElement>("#clear-session"),
     exportSession: query<HTMLButtonElement>("#export-session"),
     intentRecovery: query<HTMLElement>("#intent-recovery"),
+    intentRecoveryDraft: query<HTMLTextAreaElement>("#intent-recovery-draft"),
     retryIntent: query<HTMLButtonElement>("#retry-intent"),
     discardIntent: query<HTMLButtonElement>("#discard-intent"),
   };

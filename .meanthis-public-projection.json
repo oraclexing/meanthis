@@ -265,6 +265,7 @@
     "apps/extension-mv3/src/vite-env.d.ts",
     "apps/extension-mv3/src/widget-annotation-adapter.test.ts",
     "apps/extension-mv3/src/widget-annotation-adapter.ts",
+    "apps/extension-mv3/src/widget-task-note.test.ts",
     "apps/extension-mv3/test/session-fixtures.ts",
     "apps/extension-mv3/tsconfig.json",
     "apps/extension-mv3/vite.config.test.ts",
@@ -387,5 +388,5 @@
     "tsconfig.base.json",
     "vitest.config.ts"
   ],
-  "contentSha256": "1713d95a090990cbdb6ed949215d177dc1e98d73819c713ea3727cab4fe69155"
+  "contentSha256": "9cda2e81a4a446f07ea0a649aeb3fa30bcf47ddd6d2d26f971deb710c5693be7"
 }

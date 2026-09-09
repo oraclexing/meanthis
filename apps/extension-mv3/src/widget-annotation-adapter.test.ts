@@ -141,6 +141,33 @@ const STRUCTURALLY_INVALID_WIDGET_CLEAR_PAIR_CASES: ReadonlyArray<[
 ];
 
 describe("createPanelAnnotationSurfaceAdapter", () => {
+  test("keeps full-session annotation numbers when the current page or authoritative scope hides earlier items", async () => {
+    const harness = createHarness();
+    await harness.controller.initialize();
+    const first = createCaptureRecord("save", "Save changes");
+    const second = createCaptureRecord("cancel", "Cancel");
+    first.pageUrl = `${ORIGIN}/first`;
+    first.attachment.source.url = first.pageUrl;
+    second.pageUrl = `${ORIGIN}/second`;
+    second.attachment.source.url = second.pageUrl;
+    const file = createSessionFile([first, second]);
+    const snapshot = {
+      ...harness.controller.getSnapshot(),
+      file,
+      selectedItemId: "att_cancel",
+      activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/second" },
+    };
+    expect(toPanelAnnotationSurfaceReadback(snapshot).items)
+      .toMatchObject([{ itemId: "att_cancel", label: "2" }]);
+    expect(toPanelAnnotationSurfaceReadback(snapshot, ["att_cancel"]).items)
+      .toMatchObject([{ itemId: "att_cancel", label: "2" }]);
+    expect(toPanelAnnotationSurfaceReadback({ ...snapshot, activePage: null }, ["att_save", "att_cancel"]).items)
+      .toMatchObject([{ itemId: "att_save", label: "1" }, { itemId: "att_cancel", label: "2" }]);
+    file.session.attachments.shift();
+    expect(toPanelAnnotationSurfaceReadback(snapshot, ["att_cancel"]).items)
+      .toMatchObject([{ itemId: "att_cancel", label: "1" }]);
+  });
+
   test("reads a V2 snapshot without changing or inventing annotation identity", async () => {
     const harness = createHarness();
     await harness.controller.initialize();
@@ -398,6 +425,74 @@ describe("createPanelAnnotationSurfaceAdapter", () => {
     expect(harness.client.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
     expect(harness.client.calls).toContain("clear:operation-1:active-origin");
     expect(harness.controller.getSnapshot().file?.session.attachments).toEqual([]);
+  });
+
+  test.each(["remove", "clear"] as const)("reconciles %s after a notification supersedes a successful removal", async (action) => {
+    const harness = createHarness();
+    await harness.controller.initialize();
+    const originalRemove = harness.client.removeItem.bind(harness.client);
+    vi.spyOn(harness.client, "removeItem").mockImplementation(async (...args) => {
+      // The notification reads before the deletion commits, but supersedes the
+      // controller's mutation request. The successful mutation reply is ignored.
+      await harness.controller.refreshActiveOrigin();
+      return originalRemove(...args);
+    });
+    const adapter = createPanelAnnotationSurfaceAdapter({
+      controller: harness.controller,
+      getCurrentScopeItemIds: () => ["att_save", "att_cancel"],
+      activateOverlay: vi.fn(async () => undefined),
+      copy: vi.fn(async () => ({ copied: true, count: 0, text: "" })),
+      createOperationId: () => "operation-1",
+      strings: { operationFailed: "operation failed", sessionNotReady: "session not ready", taskNoteSaveFailed: "save failed" },
+    });
+    const result = action === "clear" ? await adapter.clear() : await adapter.remove("att_save");
+    expect(result.items.map((item) => item.itemId)).toEqual(action === "clear" ? [] : ["att_cancel"]);
+    expect(harness.client.calls.filter((call) => call.startsWith("remove:")))
+      .toEqual(action === "clear" ? ["remove:att_save", "remove:att_cancel"] : ["remove:att_save"]);
+  });
+
+  test.each(["STORAGE_ERROR", "Capture diagnostics cleanup is pending retry."])("does not refresh away a removal error: %s", async (message) => {
+    const harness = createHarness();
+    await harness.controller.initialize();
+    vi.spyOn(harness.client, "removeItem").mockResolvedValue({ ok: false, code: "STORAGE_ERROR", error: message });
+    const refresh = vi.spyOn(harness.controller, "refreshActiveOrigin");
+    const adapter = createPanelAnnotationSurfaceAdapter({
+      controller: harness.controller, getCurrentScopeItemIds: () => ["att_save", "att_cancel"],
+      activateOverlay: vi.fn(async () => undefined), copy: vi.fn(async () => ({ copied: true, count: 0, text: "" })),
+      createOperationId: () => "operation-1",
+      strings: { operationFailed: "operation failed", sessionNotReady: "session not ready", taskNoteSaveFailed: "save failed" },
+    });
+    await expect(adapter.clear()).rejects.toThrow(message);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(harness.client.removeItem).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["stale", "navigated"] as const)("stops scoped clear when canonical reconciliation is %s", async (failure) => {
+    const harness = createHarness();
+    await harness.controller.initialize();
+    const oldActive = await harness.client.getActive();
+    const originalRemove = harness.client.removeItem.bind(harness.client);
+    vi.spyOn(harness.client, "removeItem").mockImplementation(async (...args) => {
+      await harness.controller.refreshActiveOrigin();
+      const response = await originalRemove(...args);
+      const currentActive = await harness.client.getActive();
+      if (!currentActive.ok) throw new Error("fixture failed");
+      vi.spyOn(harness.client, "getActive").mockResolvedValue(failure === "stale" ? oldActive : {
+        ...currentActive,
+        data: { ...currentActive.data, activePage: { tabId: 1, frameId: 0, origin: ORIGIN, pathname: "/other-page" } },
+      });
+      return response;
+    });
+    const refresh = vi.spyOn(harness.controller, "refreshActiveOrigin");
+    const adapter = createPanelAnnotationSurfaceAdapter({
+      controller: harness.controller, getCurrentScopeItemIds: () => ["att_save", "att_cancel"],
+      activateOverlay: vi.fn(async () => undefined), copy: vi.fn(async () => ({ copied: true, count: 0, text: "" })),
+      createOperationId: () => "operation-1",
+      strings: { operationFailed: "operation failed", sessionNotReady: "session not ready", taskNoteSaveFailed: "save failed" },
+    });
+    await expect(adapter.clear()).rejects.toThrow(failure === "stale" ? "operation failed" : "session not ready");
+    expect(refresh).toHaveBeenCalledTimes(failure === "stale" ? 4 : 3);
+    expect(harness.client.removeItem).toHaveBeenCalledTimes(1);
   });
 
   test("projects the exact authoritative pending clear pair", async () => {

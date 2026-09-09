@@ -125,6 +125,10 @@ export interface AttachmentFeedbackEntry {
   label: string;
   attachment: UIAttachment;
   taskNote?: string;
+  /** The originating surface's annotation reference, retained when flat entries are grouped. */
+  annotationLabel?: string;
+  /** Reference metadata for this flat entry; never requested work. */
+  annotationLifecycle?: AttachmentFeedbackAnnotationLifecycle | null;
   annotations?: readonly AttachmentFeedbackAnnotation[];
 }
 
@@ -251,8 +255,9 @@ function normalizeFeedbackTargets(
     const identity = feedbackTargetIdentity(entry.attachment);
     const existing = targetByIdentity.get(identity);
     const annotation: AttachmentFeedbackAnnotation = {
-      label: "1",
+      label: entry.annotationLabel ?? "1",
       taskNote: entry.taskNote,
+      annotationLifecycle: sanitizeFeedbackAnnotationLifecycle(entry.annotationLifecycle),
       selectionPoint: entry.attachment.selectionPoint
         ? { ...entry.attachment.selectionPoint }
         : null,
@@ -269,7 +274,7 @@ function normalizeFeedbackTargets(
     }
     const annotations = [...(existing.annotations ?? []), {
       ...annotation,
-      label: String((existing.annotations?.length ?? 0) + 1),
+      label: entry.annotationLabel ?? String((existing.annotations?.length ?? 0) + 1),
     }];
     existing.annotations = annotations;
   }
@@ -512,6 +517,9 @@ function serializeFeedbackEntry(
   const boundary = formatFeedbackBoundary(attachment);
   const compactLines = [
     `${detail === "compact" ? `${index + 1}.` : "##"} Target ${label}: ${target}`,
+    ...(annotations.length === 1
+      ? [`- Annotation reference: ${formatInlineData(annotations[0]!.label)}`]
+      : []),
     ...(annotations.length <= 1
       ? [`- Task note: ${taskNote ? formatInlineData(taskNote) : "none (context only)"}`]
       : annotations.map((annotation) =>

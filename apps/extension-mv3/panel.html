@@ -219,6 +219,8 @@
         </div>
         <div id="intent-recovery" class="intent-recovery" hidden>
           <span data-i18n="unsaved_intent_attention">Unsaved intent needs attention.</span>
+          <label for="intent-recovery-draft" data-i18n="unsaved_task_note">Unsaved task note</label>
+          <textarea id="intent-recovery-draft" rows="4" readonly></textarea>
           <button id="retry-intent" class="utility-action" type="button" data-i18n="retry_save">Retry save</button>
           <button id="discard-intent" class="utility-action destructive-action" type="button" data-i18n="discard_changes">Discard changes</button>
         </div>
@@ -262,7 +264,13 @@
                 <dt data-i18n="current_page">Current page</dt>
                 <dd id="selected-target-rebind-status" class="session-rebind-status"></dd>
               </div>
+              <div>
+                <dt data-i18n="captured_page">Captured page</dt>
+                <dd id="selected-target-page"></dd>
+              </div>
             </dl>
+            <p id="selected-target-page-help" class="muted" hidden></p>
+            <button id="selected-target-open-page" type="button" class="utility-action" hidden data-i18n="open_captured_page">Open captured page</button>
           </details>
           <details id="relation-settings" class="task-shortcut-disclosure" hidden>
             <summary data-i18n="layout_relationship_optional">Use a task note shortcut (optional)</summary>

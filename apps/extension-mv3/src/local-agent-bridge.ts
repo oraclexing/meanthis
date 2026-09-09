@@ -114,6 +114,11 @@ export interface LocalAgentBridgePublishInput {
   activity?: LocalBridgeActivityV1;
 }
 
+type LocalAgentBridgeStatusOperation =
+  | "readStatus"
+  | "refreshConnection"
+  | "refreshConnectionAndHeartbeat";
+
 function downgradeCachedSnapshot(
   input: LocalAgentBridgePublishInput,
 ): LocalAgentBridgePublishInput {
@@ -212,15 +217,70 @@ export function createLocalAgentBridgeClient(
   dependencies: LocalAgentBridgeDependencies,
 ): LocalAgentBridgeClient {
   let operationTail: Promise<void> = Promise.resolve();
+  let operationGeneration = 0;
+  const statusOperations = new Map<
+    LocalAgentBridgeStatusOperation,
+    { generation: number; promise: Promise<LocalAgentBridgeStatus> }
+  >();
   const annotationLifecycleTransport = createAnnotationLifecycleControlTransport({
     fetch: dependencies.fetch,
   });
 
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    // Every non-status operation is a barrier for an older status read. A
+    // status request created after this call must observe the queue after the
+    // mutation, even if the older request is still waiting on the network.
+    operationGeneration += 1;
+    const promise = enqueueWithoutBarrier(operation);
+    invalidateReadStatusAfterSettlement(promise);
+    return promise;
+  }
+
+  function enqueueWithoutBarrier<T>(operation: () => Promise<T>): Promise<T> {
     const run = () => dependencies.withSessionLock(operation);
     const result = operationTail.then(run, run);
     operationTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  function enqueueStatusOperation(
+    kind: LocalAgentBridgeStatusOperation,
+    operation: () => Promise<LocalAgentBridgeStatus>,
+  ): Promise<LocalAgentBridgeStatus> {
+    const existing = statusOperations.get(kind);
+    if (existing?.generation === operationGeneration) return existing.promise;
+
+    const generation = ++operationGeneration;
+    const promise = enqueueWithoutBarrier(operation);
+    const tracked = trackStatusOperation(kind, generation, promise);
+    invalidateReadStatusAfterSettlement(promise);
+    return tracked;
+  }
+
+  function invalidateReadStatusAfterSettlement<T>(promise: Promise<T>): void {
+    void promise.then(invalidateReadStatus, invalidateReadStatus);
+  }
+
+  function invalidateReadStatus(): void {
+    // Settlement invalidates only the read result. Keep the generation stable
+    // so a same-kind refresh already queued behind this operation can merge.
+    statusOperations.delete("readStatus");
+  }
+
+  function trackStatusOperation(
+    kind: LocalAgentBridgeStatusOperation,
+    generation: number,
+    promise: Promise<LocalAgentBridgeStatus>,
+  ): Promise<LocalAgentBridgeStatus> {
+    statusOperations.set(kind, { generation, promise });
+    const clear = () => {
+      const current = statusOperations.get(kind);
+      if (current?.promise === promise) statusOperations.delete(kind);
+    };
+    // Use then rather than finally so the cleanup branch cannot create an
+    // unhandled rejection for a caller that intentionally observes the error.
+    void promise.then(clear, clear);
+    return promise;
   }
 
   async function readPersistentState(): Promise<LocalAgentBridgePersistentState | null> {
@@ -801,9 +861,14 @@ export function createLocalAgentBridgeClient(
       await dependencies.repairOwners();
     },
 
-    async readStatus() {
-      await readPersistentState();
-      return readAcknowledgementState(await readSessionState());
+    readStatus() {
+      const existing = statusOperations.get("readStatus");
+      if (existing?.generation === operationGeneration) return existing.promise;
+      const promise = (async () => {
+        await readPersistentState();
+        return readAcknowledgementState(await readSessionState());
+      })();
+      return trackStatusOperation("readStatus", operationGeneration, promise);
     },
 
     createConnectionRequest(approvalMode) {
@@ -937,11 +1002,14 @@ export function createLocalAgentBridgeClient(
     },
 
     refreshConnection() {
-      return enqueue(refreshConnectionAndPendingClearInternal);
+      return enqueueStatusOperation(
+        "refreshConnection",
+        refreshConnectionAndPendingClearInternal,
+      );
     },
 
     refreshConnectionAndHeartbeat() {
-      return enqueue(async () => {
+      return enqueueStatusOperation("refreshConnectionAndHeartbeat", async () => {
         await refreshConnectionInternal();
         const state = await readSessionState();
         if (state?.instanceId && state.token) {

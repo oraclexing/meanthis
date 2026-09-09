@@ -621,6 +621,8 @@ describe("content overlay action feedback", () => {
     ) => boolean | void> = [];
     let ackAccepted = true;
     let restoreRequests = 0;
+    let rejectedRestoreReplies = 0;
+    let restoreReplyRevision = 2;
     const sendMessage = vi.fn((message: unknown) => {
       const type = typeof message === "object" && message !== null && "type" in message
         ? (message as { type?: unknown }).type
@@ -633,6 +635,19 @@ describe("content overlay action feedback", () => {
       }
       if (type === "ui-attach:overlays-restore-get") {
         restoreRequests += 1;
+        // Cap the broken loop in the fixture so a regression fails instead of
+        // starving the test runner's event loop indefinitely.
+        if (!ackAccepted && rejectedRestoreReplies++ < 4) {
+          return Promise.resolve({
+            ok: true,
+            data: {
+              origin: window.location.origin,
+              projection: { ...projection, revision: restoreReplyRevision },
+              activeItemId: null,
+              items: [],
+            },
+          });
+        }
         return Promise.resolve(undefined);
       }
       const action = typeof message === "object" && message !== null &&
@@ -708,8 +723,34 @@ describe("content overlay action feedback", () => {
     expect(sendMessage.mock.calls.some(([message]) => (
       typeof message === "object" && message !== null && "action" in message
     ))).toBe(false);
-    expect(restoreRequests).toBeGreaterThan(restoreRequestsBeforeRejection);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restoreRequests).toBe(restoreRequestsBeforeRejection + 1);
     expect(document.querySelector("[data-ui-attach-overlay-action-failure]")).not.toBeNull();
+
+    const publishProjection = (revision: number) => {
+      for (const listener of runtimeListeners) listener({
+        type: "ui-attach:overlay-state",
+        origin: window.location.origin,
+        projection: { ...projection, revision },
+        activeItemId: null,
+        items: [],
+      }, {}, () => undefined);
+    };
+    ackAccepted = true;
+    publishProjection(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restoreRequests).toBe(restoreRequestsBeforeRejection + 2);
+    // Successful confirmation reopens recovery for this same identity; a new
+    // revision also gets its own bounded recovery after another rejection.
+    ackAccepted = false;
+    for (const revision of [2, 3]) {
+      restoreReplyRevision = revision;
+      rejectedRestoreReplies = 0;
+      const before = restoreRequests;
+      publishProjection(revision);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(restoreRequests).toBe(before + 1);
+    }
 
     runtimeListeners[0]?.(
       { type: "ui-attach:content-deactivate" },

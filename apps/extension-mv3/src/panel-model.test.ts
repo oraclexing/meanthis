@@ -699,6 +699,41 @@ describe("buildPanelBridgeCapture", () => {
 });
 
 describe("buildPanelAgentCopy", () => {
+  test.each(["compact", "standard", "detailed", "forensic"] as const)(
+    "%s feedback preserves scoped annotation numbers and resolved/reopened lifecycle",
+    (outputDetail) => {
+      const first = createCaptureRecord("save", "Save changes");
+      const second = createCaptureRecord("cancel", "Cancel");
+      const file = createSessionFile([first, second]) as unknown as CaptureSessionFileV3;
+      file.schemaVersion = "0.3.0";
+      file.session.updatedAt = "2026-07-11T10:04:00.000Z";
+      file.session.attachments = file.session.attachments.map((item, index) => ({
+        ...item,
+        annotationId: `annotation-${index + 1}`,
+        updatedAt: "2026-07-11T10:03:00.000Z",
+        annotationLifecycle: { state: "resolved" as const, resolvedAt: "2026-07-11T10:03:00.000Z" },
+      }));
+      const input = {
+        file, attachmentIds: ["att_cancel"], selectedItemId: "att_cancel", selectedRecord: second,
+        viewMode: "agent_safe" as const, intent: second.intent, outputDetail,
+      };
+      const resolved = buildPanelAgentCopy(input);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+      expect(resolved.text).toContain("Target B");
+      expect(resolved.text).toContain("Annotation reference: 2");
+      expect(resolved.text).toContain("Annotation lifecycle: resolved; resolvedAt=2026-07-11T10:03:00.000Z");
+      expect(buildPanelBridgeCapture(input, "capture_time")?.targets[0]?.annotationLifecycle?.state).toBe("resolved");
+      file.session.attachments[1]!.annotationLifecycle = { state: "open", resolvedAt: null };
+      const reopened = buildPanelAgentCopy(input);
+      expect(reopened.ok).toBe(true);
+      if (!reopened.ok) return;
+      expect(reopened.text).toContain("Annotation lifecycle: open; resolvedAt=null");
+      expect(reopened.text).not.toContain("lifecycle: resolved");
+      expect(reopened.text).toContain(second.intent);
+    },
+  );
+
   test("defaults the handoff to the selected page instead of the whole origin session", () => {
     const save = createCaptureRecord("save", "Save changes");
     const cancel = createCaptureRecord("cancel", "Cancel");
@@ -881,6 +916,47 @@ describe("buildPanelAgentCopy", () => {
     expect(result.text).toContain("Annotation 1 task note: First comment.");
     expect(result.text).toContain("Annotation 2 task note: Second comment.");
   });
+
+  test.each(["compact", "standard", "detailed", "forensic"] as const)(
+    "%s feedback keeps mixed lifecycle on repeated targets without inventing legacy state",
+    (outputDetail) => {
+      const first = createCaptureRecord("save", "Save changes");
+      const second = structuredClone(first);
+      second.intent = "Second comment.";
+      const legacy = createSessionFile([first, second]);
+      legacy.session.attachments[1]!.id = "att_save-2";
+      const input = {
+        file: legacy, attachmentIds: ["att_save", "att_save-2"], selectedItemId: "att_save-2",
+        selectedRecord: second, viewMode: "agent_safe" as const, intent: second.intent, outputDetail,
+      };
+      const legacyCopy = buildPanelAgentCopy(input);
+      expect(legacyCopy.ok).toBe(true);
+      if (!legacyCopy.ok) return;
+      expect(legacyCopy.attachmentCount).toBe(1);
+      expect(legacyCopy.text).not.toContain("lifecycle:");
+      const file = structuredClone(legacy) as unknown as CaptureSessionFileV3;
+      file.schemaVersion = "0.3.0";
+      file.session.updatedAt = "2026-07-11T10:04:00.000Z";
+      file.session.attachments = file.session.attachments.map((item, index) => ({
+        ...item,
+        annotationId: `annotation-${index + 1}`,
+        updatedAt: "2026-07-11T10:03:00.000Z",
+        annotationLifecycle: index === 0
+          ? { state: "open" as const, resolvedAt: null }
+          : { state: "resolved" as const, resolvedAt: "2026-07-11T10:03:00.000Z" },
+      }));
+      const currentCopy = buildPanelAgentCopy({ ...input, file });
+      expect(currentCopy.ok).toBe(true);
+      if (!currentCopy.ok) return;
+      expect(currentCopy.attachmentCount).toBe(1);
+      expect(currentCopy.text.match(/Target A/gu)).toHaveLength(1);
+      expect(currentCopy.text).not.toContain("Target B");
+      expect(currentCopy.text).toContain("Annotation 1 lifecycle: open; resolvedAt=null");
+      expect(currentCopy.text).toContain("Annotation 2 lifecycle: resolved; resolvedAt=2026-07-11T10:03:00.000Z");
+      expect(currentCopy.text).toContain("Annotation 1 task note: Update Save changes");
+      expect(currentCopy.text).toContain("Annotation 2 task note: Second comment.");
+    },
+  );
 
   test("does not revive a cleared selected note or include an out-of-scope edit", () => {
     const save = createCaptureRecord("save", "Save changes");

@@ -24,6 +24,7 @@ import {
   getLocalBridgeMcpHttpTokenPath,
   inspectLocalBridgeMcpHttpToken,
   inspectLocalBridgeWindowsProtectedAcl,
+  inspectLocalBridgeWindowsProtectedAclBatch,
   loadOrCreateLocalBridgeMcpHttpToken,
   readVerifiedLocalBridgeProtectedBuildMarker,
   readVerifiedLocalBridgeMcpHttpDesiredIdentity,
@@ -236,6 +237,243 @@ describe("local bridge MCP HTTP token", () => {
       execFile: aclExecFile,
     })).resolves.toBeUndefined();
     expect(aclExecFile).toHaveBeenCalledTimes(2);
+  });
+
+  test("batches same-turn ACL inspections with one runner and only caches a complete batch", async () => {
+    const codexHome = await createCodexHome();
+    const directory = join(codexHome, "acl-batch-target");
+    const firstPath = join(directory, "first");
+    const secondPath = join(directory, "second");
+    await mkdir(directory);
+    await writeFile(firstPath, "first", "utf8");
+    await writeFile(secondPath, "second", "utf8");
+
+    let releaseInitialLstats!: () => void;
+    const initialLstatsStarted = new Promise<void>((resolve) => {
+      releaseInitialLstats = resolve;
+    });
+    let lstatCalls = 0;
+    const initialLstatResults: Array<ReturnType<typeof import("node:fs/promises")["lstat"]>> = [];
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      );
+      return {
+        ...actual,
+        lstat: async (...args: Parameters<typeof actual.lstat>) => {
+          lstatCalls += 1;
+          const result = actual.lstat(...args);
+          if (lstatCalls <= 4) {
+            initialLstatResults.push(result);
+            if (lstatCalls === 4) {
+              void Promise.all(initialLstatResults).then(
+                releaseInitialLstats,
+                releaseInitialLstats,
+              );
+            }
+            await initialLstatsStarted;
+          }
+          return result;
+        },
+      };
+    });
+
+    try {
+      const {
+        inspectLocalBridgeWindowsProtectedAclBatch: inspectBatch,
+      } = await import("./local-bridge-mcp-http-token");
+      const aclExecFile = vi.fn(async () => undefined);
+      await expect(Promise.all([
+        inspectBatch([
+          { path: directory, kind: "directory" },
+          { path: firstPath, kind: "file" },
+        ], { execFile: aclExecFile }),
+        inspectBatch([
+          { path: directory, kind: "directory" },
+          { path: secondPath, kind: "file" },
+        ], { execFile: aclExecFile }),
+      ])).resolves.toEqual([undefined, undefined]);
+
+      expect(aclExecFile).toHaveBeenCalledTimes(1);
+      const [, args, childOptions] = aclExecFile.mock.calls[0];
+      const targets = JSON.parse(
+        childOptions.env.MEANTHIS_MCP_ACL_TARGETS_JSON ?? "null",
+      ) as unknown;
+      expect(targets).toEqual(expect.arrayContaining([
+        { path: directory, kind: "directory" },
+        { path: firstPath, kind: "file" },
+        { path: secondPath, kind: "file" },
+      ]));
+      expect((targets as Array<{ path: string; kind: string }>)).toHaveLength(3);
+      expect(childOptions.env[MEANTHIS_MCP_HTTP_TOKEN_ENV]).toBeUndefined();
+      expect(args.at(-1)).toContain("foreach ($target in $targets)");
+      expect(args.at(-1)).toContain("$inheritance = if ($targetKind -eq 'directory') {");
+      expect(args.at(-1)).toContain(
+        "if ([int64]$rule.InheritanceFlags -ne [int64]$inheritance)",
+      );
+      expect(args.at(-1)).toContain(
+        "if ([int64]$rule.PropagationFlags -ne [int64]$propagation)",
+      );
+
+      await expect(inspectBatch([
+        { path: directory, kind: "directory" },
+        { path: firstPath, kind: "file" },
+        { path: secondPath, kind: "file" },
+      ], { execFile: aclExecFile })).resolves.toBeUndefined();
+      expect(aclExecFile).toHaveBeenCalledTimes(1);
+
+      await writeFile(secondPath, "second-drift", "utf8");
+      aclExecFile.mockRejectedValueOnce(new Error("batch ACL failure"));
+      await expect(inspectBatch([
+        { path: directory, kind: "directory" },
+        { path: firstPath, kind: "file" },
+        { path: secondPath, kind: "file" },
+      ], { execFile: aclExecFile })).rejects.toMatchObject({
+        code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+        operation: "inspect",
+      });
+
+      const failedHome = await createCodexHome();
+      const failedDirectory = join(failedHome, "acl-batch-failure");
+      const failedFile = join(failedDirectory, "file");
+      await mkdir(failedDirectory);
+      await writeFile(failedFile, "failed", "utf8");
+      const failedRunner = vi.fn()
+        .mockRejectedValueOnce(new Error("batch ACL failure"))
+        .mockResolvedValue(undefined);
+      const failedTargets = [
+        { path: failedDirectory, kind: "directory" as const },
+        { path: failedFile, kind: "file" as const },
+      ];
+      await expect(inspectBatch(failedTargets, {
+        execFile: failedRunner,
+      })).rejects.toMatchObject({
+        code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+        operation: "inspect",
+      });
+      await expect(inspectBatch(failedTargets, {
+        execFile: failedRunner,
+      })).resolves.toBeUndefined();
+      expect(failedRunner).toHaveBeenCalledTimes(2);
+
+      await expect(inspectBatch([]))
+        .rejects.toMatchObject({
+          code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+          operation: "inspect",
+        });
+      await expect(inspectBatch([
+        { path: directory, kind: "directory" },
+        { path: directory, kind: "directory" },
+      ])).rejects.toMatchObject({
+        code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+        operation: "inspect",
+      });
+      await expect(inspectBatch([
+        { path: directory, kind: "directory" },
+        { path: directory, kind: "file" },
+      ])).rejects.toMatchObject({
+        code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+        operation: "inspect",
+      });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  test.runIf(process.platform === "win32")(
+    "verifies multiple protected targets through the real batch ACL script",
+    { timeout: 30_000 },
+    async () => {
+      const codexHome = await createCodexHome();
+      const directory = join(codexHome, "acl-batch-real");
+      const firstPath = join(directory, "first");
+      const secondPath = join(directory, "second");
+      await mkdir(directory);
+      await writeFile(firstPath, "first", "utf8");
+      await writeFile(secondPath, "second", "utf8");
+
+      await applyLocalBridgeWindowsProtectedAcl(directory, "directory");
+      await applyLocalBridgeWindowsProtectedAcl(firstPath, "file");
+      await applyLocalBridgeWindowsProtectedAcl(secondPath, "file");
+
+      await expect(inspectLocalBridgeWindowsProtectedAclBatch([
+        { path: directory, kind: "directory" },
+        { path: firstPath, kind: "file" },
+        { path: secondPath, kind: "file" },
+      ])).resolves.toBeUndefined();
+    },
+  );
+
+  test("keeps different runners isolated and splits oversized same-runner batches", async () => {
+    const codexHome = await createCodexHome();
+    const directory = join(codexHome, "acl-batch-runners");
+    await mkdir(directory);
+    const paths = await Promise.all(
+      Array.from({ length: 9 }, async (_, index) => {
+        const path = join(directory, `file-${index}`);
+        await writeFile(path, `${index}`, "utf8");
+        return path;
+      }),
+    );
+    const runner = vi.fn(async () => undefined);
+    await expect(Promise.all(paths.map((path) => (
+      inspectLocalBridgeWindowsProtectedAclBatch([{ path, kind: "file" }], {
+        execFile: runner,
+      })
+    )))).resolves.toHaveLength(9);
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls.map(([, , options]) =>
+      options.env.MEANTHIS_MCP_ACL_TARGETS_JSON
+        ? JSON.parse(options.env.MEANTHIS_MCP_ACL_TARGETS_JSON).length
+        : 1,
+    ).sort((left, right) => left - right)).toEqual([1, 8]);
+
+    const firstRunner = vi.fn(async () => undefined);
+    const secondRunner = vi.fn(async () => undefined);
+    await expect(Promise.all([
+      inspectLocalBridgeWindowsProtectedAclBatch([
+        { path: directory, kind: "directory" },
+        { path: paths[0], kind: "file" },
+      ], { execFile: firstRunner }),
+      inspectLocalBridgeWindowsProtectedAclBatch([
+        { path: directory, kind: "directory" },
+        { path: paths[0], kind: "file" },
+      ], { execFile: secondRunner }),
+    ])).resolves.toEqual([undefined, undefined]);
+    expect(firstRunner).toHaveBeenCalledTimes(1);
+    expect(secondRunner).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not cache any target after a batch post-lstat identity drift", async () => {
+    const codexHome = await createCodexHome();
+    const directory = join(codexHome, "acl-batch-drift");
+    const firstPath = join(directory, "first");
+    const secondPath = join(directory, "second");
+    await mkdir(directory);
+    await writeFile(firstPath, "first", "utf8");
+    await writeFile(secondPath, "second", "utf8");
+    const targets = [
+      { path: directory, kind: "directory" as const },
+      { path: firstPath, kind: "file" as const },
+      { path: secondPath, kind: "file" as const },
+    ];
+    const runner = vi.fn(async () => {
+      await writeFile(secondPath, "changed-by-race", "utf8");
+    });
+
+    await expect(inspectLocalBridgeWindowsProtectedAclBatch(targets, {
+      execFile: runner,
+    })).rejects.toMatchObject({
+      code: LOCAL_BRIDGE_PROTECTED_ACL_UNAVAILABLE,
+      operation: "inspect",
+    });
+    runner.mockResolvedValue(undefined);
+    await expect(inspectLocalBridgeWindowsProtectedAclBatch(targets, {
+      execFile: runner,
+    })).resolves.toBeUndefined();
+    expect(runner).toHaveBeenCalledTimes(2);
   });
 
   test("exposes the canonical environment variable, path, validation, and a non-secret fingerprint", async () => {

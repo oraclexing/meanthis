@@ -211,6 +211,7 @@ function collectWidgetDocumentFacts(html) {
   const styles = byTag("style");
   const styleText = styles[0]?.childNodes.map((node) => node.value ?? "").join("") ?? "";
   const canonicalStyle =
+    ":root { color-scheme: dark; } " +
     "html, body { margin: 0; min-width: 0; background: transparent; } " +
     "body { overflow: hidden; }";
   if (styles.length === 1 && styleText.replace(/\s+/g, " ").trim() !== canonicalStyle) {

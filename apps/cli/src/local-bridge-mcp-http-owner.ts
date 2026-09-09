@@ -1220,12 +1220,19 @@ function appendRuntimePackageClosure(
   },
 ): void {
   const queue = [...seeds];
+  const visitedEntries = new Set<string>();
   const visited = new Set<string>();
   let closureFileCount = 0;
 
   while (queue.length > 0) {
     const current = queue.shift();
     if (!current) break;
+    // Shared dependencies can be reached through many parents. Resolve each
+    // exact package entry once in this scan; the next fingerprint starts fresh.
+    // The physical identity check below still handles distinct export entries.
+    const entryKey = JSON.stringify([current.packageName, current.entryUrl]);
+    if (visitedEntries.has(entryKey)) continue;
+    visitedEntries.add(entryKey);
     const manifest = validatePackageRuntimeManifest(
       options.loadPackageRuntimeManifest(current.entryUrl, current.packageName),
     );

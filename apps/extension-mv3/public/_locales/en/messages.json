@@ -1,4 +1,9 @@
 {
+  "unsaved_task_note": { "message": "Unsaved task note" },
+  "captured_page": { "message": "Captured page" },
+  "captured_page_unavailable": { "message": "Captured page unavailable" },
+  "captured_page_elsewhere": { "message": "This target was captured on another page. Open its page, then restore or recheck the target." },
+  "open_captured_page": { "message": "Open captured page" },
   "toolbar_widget_unavailable": { "message": "MeanThis could not start its in-page tool. Click MeanThis again to open the side panel." },
   "comparison_check": { "message": "Check for changes" },
   "comparison_copy": { "message": "Copy comparison" },
@@ -467,6 +472,7 @@
   "clear_saved_site_aria": { "message": "Clear saved data for {origin}" },
   "clear_all_saved_captures": { "message": "Clear all saved captures" },
   "confirm_clear_saved_site": { "message": "Clear the saved UI reference session for {origin}? Captured targets and intents for this site will be removed." },
+  "confirm_clear_saved_site_dirty": { "message": "Clear the saved UI reference session for {origin}? Captured targets and the unsaved task note currently being edited for this site will be removed." },
   "confirm_clear_all_saved_sites": { "message": "Clear every saved UI reference session? Captured targets and intents for all sites will be removed. Extension preferences, exported files, and clipboard contents are not cleared." },
   "saved_site_cleared": { "message": "Saved capture cleared." },
   "all_saved_captures_cleared": { "message": "All saved captures cleared." },

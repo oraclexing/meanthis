@@ -38,9 +38,16 @@ const WINDOWS_MARKER_ACL_CACHE_MAX_ENTRIES = 32;
 const WINDOWS_MARKER_ACL_CACHE_TTL_MS = 30_000;
 const WINDOWS_PROTECTED_ACL_CACHE_MAX_ENTRIES = 32;
 const WINDOWS_PROTECTED_ACL_CACHE_TTL_MS = 30_000;
+const WINDOWS_PROTECTED_ACL_BATCH_MAX_TARGETS = 8;
+const WINDOWS_PROTECTED_ACL_BATCH_MAX_JSON_BYTES = 16 * 1024;
 const execFile = promisify(execFileCallback);
 
 export type LocalBridgeMcpHttpAclTargetKind = "directory" | "file";
+
+export interface LocalBridgeWindowsProtectedAclTarget {
+  path: string;
+  kind: LocalBridgeMcpHttpAclTargetKind;
+}
 
 export type LocalBridgeWindowsAclExecFile = (
   file: string,
@@ -85,10 +92,25 @@ interface WindowsProtectedAclInspectionPendingEntry {
   operation: Promise<void>;
 }
 
+interface WindowsProtectedAclInspectionTarget extends LocalBridgeWindowsProtectedAclTarget {
+  key: string;
+  identity: Stats;
+}
+
+interface WindowsProtectedAclInspectionBatchRequest {
+  targets: WindowsProtectedAclInspectionTarget[];
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 const windowsProtectedAclInspectionCache =
   new Map<string, WindowsProtectedAclInspectionCacheEntry>();
 const windowsProtectedAclInspectionPending =
   new Map<string, WindowsProtectedAclInspectionPendingEntry>();
+const windowsProtectedAclInspectionBatchQueue =
+  new Map<LocalBridgeWindowsAclExecFile, WindowsProtectedAclInspectionBatchRequest[]>();
+const windowsProtectedAclInspectionBatchFlush =
+  new Map<LocalBridgeWindowsAclExecFile, NodeJS.Immediate>();
 
 export type LocalBridgeProtectedBuildMarkerFileName =
   | typeof MEANTHIS_MCP_HTTP_DESIRED_IDENTITY_FILE_NAME
@@ -401,13 +423,16 @@ export async function readVerifiedLocalBridgeMcpHttpToken(
 ): Promise<string> {
   try {
     const paths = resolveCredentialPaths(options);
-    const directoryBefore = await lstat(paths.directory);
+    const [directoryBefore, fileBefore] = await Promise.all([
+      lstat(paths.directory),
+      lstat(paths.path),
+    ]);
     assertCredentialDirectoryStats(directoryBefore);
-    await inspectPathPermissions(paths.directory, "directory", options);
-
-    const fileBefore = await lstat(paths.path);
     assertCredentialFileStats(fileBefore);
-    await inspectPathPermissions(paths.path, "file", options);
+    await inspectVerifiedPathPermissions([
+      { path: paths.directory, kind: "directory" },
+      { path: paths.path, kind: "file" },
+    ], options);
 
     const token = await readCredentialWithoutHardening(
       paths.path,
@@ -424,8 +449,10 @@ export async function readVerifiedLocalBridgeMcpHttpToken(
       throw new Error("credential identity changed");
     }
 
-    await inspectPathPermissions(paths.directory, "directory", options);
-    await inspectPathPermissions(paths.path, "file", options);
+    await inspectVerifiedPathPermissions([
+      { path: paths.directory, kind: "directory" },
+      { path: paths.path, kind: "file" },
+    ], options);
     const [directoryFinal, fileFinal] = await Promise.all([
       lstat(paths.directory),
       lstat(paths.path),
@@ -898,6 +925,20 @@ async function inspectPathPermissions(
   }
 }
 
+async function inspectVerifiedPathPermissions(
+  targets: readonly LocalBridgeWindowsProtectedAclTarget[],
+  options: LocalBridgeMcpHttpPathSecurityOptions,
+): Promise<void> {
+  const platform = options.processPlatform ?? process.platform;
+  if (platform === "win32" && !options.inspectAcl) {
+    await inspectLocalBridgeWindowsProtectedAclBatch(targets);
+    return;
+  }
+  for (const target of targets) {
+    await inspectPathPermissions(target.path, target.kind, options);
+  }
+}
+
 async function assertDirectory(path: string): Promise<void> {
   const stats = await lstat(path);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
@@ -1010,6 +1051,272 @@ export async function inspectLocalBridgeWindowsProtectedAcl(
   }
 }
 
+/**
+ * Read-only Windows ACL verification for several protected paths. The request
+ * is coalesced within this process for the current turn so concurrent owners
+ * can share one PowerShell startup while each target keeps its own metadata
+ * and runner-bound cache entry.
+ */
+export async function inspectLocalBridgeWindowsProtectedAclBatch(
+  targets: readonly LocalBridgeWindowsProtectedAclTarget[],
+  options: LocalBridgeWindowsProtectedAclOptions = {},
+): Promise<void> {
+  if (targets.length === 0 || targets.length > WINDOWS_PROTECTED_ACL_BATCH_MAX_TARGETS) {
+    throw new LocalBridgeProtectedAclError("inspect");
+  }
+  const uniqueTargets = new Map<string, LocalBridgeWindowsProtectedAclTarget>();
+  const targetKindsByPath = new Map<string, LocalBridgeMcpHttpAclTargetKind>();
+  for (const target of targets) {
+    if (
+      !target ||
+      typeof target.path !== "string" ||
+      (target.kind !== "directory" && target.kind !== "file")
+    ) {
+      throw new LocalBridgeProtectedAclError("inspect");
+    }
+    const existingKind = targetKindsByPath.get(target.path);
+    if (existingKind !== undefined && existingKind !== target.kind) {
+      throw new LocalBridgeProtectedAclError("inspect");
+    }
+    if (existingKind !== undefined) {
+      throw new LocalBridgeProtectedAclError("inspect");
+    }
+    targetKindsByPath.set(target.path, target.kind);
+    uniqueTargets.set(windowsProtectedAclCacheKey(target.path, target.kind), target);
+  }
+
+  const runner = options.execFile ?? execFile;
+  try {
+    const inspectedTargets = await Promise.all(
+      [...uniqueTargets.values()].map(async (target): Promise<WindowsProtectedAclInspectionTarget> => {
+        const identity = await lstat(target.path);
+        assertLocalBridgeAclTargetStats(identity, target.kind);
+        return {
+          ...target,
+          key: windowsProtectedAclCacheKey(target.path, target.kind),
+          identity,
+        };
+      }),
+    );
+    await queueWindowsProtectedAclInspection(inspectedTargets, runner);
+  } catch (error) {
+    if (error instanceof LocalBridgeProtectedAclError) throw error;
+    throw new LocalBridgeProtectedAclError("inspect");
+  }
+}
+
+async function queueWindowsProtectedAclInspection(
+  targets: WindowsProtectedAclInspectionTarget[],
+  runner: LocalBridgeWindowsAclExecFile,
+): Promise<void> {
+  const waits: Promise<void>[] = [];
+  const queuedTargets: WindowsProtectedAclInspectionTarget[] = [];
+  const pendingTargets: Array<{
+    target: WindowsProtectedAclInspectionTarget;
+    pending: WindowsProtectedAclInspectionPendingEntry;
+  }> = [];
+
+  for (const target of targets) {
+    const cached = windowsProtectedAclInspectionCache.get(target.key);
+    if (
+      cached &&
+      cached.runner === runner &&
+      performance.now() - cached.validatedAtMs <= WINDOWS_PROTECTED_ACL_CACHE_TTL_MS &&
+      sameCredentialIdentity(cached.identity, target.identity)
+    ) {
+      windowsProtectedAclInspectionCache.delete(target.key);
+      windowsProtectedAclInspectionCache.set(target.key, cached);
+      continue;
+    }
+    if (cached) windowsProtectedAclInspectionCache.delete(target.key);
+
+    const pending = windowsProtectedAclInspectionPending.get(target.key);
+    if (pending && pending.runner === runner) {
+      if (!sameCredentialIdentity(pending.identity, target.identity)) {
+        throw new Error("ACL target identity changed");
+      }
+      pendingTargets.push({ target, pending });
+      continue;
+    }
+    queuedTargets.push(target);
+  }
+
+  for (const { target, pending } of pendingTargets) {
+    waits.push(pending.operation.then(async () => {
+      const identityAfterPending = await lstat(target.path);
+      assertLocalBridgeAclTargetStats(identityAfterPending, target.kind);
+      if (!sameCredentialIdentity(target.identity, identityAfterPending)) {
+        throw new Error("ACL target identity changed");
+      }
+    }));
+  }
+
+  if (queuedTargets.length > 0) {
+    waits.push(scheduleWindowsProtectedAclInspection(queuedTargets, runner));
+  }
+  await Promise.all(waits);
+}
+
+function scheduleWindowsProtectedAclInspection(
+  targets: WindowsProtectedAclInspectionTarget[],
+  runner: LocalBridgeWindowsAclExecFile,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const requests = windowsProtectedAclInspectionBatchQueue.get(runner) ?? [];
+    requests.push({ targets, resolve, reject });
+    windowsProtectedAclInspectionBatchQueue.set(runner, requests);
+    if (windowsProtectedAclInspectionBatchFlush.has(runner)) return;
+
+    const flush = setImmediate(() => {
+      windowsProtectedAclInspectionBatchFlush.delete(runner);
+      flushWindowsProtectedAclInspection(runner);
+    });
+    windowsProtectedAclInspectionBatchFlush.set(runner, flush);
+  });
+}
+
+function flushWindowsProtectedAclInspection(runner: LocalBridgeWindowsAclExecFile): void {
+  const requests = windowsProtectedAclInspectionBatchQueue.get(runner);
+  windowsProtectedAclInspectionBatchQueue.delete(runner);
+  if (!requests || requests.length === 0) return;
+
+  const groups: Array<{
+    requests: WindowsProtectedAclInspectionBatchRequest[];
+    targets: Map<string, WindowsProtectedAclInspectionTarget>;
+  }> = [];
+  for (const request of requests) {
+    if (!canFitWindowsProtectedAclBatch(request.targets)) {
+      request.reject(new LocalBridgeProtectedAclError("inspect"));
+      continue;
+    }
+
+    let group = groups.find((candidate) => {
+      const mergedTargets = mergeWindowsProtectedAclTargets(
+        candidate.targets,
+        request.targets,
+      );
+      return canFitWindowsProtectedAclBatch([...mergedTargets.values()]);
+    });
+    if (!group) {
+      group = { requests: [], targets: new Map() };
+      groups.push(group);
+    }
+    for (const target of request.targets) {
+      const existing = group.targets.get(target.key);
+      if (!existing) {
+        group.targets.set(target.key, target);
+      }
+    }
+    group.requests.push(request);
+  }
+
+  // Keep groups on one runner sequential. This avoids overlapping ACL reads
+  // when a later group shares a target with an earlier group that could not
+  // fit under the bounded target/JSON limits.
+  let previous = Promise.resolve();
+  for (const group of groups) {
+    const batchTargets = [...group.targets.values()];
+    const hasIdentityConflict = batchTargets.some((target) => {
+      return group.requests.some((request) => request.targets.some((candidate) => {
+        return candidate.key === target.key &&
+          !sameCredentialIdentity(candidate.identity, target.identity);
+      }));
+    });
+    const operation = hasIdentityConflict
+      ? previous.then(() => { throw new Error("ACL target identity changed"); })
+      : previous.then(() => executeWindowsProtectedAclInspection(batchTargets, runner));
+    previous = operation.catch(() => undefined);
+    for (const target of batchTargets) {
+      windowsProtectedAclInspectionPending.set(target.key, {
+        identity: target.identity,
+        runner,
+        operation,
+      });
+    }
+    operation.then(
+      () => clearWindowsProtectedAclPending(batchTargets, operation),
+      () => clearWindowsProtectedAclPending(batchTargets, operation),
+    );
+    for (const request of group.requests) {
+      operation.then(request.resolve, request.reject);
+    }
+  }
+}
+
+function mergeWindowsProtectedAclTargets(
+  existing: Map<string, WindowsProtectedAclInspectionTarget>,
+  additional: readonly WindowsProtectedAclInspectionTarget[],
+): Map<string, WindowsProtectedAclInspectionTarget> {
+  const merged = new Map(existing);
+  for (const target of additional) {
+    if (!merged.has(target.key)) merged.set(target.key, target);
+  }
+  return merged;
+}
+
+function canFitWindowsProtectedAclBatch(
+  targets: readonly LocalBridgeWindowsProtectedAclTarget[],
+): boolean {
+  if (targets.length === 0 || targets.length > WINDOWS_PROTECTED_ACL_BATCH_MAX_TARGETS) {
+    return false;
+  }
+  const serializedTargets = JSON.stringify(
+    targets.map((target) => ({ path: target.path, kind: target.kind })),
+  );
+  if (typeof serializedTargets !== "string") {
+    throw new Error("ACL target batch is invalid.");
+  }
+  return Buffer.byteLength(serializedTargets, "utf8") <=
+    WINDOWS_PROTECTED_ACL_BATCH_MAX_JSON_BYTES;
+}
+
+function clearWindowsProtectedAclPending(
+  targets: WindowsProtectedAclInspectionTarget[],
+  operation: Promise<void>,
+): void {
+  for (const target of targets) {
+    if (windowsProtectedAclInspectionPending.get(target.key)?.operation === operation) {
+      windowsProtectedAclInspectionPending.delete(target.key);
+    }
+  }
+}
+
+async function executeWindowsProtectedAclInspection(
+  targets: WindowsProtectedAclInspectionTarget[],
+  runner: LocalBridgeWindowsAclExecFile,
+): Promise<void> {
+  if (targets.length === 1) {
+    const [target] = targets;
+    await runWindowsAclScript(WINDOWS_INSPECT_ACL_SCRIPT, target.path, target.kind, runner);
+  } else {
+    await runWindowsAclBatchScript(targets, runner);
+  }
+
+  const identitiesAfter = await Promise.all(
+    targets.map(async (target) => {
+      const identity = await lstat(target.path);
+      assertLocalBridgeAclTargetStats(identity, target.kind);
+      return identity;
+    }),
+  );
+  for (let index = 0; index < targets.length; index += 1) {
+    if (!sameCredentialIdentity(targets[index].identity, identitiesAfter[index])) {
+      throw new Error("ACL target identity changed");
+    }
+  }
+
+  const validatedAtMs = performance.now();
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    windowsProtectedAclInspectionCache.set(target.key, {
+      identity: identitiesAfter[index],
+      runner,
+      validatedAtMs,
+    });
+  }
+  trimWindowsProtectedAclInspectionCache();
+}
+
 function windowsProtectedAclCacheKey(
   path: string,
   kind: LocalBridgeMcpHttpAclTargetKind,
@@ -1031,10 +1338,46 @@ async function runWindowsAclScript(
   kind: LocalBridgeMcpHttpAclTargetKind,
   execFileRunner: LocalBridgeWindowsAclExecFile,
 ): Promise<void> {
+  await runWindowsAclCommand(
+    script,
+    {
+      MEANTHIS_MCP_ACL_TARGET_PATH: path,
+      MEANTHIS_MCP_ACL_TARGET_KIND: kind,
+    },
+    execFileRunner,
+  );
+}
+
+async function runWindowsAclBatchScript(
+  targets: readonly LocalBridgeWindowsProtectedAclTarget[],
+  execFileRunner: LocalBridgeWindowsAclExecFile,
+): Promise<void> {
+  if (targets.length === 0 || targets.length > WINDOWS_PROTECTED_ACL_BATCH_MAX_TARGETS) {
+    throw new Error("ACL target batch is too large.");
+  }
+  const serializedTargets = JSON.stringify(
+    targets.map(({ path, kind }) => ({ path, kind })),
+  );
+  if (Buffer.byteLength(serializedTargets, "utf8") > WINDOWS_PROTECTED_ACL_BATCH_MAX_JSON_BYTES) {
+    throw new Error("ACL target batch is too large.");
+  }
+  await runWindowsAclCommand(
+    WINDOWS_INSPECT_ACL_BATCH_SCRIPT,
+    {
+      MEANTHIS_MCP_ACL_TARGETS_JSON: serializedTargets,
+    },
+    execFileRunner,
+  );
+}
+
+async function runWindowsAclCommand(
+  script: string,
+  extraEnvironment: Record<string, string>,
+  execFileRunner: LocalBridgeWindowsAclExecFile,
+): Promise<void> {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
-    MEANTHIS_MCP_ACL_TARGET_PATH: path,
-    MEANTHIS_MCP_ACL_TARGET_KIND: kind,
+    ...extraEnvironment,
   };
   for (const key of Object.keys(environment)) {
     if (key.toUpperCase() === MEANTHIS_MCP_HTTP_TOKEN_ENV) {
@@ -1111,6 +1454,48 @@ foreach ($rule in $rules) {
 $actualSids = $actualSids | Sort-Object
 if ((Compare-Object -ReferenceObject $expectedSids -DifferenceObject $actualSids).Count -ne 0) {
   throw 'ACL principals are invalid.'
+}
+`;
+
+const WINDOWS_INSPECT_ACL_BATCH_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$rawTargets = $env:MEANTHIS_MCP_ACL_TARGETS_JSON
+if ([string]::IsNullOrWhiteSpace($rawTargets)) { throw 'Missing ACL targets.' }
+$targets = @($rawTargets | ConvertFrom-Json)
+if ($targets.Count -lt 1) { throw 'ACL targets are empty.' }
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$systemSid = [System.Security.Principal.SecurityIdentifier]::new('${WINDOWS_SYSTEM_SID}')
+$propagation = [System.Security.AccessControl.PropagationFlags]::None
+$rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+foreach ($target in $targets) {
+  $targetPath = [string]$target.path
+  $targetKind = [string]$target.kind
+  if ([string]::IsNullOrWhiteSpace($targetPath)) { throw 'Missing ACL target path.' }
+  if ($targetKind -ne 'directory' -and $targetKind -ne 'file') { throw 'Invalid ACL target kind.' }
+  $inheritance = if ($targetKind -eq 'directory') {
+    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+  } else {
+    [System.Security.AccessControl.InheritanceFlags]::None
+  }
+  $readback = Get-Acl -LiteralPath $targetPath
+  if (-not $readback.AreAccessRulesProtected) { throw 'ACL inheritance remains enabled.' }
+  $rules = @($readback.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+  if ($rules.Count -ne 2) { throw 'ACL rule count is invalid.' }
+  $expectedSids = @($currentSid.Value, $systemSid.Value) | Sort-Object
+  $actualSids = @()
+  foreach ($rule in $rules) {
+    if ($rule.IsInherited) { throw 'Inherited ACL rule remains.' }
+    if ($rule.AccessControlType -ne $allow) { throw 'Non-allow ACL rule remains.' }
+    if ([int64]$rule.FileSystemRights -ne [int64]$rights) { throw 'ACL rights are not FullControl.' }
+    if ([int64]$rule.InheritanceFlags -ne [int64]$inheritance) { throw 'ACL inheritance flags are invalid.' }
+    if ([int64]$rule.PropagationFlags -ne [int64]$propagation) { throw 'ACL propagation flags are invalid.' }
+    $actualSids += $rule.IdentityReference.Value
+  }
+  $actualSids = $actualSids | Sort-Object
+  if ((Compare-Object -ReferenceObject $expectedSids -DifferenceObject $actualSids).Count -ne 0) {
+    throw 'ACL principals are invalid.'
+  }
 }
 `;
 

@@ -1469,6 +1469,17 @@ h2 {
   display: none;
 }
 
+.intent-recovery label,
+.intent-recovery textarea {
+  flex-basis: 100%;
+}
+
+.intent-recovery textarea {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+}
+
 .capture-boundary {
   display: grid;
   gap: 4px;

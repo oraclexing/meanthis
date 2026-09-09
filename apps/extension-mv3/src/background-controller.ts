@@ -116,7 +116,6 @@ import type { CaptureToken } from "./session-state";
 import type { FirstCaptureDisclosureStore } from "./first-capture-disclosure";
 import {
   collectOverlayReplayLocators,
-  collectVerifiedContentAnchoredOverlayReplayLocators,
   collectVerifiedOverlayReplayLocators,
 } from "./overlay-restore";
 import { deriveStoredSessionHandoff, deriveStoredSessionReview } from "./session-file";
@@ -159,6 +158,7 @@ import {
 import { deriveCaptureReplayMetadataDiagnosticsV1 } from "./metadata-diagnostics";
 import {
   createMetadataDiagnosticsSessionStore,
+  canBindMetadataDiagnosticsSessionIdentity,
   METADATA_DIAGNOSTICS_SESSION_KIND,
   METADATA_DIAGNOSTICS_SESSION_SCHEMA_VERSION,
   type MetadataDiagnosticsSessionFingerprintItemV1,
@@ -8520,12 +8520,18 @@ export function createBackgroundController(options: {
       state.readback = current.value;
       const file = current.value.file;
       const fingerprint = metadataDiagnosticsFingerprint(current.value);
-      return file && current.value.epoch && fingerprint
+      const identity = file && current.value.epoch && fingerprint
         ? {
             epoch: current.value.epoch,
             captureId: file.session.id,
             fingerprint,
           }
+        : null;
+      // The canonical session accepts IDs that the optional diagnostics schema
+      // cannot represent. Such a session cannot have a matching valid sidecar.
+      // Keep this decision inside the metadata queue after the verified read.
+      return identity && canBindMetadataDiagnosticsSessionIdentity(origin, identity)
+        ? identity
         : null;
     });
     return removed && state.readback
@@ -13702,17 +13708,15 @@ function collectOverlayRestoreData(
     const frameId = record.frameId ?? 0;
     const recordedRouteKey = routeKeyFromUrl(record.pageUrl ?? undefined);
     const sameRoute = recordedRouteKey === routeKey;
-    const crossView = !sameRoute && frameId === 0 && endpoint.frameId === 0;
     const locators = sameRoute
       ? collectVerifiedOverlayReplayLocators(record)
-      : crossView
-        ? collectVerifiedContentAnchoredOverlayReplayLocators(record)
-        : [];
+      : [];
     if (
       record.origin !== origin ||
       recordedRouteKey === null ||
+      !sameRoute ||
       locators.length === 0 ||
-      (!crossView && !storedCaptureRouteChainMatchesLive(record, liveRouteChain)) ||
+      !storedCaptureRouteChainMatchesLive(record, liveRouteChain) ||
       !overlayRecordMatchesLiveEndpoint(record.tabId, frameId, endpoint, routeKey, liveFrames)
     ) {
       continue;

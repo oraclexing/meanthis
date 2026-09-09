@@ -84,6 +84,7 @@ export interface InPageWidgetFrameScopeViewModel {
 
 export interface InPageWidgetViewModel {
   mode: InPageWidgetMode;
+  selectionEnabled?: boolean;
   readiness?: InPageWidgetReadiness;
   bridgeState: InPageWidgetBridgeState;
   bridgeInvitationRemainingSeconds?: number | null;
@@ -111,6 +112,7 @@ export interface InPageWidgetViewModel {
   lifecycleControlProposal?: InPageWidgetLifecycleControlProposal | null;
   activeItemId: string | null;
   taskNote: string;
+  recoveryDraft?: string | null;
   shortcuts: readonly InPageWidgetShortcutViewModel[];
   busyAction: InPageWidgetBusyAction;
   status: InPageWidgetStatusViewModel | null;
@@ -143,6 +145,7 @@ export interface InPageWidgetViewCallbacks {
   onSave?(itemId: string, note: string): void;
   onCopy?(): void;
   onCloseEditor?(itemId: string): void;
+  onDiscardRecovery?(): void;
   onEditTarget?(itemId: string): void;
   onRemoveTarget?(itemId: string): void;
   onMoreTarget?(itemId: string): void;
@@ -253,6 +256,8 @@ export interface InPageWidgetStrings {
   unnamedTarget: string;
   taskNote: string;
   taskNoteLabel(label: string): string;
+  unsavedTaskNote: string;
+  discardRecovery: string;
   taskNotePlaceholder: string;
   shortcuts: string;
   save: string;
@@ -491,6 +496,8 @@ export const DEFAULT_IN_PAGE_WIDGET_STRINGS: InPageWidgetStrings = {
   unnamedTarget: "Selected element",
   taskNote: "Task note",
   taskNoteLabel: (label) => `Task note for target ${label}`,
+  unsavedTaskNote: "Unsaved task note",
+  discardRecovery: "Discard changes",
   taskNotePlaceholder: "Tell the agent what should change…",
   shortcuts: "Shortcuts",
   save: "Save",
@@ -886,6 +893,8 @@ export function createInPageWidgetStrings(
     more: t("in_page_widget_more", DEFAULT_IN_PAGE_WIDGET_STRINGS.more),
     unnamedTarget: t("selected_element", DEFAULT_IN_PAGE_WIDGET_STRINGS.unnamedTarget),
     taskNote: t("task", DEFAULT_IN_PAGE_WIDGET_STRINGS.taskNote),
+    unsavedTaskNote: t("unsaved_task_note", DEFAULT_IN_PAGE_WIDGET_STRINGS.unsavedTaskNote),
+    discardRecovery: t("discard_changes", DEFAULT_IN_PAGE_WIDGET_STRINGS.discardRecovery),
     taskNoteLabel: (label) => t(
       "in_page_widget_task_note_label",
       "Task note for target {label}",
@@ -1683,19 +1692,18 @@ export const IN_PAGE_WIDGET_CSS = `
   height: 48px;
   padding: 8px;
   place-items: center;
-  border: 1px solid #373b49;
+  border: 1px solid rgb(255 255 255 / 7%);
   border-radius: 50%;
   background: #151821;
   color: #f8f8fc;
-  box-shadow: 0 12px 34px rgb(0 0 0 / 34%);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 24%), 0 1px 4px rgb(0 0 0 / 16%);
   cursor: pointer;
   transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
 }
 
 .meanthis-launcher:hover {
-  border-color: #5a6072;
+  border-color: rgb(255 255 255 / 12%);
   background: #1b1e29;
-  transform: translateY(-1px);
 }
 
 .meanthis-brand-mark {
@@ -2391,6 +2399,7 @@ type WidgetAction =
   | { kind: "toggle-frame-scopes" }
   | { kind: "select-frame-scope"; scopeId: string }
   | { kind: "clear" }
+  | { kind: "discard-recovery" }
   | { kind: "open-settings" }
   | { kind: "open-full-panel" }
   | { kind: "reference-scope" }
@@ -2549,6 +2558,9 @@ export function sanitizeInPageWidgetViewModel(
 
   return {
     mode,
+    selectionEnabled: typeof source.selectionEnabled === "boolean"
+      ? source.selectionEnabled
+      : mode === "selecting",
     readiness: source.readiness === "hydrating" || source.readiness === "error"
       ? source.readiness
       : "ready",
@@ -2584,6 +2596,7 @@ export function sanitizeInPageWidgetViewModel(
     lifecycleControlProposal,
     activeItemId,
     taskNote: sanitizeMultiline(source.taskNote),
+    recoveryDraft: typeof source.recoveryDraft === "string" ? sanitizeMultiline(source.recoveryDraft) : null,
     shortcuts,
     busyAction: isBusyAction(source.busyAction) ? source.busyAction : null,
     status,
@@ -2641,6 +2654,7 @@ export function createInPageWidgetView(
     !current.clearConfirmationRequired &&
     !current.frameScopeOpen &&
     current.manualCopyText === null &&
+    current.recoveryDraft == null &&
     current.status?.kind !== "error";
 
   const scheduleIdleCollapse = (): void => {
@@ -2673,7 +2687,7 @@ export function createInPageWidgetView(
         callbacks.onCollapse?.();
         break;
       case "toggle-selection":
-        if (current.mode === "selecting") callbacks.onStopSelection?.();
+        if (current.selectionEnabled) callbacks.onStopSelection?.();
         else callbacks.onStartSelection?.();
         break;
       case "toggle-frame-scopes":
@@ -2684,6 +2698,9 @@ export function createInPageWidgetView(
         break;
       case "clear":
         callbacks.onClear?.();
+        break;
+      case "discard-recovery":
+        callbacks.onDiscardRecovery?.();
         break;
       case "open-settings":
         callbacks.onOpenSettings?.();
@@ -2907,11 +2924,43 @@ export function createInPageWidgetView(
       const focusKey = hadFocus
         ? activeElement?.getAttribute("data-meanthis-focus-key") ?? null
         : null;
+      const recoveryField = focusKey === "recovery-draft" ? activeElement as HTMLTextAreaElement : null;
+      const recoverySelection = recoveryField ? {
+        value: recoveryField.value,
+        start: recoveryField.selectionStart,
+        end: recoveryField.selectionEnd,
+        direction: recoveryField.selectionDirection,
+        scrollTop: recoveryField.scrollTop,
+      } : null;
       const previousMode = current.mode;
       const previousFrameScopeOpen = current.frameScopeOpen;
+      const previousDisclosureRequired = current.disclosureRequired;
+      const previousActiveItemId = current.activeItemId;
+      const scrollPositions = [".meanthis-panel", ".meanthis-target-list", ".meanthis-disclosure-copy"]
+        .flatMap((selector) => {
+          const container = surface.querySelector<HTMLElement>(selector);
+          return container ? [{ selector, top: container.scrollTop, left: container.scrollLeft }] : [];
+        });
       current = sanitizeInPageWidgetViewModel(model);
+      const preserveViewport = previousMode === current.mode &&
+        previousDisclosureRequired === current.disclosureRequired &&
+        (current.mode !== "editing" || previousActiveItemId === current.activeItemId);
       if (!canIdleCollapse()) cancelIdleCollapse();
-      render(hadFocus, focusKey, previousMode, previousFrameScopeOpen);
+      render(hadFocus, focusKey, previousMode, previousFrameScopeOpen, preserveViewport);
+      if (preserveViewport) {
+        for (const position of scrollPositions) {
+          const container = surface.querySelector<HTMLElement>(position.selector);
+          if (container) {
+            container.scrollTop = position.top;
+            container.scrollLeft = position.left;
+          }
+        }
+      }
+      if (recoverySelection && current.recoveryDraft === recoverySelection.value) {
+        const recovery = surface.querySelector<HTMLTextAreaElement>(".meanthis-recovery-draft");
+        recovery?.setSelectionRange(recoverySelection.start, recoverySelection.end, recoverySelection.direction);
+        if (recovery) recovery.scrollTop = recoverySelection.scrollTop;
+      }
       if (previousMode !== current.mode && canIdleCollapse()) scheduleIdleCollapse();
     },
     focus(): void {
@@ -2945,25 +2994,45 @@ export function createInPageWidgetView(
     previousFocusKey: string | null,
     previousMode: InPageWidgetMode = current.mode,
     previousFrameScopeOpen: boolean = current.frameScopeOpen,
+    preserveViewport = false,
   ): void {
-    compositionDepth = 0;
+    const previousTextarea = surface.querySelector<HTMLTextAreaElement>(".meanthis-task-note");
+    const previousAction = previousTextarea ? actions.get(previousTextarea) : null;
+    const preserveEditor = previousMode === "editing" && current.mode === "editing" &&
+      previousAction?.kind === "task-note" && previousAction.itemId === current.activeItemId &&
+      current.targets.some((target) => target.itemId === current.activeItemId);
+    if (!preserveEditor) compositionDepth = 0;
     actions = new WeakMap<Element, WidgetAction>();
-    surface.replaceChildren();
     surface.dataset.mode = current.mode;
     surface.setAttribute("aria-busy", current.busyAction === null ? "false" : "true");
 
     if (current.mode === "collapsed") {
       surface.removeAttribute("role");
       surface.removeAttribute("aria-label");
-      surface.append(renderLauncher());
+      surface.replaceChildren(renderLauncher());
     } else {
       surface.setAttribute("role", "region");
       surface.setAttribute("aria-label", strings.regionLabel);
-      surface.append(renderPanel());
+      const panel = renderPanel();
+      const previousPanel = surface.querySelector<HTMLElement>(".meanthis-panel");
+      const nextTextarea = panel.querySelector<HTMLTextAreaElement>(".meanthis-task-note");
+      if (preserveEditor && previousTextarea && nextTextarea && surface.firstElementChild) {
+        // Keep the entire connected ancestor path: moving the textarea alone can
+        // interrupt native composition, selection, and undo history.
+        refreshEditorPath(surface.firstElementChild, panel, previousTextarea, nextTextarea);
+        actions.set(previousTextarea, { kind: "task-note", itemId: current.activeItemId! });
+      } else if (preserveViewport && previousPanel?.dataset.layout === "details" &&
+        panel.dataset.layout === "details") {
+        // Keep the native scrollbar connected during countdown/status refreshes.
+        previousPanel.setAttribute("aria-busy", panel.getAttribute("aria-busy")!);
+        previousPanel.replaceChildren(...panel.childNodes);
+      } else {
+        surface.replaceChildren(panel);
+      }
     }
 
     if (!restoreFocus) return;
-    if (previousFocusKey && focusElement(previousFocusKey)) return;
+    if (previousFocusKey && focusElement(previousFocusKey, preserveViewport)) return;
     if (!previousFrameScopeOpen && current.frameScopeOpen) {
       const currentIndex = current.frameScopes.findIndex((scope) => scope.current && scope.selectable);
       if (focusElement(`frame-scope-${Math.max(0, currentIndex)}`)) return;
@@ -2980,6 +3049,42 @@ export function createInPageWidgetView(
       return;
     }
     focusElement(preferredFocusKey(current.mode));
+  }
+
+  function refreshEditorPath(
+    retained: Element,
+    replacement: Element,
+    textarea: HTMLTextAreaElement,
+    nextTextarea: HTMLTextAreaElement,
+  ): void {
+    for (const attribute of Array.from(retained.attributes)) {
+      if (!replacement.hasAttribute(attribute.name)) retained.removeAttribute(attribute.name);
+    }
+    for (const attribute of Array.from(replacement.attributes)) {
+      if (retained.getAttribute(attribute.name) !== attribute.value) {
+        retained.setAttribute(attribute.name, attribute.value);
+      }
+    }
+    if (retained === textarea) {
+      if (compositionDepth === 0 && textarea.value !== nextTextarea.value) {
+        textarea.value = nextTextarea.value;
+      }
+      return;
+    }
+    const retainedChild = Array.from(retained.children).find((child) => child.contains(textarea))!;
+    const replacementChild = Array.from(replacement.children).find((child) => child.contains(nextTextarea))!;
+    refreshEditorPath(retainedChild, replacementChild, textarea, nextTextarea);
+    for (const child of Array.from(retained.childNodes)) {
+      if (child !== retainedChild) retained.removeChild(child);
+    }
+    let beforeEditor = true;
+    for (const child of Array.from(replacement.childNodes)) {
+      if (child === replacementChild) {
+        beforeEditor = false;
+      } else {
+        retained.insertBefore(child, beforeEditor ? retainedChild : null);
+      }
+    }
   }
 
   function renderLauncher(): HTMLButtonElement {
@@ -3002,6 +3107,7 @@ export function createInPageWidgetView(
     const hydrated = current.readiness === "ready";
     panel.setAttribute("aria-busy", String(!hydrated));
     const detailed = current.disclosureRequired
+      || current.recoveryDraft != null
       || current.mode === "details"
       || current.mode === "editing"
       || current.manualCopyText !== null
@@ -3032,6 +3138,26 @@ export function createInPageWidgetView(
     }
     const activeTarget = current.targets.find((target) => target.itemId === current.activeItemId);
     if (current.mode === "editing" && activeTarget) panel.append(renderEditor(activeTarget));
+    if (current.recoveryDraft != null) {
+      const recovery = createElement("section", "meanthis-recovery");
+      recovery.setAttribute("aria-label", strings.unsavedTaskNote);
+      recovery.append(textElement("strong", "meanthis-shortcuts-label", strings.unsavedTaskNote));
+      const draft = doc.createElement("textarea");
+      // Do not give recovery text a task-note action: it belongs to the removed
+      // or previous target and must never be saved into the fallback selection.
+      draft.className = "meanthis-recovery-draft meanthis-invitation";
+      draft.readOnly = true;
+      draft.rows = 4;
+      draft.value = current.recoveryDraft;
+      draft.setAttribute("aria-label", strings.unsavedTaskNote);
+      setFocusKey(draft, "recovery-draft");
+      const discard = makeButton("discard-recovery", "meanthis-button", { kind: "discard-recovery" },
+        strings.discardRecovery, strings.discardRecovery);
+      discard.disabled = current.readiness !== "ready" || current.busyAction !== null;
+      setFocusKey(discard, "discard-recovery");
+      recovery.append(draft, discard);
+      panel.append(recovery);
+    }
     if (current.manualCopyText) panel.append(renderManualCopy(current.manualCopyText));
     if (current.status && !clearPending) panel.append(renderStatus(current.status));
     return panel;
@@ -3049,7 +3175,7 @@ export function createInPageWidgetView(
     toolbar.setAttribute("role", "toolbar");
     toolbar.setAttribute("aria-label", strings.selectionToolbarLabel);
 
-    const selecting = current.mode === "selecting";
+    const selecting = current.selectionEnabled === true;
     const toggleSelection = makeIconButton(
       "toggle-selection",
       { kind: "toggle-selection" },
@@ -3962,10 +4088,10 @@ export function createInPageWidgetView(
     target.dataset.meanthisFocusKey = key;
   }
 
-  function focusElement(key: string): boolean {
+  function focusElement(key: string, preventScroll = false): boolean {
     const candidate = Array.from(surface.querySelectorAll<HTMLElement>("[data-meanthis-focus-key]"))
       .find((target) => target.dataset.meanthisFocusKey === key && !isDisabled(target));
-    candidate?.focus();
+    candidate?.focus({ preventScroll });
     return candidate !== undefined;
   }
 

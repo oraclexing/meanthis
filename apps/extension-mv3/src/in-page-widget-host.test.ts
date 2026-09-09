@@ -57,6 +57,9 @@ describe("createInPageWidgetHost", () => {
       "chrome-extension://extension-id/widget.html",
     );
     expect(controller.frame.style.pointerEvents).toBe("auto");
+    expect(controller.frame.style.colorScheme).toBe("dark");
+    expect(controller.frame.style.backgroundColor).toBe("transparent");
+    expect(controller.element.style.colorScheme).toBe("dark");
     expect(controller.frame.parentNode?.textContent).toContain("MeanThis is starting");
     expect(createFrameUrl).toHaveBeenCalledTimes(1);
     expect(controller.element.outerHTML).not.toContain("task");
@@ -384,6 +387,11 @@ describe("createInPageWidgetHost", () => {
     expect(controller.element.style.width).toBe("360px");
     expect(controller.element.style.height).toBe("560px");
 
+    channel.emit({ type: "meanthis.widget.layout", mode: "workbar", width: 209 });
+    expect(controller.element.style.width).toBe("209px");
+    channel.emit({ type: "meanthis.widget.layout", mode: "workbar", width: 199 });
+    channel.emit({ type: "meanthis.widget.layout", mode: "scope", width: 239, height: 224 });
+    expect(controller.element.style.width).toBe("209px");
     channel.emit({ type: "meanthis.widget.layout", mode: "workbar", width: 292 });
     expect(controller.element.style.width).toBe("292px");
     expect(controller.element.style.height).toBe("64px");

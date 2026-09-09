@@ -4,11 +4,11 @@ import type {
   AnnotationSurfaceCopyResult,
   AnnotationSurfaceReadback,
 } from "@meanthis/web-picker";
-import { formatAnnotationLabel } from "@meanthis/web-picker";
 import type { PanelSessionController, PanelSessionSnapshot } from "./panel-session-controller";
 import {
   derivePanelCurrentScope,
   findPanelSessionItem,
+  getPanelSessionAnnotationLabels,
   summarizePanelSessionRows,
 } from "./panel-session-model";
 
@@ -71,6 +71,34 @@ export function createPanelAnnotationSurfaceAdapter(
     controller.getSnapshot(),
     options.getCurrentScopeItemIds ? options.getCurrentScopeItemIds() : undefined,
   );
+  const assertRemovalContext = (expected: PanelSessionSnapshot, actual: PanelSessionSnapshot) => {
+    if (actual.status.kind === "error") throw new Error(actual.status.message);
+    const beforePage = expected.activePage;
+    const afterPage = actual.activePage;
+    if (expected.origin !== actual.origin || expected.epoch !== actual.epoch ||
+        beforePage?.tabId !== afterPage?.tabId || beforePage?.frameId !== afterPage?.frameId ||
+        beforePage?.origin !== afterPage?.origin || beforePage?.pathname !== afterPage?.pathname ||
+        beforePage?.documentId !== afterPage?.documentId) {
+      throw new Error(strings.sessionNotReady);
+    }
+  };
+  const removeAndReadBack = async (itemId: string, expected: PanelSessionSnapshot) => {
+    assertRemovalContext(expected, controller.getSnapshot());
+    await controller.removeItem(itemId);
+    let after = controller.getSnapshot();
+    // A concurrent notification can supersede the mutation's snapshot request
+    // even though storage committed. Reconcile the snapshot; never repeat deletion
+    // or erase a reported storage/cleanup error with a refresh.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      assertRemovalContext(expected, after);
+      if (!findPanelSessionItem(after.file, itemId)) return after;
+      await controller.refreshActiveOrigin();
+      after = controller.getSnapshot();
+    }
+    assertRemovalContext(expected, after);
+    if (findPanelSessionItem(after.file, itemId)) throw new Error(strings.operationFailed);
+    return after;
+  };
   return {
     async activate(itemId) {
       await controller.refreshActiveOrigin(itemId);
@@ -131,11 +159,7 @@ export function createPanelAnnotationSurfaceAdapter(
       if (!findPanelSessionItem(controller.getSnapshot().file, itemId)) {
         throw new Error(strings.sessionNotReady);
       }
-      await controller.removeItem(itemId);
-      const after = controller.getSnapshot();
-      if (findPanelSessionItem(after.file, itemId)) {
-        throw new Error(after.status.kind === "error" ? after.status.message : strings.operationFailed);
-      }
+      const after = await removeAndReadBack(itemId, controller.getSnapshot());
       return toPanelAnnotationSurfaceReadback(
         after,
         options.getCurrentScopeItemIds ? options.getCurrentScopeItemIds() : undefined,
@@ -167,12 +191,9 @@ export function createPanelAnnotationSurfaceAdapter(
       ));
       for (const itemId of uniqueItemIds) {
         await controller.refreshActiveOrigin(itemId);
+        assertRemovalContext(before, controller.getSnapshot());
         if (!findPanelSessionItem(controller.getSnapshot().file, itemId)) continue;
-        await controller.removeItem(itemId);
-        const after = controller.getSnapshot();
-        if (findPanelSessionItem(after.file, itemId)) {
-          throw new Error(after.status.kind === "error" ? after.status.message : strings.operationFailed);
-        }
+        await removeAndReadBack(itemId, before);
       }
       return readCurrent();
     },
@@ -197,6 +218,7 @@ export function toPanelAnnotationSurfaceReadback(
     authoritativeItemIds === undefined ? undefined : new Set(authoritativeItemIds ?? []),
   );
   const currentItemIds = new Set(currentScope.itemIds);
+  const annotationLabels = getPanelSessionAnnotationLabels(snapshot.file);
   const rows = summarizePanelSessionRows(
     snapshot.file,
     currentScope.selectedItemId,
@@ -204,13 +226,17 @@ export function toPanelAnnotationSurfaceReadback(
     snapshot.activePage,
   ).filter((row) => currentItemIds.has(row.id));
   return {
-    items: rows.map((row, index) => {
+    items: rows.map((row) => {
       const item = findPanelSessionItem(snapshot.file, row.id);
       return {
         itemId: row.id,
-        label: formatAnnotationLabel(index),
+        label: annotationLabels.get(row.id)!,
         name: row.target,
-        taskNote: item?.sourceRecord.intent ?? "",
+        // Saving emits before the durable record changes. Keep the selected
+        // item's draft visible so continued typing cannot adopt the old value.
+        taskNote: snapshot.intentDirty && row.id === snapshot.selectedItemId
+          ? snapshot.intent
+          : item?.sourceRecord.intent ?? "",
         annotationLifecycle: item && "annotationId" in item
           ? "annotationLifecycle" in item
             ? { ...item.annotationLifecycle }

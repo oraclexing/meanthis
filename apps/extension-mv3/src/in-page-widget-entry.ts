@@ -729,8 +729,27 @@ export function projectInPageWidgetStatus(
     value: InPageWidgetViewModel["status"];
     revision: number;
   }>,
+  taskNote?: Readonly<{
+    snapshot: Pick<PanelSessionSnapshot,
+      "selectedItemId" | "intentDirty" | "clearPending" | "sessionMutationPending" | "status"> | null;
+    activeItemId: string | null;
+    strings: { saving: string; taskNoteSaveFailed: string };
+  }>,
 ): InPageWidgetViewModel["status"] {
-  return annotation.revision > local.revision ? annotation.value : local.value;
+  const current = annotation.revision > local.revision ? annotation.value : local.value;
+  const snapshot = taskNote?.snapshot;
+  if (!snapshot?.intentDirty || !snapshot.selectedItemId ||
+      snapshot.selectedItemId !== taskNote?.activeItemId ||
+      snapshot.clearPending || snapshot.sessionMutationPending) return current;
+  // Autosave runs outside annotation actions. Its failed draft remains relevant
+  // until saved or discarded, even if another action has since succeeded.
+  if (snapshot.status.kind === "error") {
+    return { kind: "error", message: taskNote.strings.taskNoteSaveFailed };
+  }
+  if (snapshot.status.kind === "saving" && current?.kind !== "error") {
+    return { kind: "info", message: taskNote.strings.saving };
+  }
+  return current;
 }
 
 export function dispatchInPageWidgetLifecycleExit(
@@ -1195,6 +1214,16 @@ async function initializeAuthenticated(): Promise<void> {
         void annotationSurface?.copy();
       },
       onClear: () => void annotationSurface?.requestClear(),
+      onDiscardRecovery: () => {
+        const activeController = controller;
+        if (!activeController) return;
+        void runAction(async () => {
+          await activeController.discardDirtyIntent();
+          if (activeController.getSnapshot().recovery) {
+            throw new Error(widgetStrings.operationFailed);
+          }
+        });
+      },
       onOpenSettings: () => {
         disarmClearConfirmation();
         frameScopeOpen = false;
@@ -1202,6 +1231,12 @@ async function initializeAuthenticated(): Promise<void> {
           ? selectionEnabled ? "selecting" : "ready"
           : "details");
         if (mode === "details") {
+          const intent = selectionIntentBarrier.beginIntent();
+          void runSelectionAction(intent, async () => {
+            selectionEnabled = await setWidgetSelectionEnabled(false, intent);
+            if (!intent.isCurrent()) return;
+            if (selectionEnabled) throw new Error(widgetStrings.operationFailed);
+          });
           // Another surface can connect while this widget is disconnected.
           // Refresh on entry so the acknowledgement controls reflect that link.
           void refreshBridgeState().then(() => {
@@ -2418,6 +2453,10 @@ async function runSelectionAction(
   }, intent, onSuccess);
 }
 
+export function projectWidgetRecoveryDraft(snapshot: Pick<PanelSessionSnapshot, "recovery">): string | null {
+  return snapshot.recovery?.intent ?? null;
+}
+
 function render(): void {
   if (!view || !latestSnapshot) return;
   const annotationState = annotationSurface?.getSnapshot();
@@ -2431,11 +2470,17 @@ function render(): void {
   const projectedStatus = projectInPageWidgetStatus(
     { value: annotationStatus, revision: annotationStatusRevision },
     { value: status, revision: localStatusRevision },
+    {
+      snapshot: latestSnapshot,
+      activeItemId: annotationState?.activeItemId ?? latestSnapshot.selectedItemId,
+      strings: widgetStrings,
+    },
   );
   const pageTargetCount = currentWidgetPageItemIds(latestSnapshot)?.length ?? 0;
   const siteTargetCount = currentWidgetSiteItemIds(latestSnapshot)?.length ?? pageTargetCount;
   view.update({
     mode: annotationState?.mode ?? mode,
+    selectionEnabled,
     readiness: annotationState?.readiness ?? "hydrating",
     bridgeState,
     bridgeInvitationRemainingSeconds: bridgeState === "pending"
@@ -2488,6 +2533,7 @@ function render(): void {
     ),
     activeItemId: annotationState?.activeItemId ?? latestSnapshot.selectedItemId,
     taskNote: annotationState?.taskNote ?? latestSnapshot.intent,
+    recoveryDraft: projectWidgetRecoveryDraft(latestSnapshot),
     shortcuts: selected && rows.length > 1
       ? [{
           id: "below",
@@ -2636,6 +2682,11 @@ function resolveWidgetLayout(): "collapsed" | "workbar" | "scope" | "expanded" {
   const projectedStatus = projectInPageWidgetStatus(
     { value: annotationStatus, revision: annotationStatusRevision },
     { value: status, revision: localStatusRevision },
+    {
+      snapshot: latestSnapshot,
+      activeItemId: annotationSurface?.getSnapshot().activeItemId ?? latestSnapshot?.selectedItemId ?? null,
+      strings: widgetStrings,
+    },
   );
   const effectiveManualCopyText = annotationSurface?.getSnapshot().manualCopyText ??
     privateDebugSummaryManualCopy?.text ?? manualCopyText;
@@ -2693,7 +2744,7 @@ function measureWorkbarWidth(): number {
     ? Math.max(panel.getBoundingClientRect().width, panel.scrollWidth)
     : 0;
   if (!Number.isFinite(measured) || measured <= 0) return 292;
-  return Math.min(480, Math.max(240, Math.ceil(measured)));
+  return Math.min(480, Math.max(200, Math.ceil(measured)));
 }
 
 function receiveOverlayAction(action: InPageWidgetActionMessage): void {

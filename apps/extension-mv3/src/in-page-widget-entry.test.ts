@@ -29,6 +29,7 @@ type CommandFailureCodeNormalizer =
   typeof import("./in-page-widget-entry")["normalizeWidgetCommandFailureCode"];
 
 let createInPageWidgetActionConsumer: ActionConsumerFactory;
+let projectWidgetRecoveryDraft: typeof import("./in-page-widget-entry")["projectWidgetRecoveryDraft"];
 let consumeInPageWidgetMore: ProductionMoreConsumer;
 let dispatchInPageWidgetLifecycleExit: LifecycleExitDispatcher;
 let registrationFailurePhase: RegistrationFailurePhase;
@@ -113,6 +114,7 @@ beforeAll(async () => {
     },
   });
   const entry = await import("./in-page-widget-entry");
+  projectWidgetRecoveryDraft = entry.projectWidgetRecoveryDraft;
   ({
     createInPageWidgetActionConsumer,
     consumeInPageWidgetMore,
@@ -162,6 +164,15 @@ test("keeps development command failure diagnostics code-only and bounded", () =
   );
   expect(normalizeWidgetCommandFailureCode("secret-token")).toBe("UNKNOWN");
   expect(normalizeWidgetCommandFailureCode(`A${"B".repeat(64)}`)).toBe("UNKNOWN");
+});
+
+describe("widget recovery projection", () => {
+  test("projects the removed target's full draft independently of canonical target state", () => {
+    const recovery = { oldOrigin: "https://example.test", oldEpoch: "epoch", itemId: "removed",
+      intent: "  Full draft\n中文\nlast line  ", pendingOrigin: "https://example.test" };
+    expect(projectWidgetRecoveryDraft({ recovery })).toBe(recovery.intent);
+    expect(projectWidgetRecoveryDraft({ recovery: null })).toBeNull();
+  });
 });
 
 describe("in-page widget private troubleshooting summary", () => {
@@ -1321,6 +1332,55 @@ describe("in-page widget production action consumer", () => {
       { value: annotationError, revision: 3 },
       { value: null, revision: 4 },
     )).toBeNull();
+  });
+
+  test("shows a current draft's autosave failure even after an unrelated success, then retires it after retry", () => {
+    const copyStatus = { value: { kind: "success" as const, message: "Copied." }, revision: 4 };
+    const localStatus = { value: null, revision: 3 };
+    const taskNote = {
+      snapshot: {
+        selectedItemId: "att_save",
+        intentDirty: true,
+        clearPending: false,
+        sessionMutationPending: false,
+        status: { kind: "error" as const, message: "Internal storage error." },
+      },
+      activeItemId: "att_save",
+      strings: { saving: "Saving…", taskNoteSaveFailed: "Task note was not saved." },
+    };
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, taskNote))
+      .toEqual({ kind: "error", message: "Task note was not saved." });
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, {
+      ...taskNote, snapshot: { ...taskNote.snapshot, status: { kind: "saving", message: "Saving intent." } },
+    })).toEqual({ kind: "info", message: "Saving…" });
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, {
+      ...taskNote, snapshot: { ...taskNote.snapshot, intentDirty: false },
+    })).toEqual(copyStatus.value);
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, {
+      ...taskNote, activeItemId: "att_cancel",
+    })).toEqual(copyStatus.value);
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, {
+      ...taskNote, snapshot: { ...taskNote.snapshot, clearPending: true },
+    })).toEqual(copyStatus.value);
+    expect(projectInPageWidgetStatus(copyStatus, localStatus, {
+      ...taskNote, snapshot: { ...taskNote.snapshot, sessionMutationPending: true },
+    })).toEqual(copyStatus.value);
+  });
+
+  test("an autosave progress message does not hide another action's error", () => {
+    const actionError = { kind: "error" as const, message: "Page access denied." };
+    expect(projectInPageWidgetStatus(
+      { value: actionError, revision: 4 },
+      { value: null, revision: 3 },
+      {
+        snapshot: {
+          selectedItemId: "att_save", intentDirty: true, clearPending: false,
+          sessionMutationPending: false, status: { kind: "saving", message: "Saving intent." },
+        },
+        activeItemId: "att_save",
+        strings: { saving: "Saving…", taskNoteSaveFailed: "Task note was not saved." },
+      },
+    )).toEqual(actionError);
   });
 
   test("ACKs a completed action only after that action is replayed on the replacement port", async () => {

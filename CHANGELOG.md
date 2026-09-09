@@ -4,6 +4,13 @@ English | [中文](./CHANGELOG_zh.md)
 
 All notable changes will be documented in this file.
 
+## Unreleased
+
+- Keep capture counts, deletion results, and task-note edits consistent between the floating widget and side panel, including saved-site cleanup and recovery after a failed save.
+- Show the active capture state when opening settings, preserve scroll position during connection updates, and soften the floating controls' edges and shadows.
+- Compare a saved capture with the current page through explicit, bounded observations.
+- Reduce repeated bridge startup checks and coalesce concurrent status refreshes without allowing timer requests to accumulate behind slow operations.
+
 ## [0.1.0] - Early testing
 
 - Initial MeanThis browser extension candidate.

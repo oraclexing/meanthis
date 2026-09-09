@@ -1098,6 +1098,407 @@ describe("extension session panel", () => {
     expect(controller.refreshActiveOrigin).toHaveBeenCalledTimes(1);
   });
 
+  test("clears an active saved origin through the stored command without page scope", async () => {
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const confirmations: string[] = [];
+    const controller = createFakeController({ epoch: "epoch-app" });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      randomUUID: () => "clear-active-origin",
+      confirm: (message) => {
+        confirmations.push(message);
+        return true;
+      },
+    }));
+
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(confirmations).toEqual([
+      "Clear the saved UI reference session for https://app.example.test? Captured targets and intents for this site will be removed.",
+    ]);
+    expect(storedSessions.clear).toHaveBeenCalledWith(
+      ORIGIN,
+      "epoch-app",
+      "clear-active-origin",
+    );
+    expect(controller.clearSession).not.toHaveBeenCalled();
+    expect(controller.refreshActiveOrigin).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(query("#saved-sites-count").textContent).toBe("0"));
+    expect(query("#saved-sites-status").textContent).toBe("Saved capture cleared.");
+  });
+
+  test("reports an active saved-origin clear failure without falling back to page clear", async () => {
+    const storedSessions = {
+      list: vi.fn(async () => ({
+        ok: true as const,
+        data: [storedOrigin(ORIGIN, "epoch-app", 2)],
+      })),
+      review: vi.fn(),
+      clear: vi.fn(async () => ({
+        ok: false as const,
+        code: "CAPTURE_FAILED" as const,
+        error: "Saved clear failed.",
+      })),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const confirmations: string[] = [];
+    const controller = createFakeController({ epoch: "epoch-app" });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      randomUUID: () => "clear-active-origin",
+      confirm: (message) => {
+        confirmations.push(message);
+        return true;
+      },
+    }));
+
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(confirmations).toEqual([
+      "Clear the saved UI reference session for https://app.example.test? Captured targets and intents for this site will be removed.",
+    ]);
+    expect(storedSessions.clear).toHaveBeenCalledWith(
+      ORIGIN,
+      "epoch-app",
+      "clear-active-origin",
+    );
+    expect(controller.clearSession).not.toHaveBeenCalled();
+    expect(controller.refreshActiveOrigin).not.toHaveBeenCalled();
+    expect(query("#saved-sites-status").textContent).toBe(
+      "Saved-capture action failed. Try again.",
+    );
+  });
+
+  test("discards the active site's dirty task note only after its saved clear succeeds", async () => {
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const confirmations: string[] = [];
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      randomUUID: () => "clear-dirty-origin",
+      confirm: (message) => {
+        confirmations.push(message);
+        return true;
+      },
+    }));
+
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(confirmations).toEqual([
+      "Clear the saved UI reference session for https://app.example.test? Captured targets and the unsaved task note currently being edited for this site will be removed.",
+    ]);
+    expect(controller.discardDirtyIntent).toHaveBeenCalledOnce();
+    expect(controller.refreshActiveOrigin).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot().intentDirty).toBe(false);
+  });
+
+  test("does not discard the active site's dirty task note when clearing another origin", async () => {
+    const otherOrigin = "https://admin.example.test";
+    const stored = [storedOrigin(otherOrigin, "epoch-admin", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const confirmations: string[] = [];
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: (message) => {
+        confirmations.push(message);
+        return true;
+      },
+    }));
+
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${otherOrigin}"]`).click();
+    await flushMicrotasks();
+
+    expect(confirmations).toEqual([
+      "Clear the saved UI reference session for https://admin.example.test? Captured targets and intents for this site will be removed.",
+    ]);
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().intentDirty).toBe(true);
+  });
+
+  test("keeps a dirty task note when saved-origin clear confirmation is declined", async () => {
+    const storedSessions = {
+      list: vi.fn(async () => ({
+        ok: true as const,
+        data: [storedOrigin(ORIGIN, "epoch-app", 2)],
+      })),
+      review: vi.fn(),
+      clear: vi.fn(),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+    const confirm = vi.fn(() => false);
+
+    await initializePanel(createPanelDependencies(controller, { storedSessions, confirm }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("unsaved task note"));
+    expect(storedSessions.clear).not.toHaveBeenCalled();
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().intentDirty).toBe(true);
+  });
+
+  test("does not discard a new dirty origin if saved clear resolves after the panel changes origin", async () => {
+    const clearGate = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(() => clearGate.promise),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await vi.waitFor(() => expect(storedSessions.clear).toHaveBeenCalledOnce());
+    controller.__setSnapshot({
+      origin: "https://admin.example.test",
+      epoch: "epoch-admin",
+      intentDirty: true,
+    });
+    stored.splice(0);
+    clearGate.resolve({ ok: true, data: emptyReadback(ORIGIN) });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().intentDirty).toBe(true);
+  });
+
+  test("does not discard a same-origin task note changed while saved clear is pending", async () => {
+    const clearGate = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(() => clearGate.promise),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await vi.waitFor(() => expect(storedSessions.clear).toHaveBeenCalledOnce());
+    controller.__setSnapshot({ intent: "A newer task note", intentDirty: true });
+    stored.splice(0);
+    clearGate.resolve({ ok: true, data: emptyReadback(ORIGIN) });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ intent: "A newer task note", intentDirty: true });
+  });
+
+  test("does not discard a task note created after a clean saved clear confirmation", async () => {
+    const clearGate = createDeferred<SessionCommandResponse<ActiveSessionReadback>>();
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(() => clearGate.promise),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: false });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await vi.waitFor(() => expect(storedSessions.clear).toHaveBeenCalledOnce());
+    controller.__setSnapshot({ intent: "Draft created after confirmation", intentDirty: true });
+    stored.splice(0);
+    clearGate.resolve({ ok: true, data: emptyReadback(ORIGIN) });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      intent: "Draft created after confirmation",
+      intentDirty: true,
+    });
+  });
+
+  test("treats a matching recovery origin as the dirty target for saved clear", async () => {
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({
+      epoch: "epoch-app",
+      intentDirty: true,
+      recovery: {
+        oldOrigin: ORIGIN,
+        oldEpoch: "epoch-app",
+        itemId: "att_cancel",
+        intent: "Unsaved old task note",
+        pendingOrigin: ORIGIN,
+      },
+    });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(controller.discardDirtyIntent).toHaveBeenCalledOnce();
+  });
+
+  test("does not refresh a dirty active origin from a pending saved clear readback", async () => {
+    const pendingOperationId = "clear-pending";
+    const pendingEpoch = "epoch-clear-pending";
+    let phase = 0;
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        phase += 1;
+        stored[0] = {
+          ...stored[0],
+          epoch: pendingEpoch,
+          clearPending: true,
+          activeClearOperationId: pendingOperationId,
+        };
+        return {
+          ok: true as const,
+          data: {
+            ...emptyReadback(origin),
+            epoch: pendingEpoch,
+            clearPending: true,
+            activeClearOperationId: pendingOperationId,
+          },
+        };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(phase).toBe(1);
+    expect(controller.refreshActiveOrigin).not.toHaveBeenCalled();
+    expect(controller.discardDirtyIntent).not.toHaveBeenCalled();
+    expect(stored[0].epoch).toBe(pendingEpoch);
+    expect(stored[0].clearPending).toBe(true);
+  });
+
+  test("discards recovery after retrying a pending clear whose epoch advanced", async () => {
+    const pendingOperationId = "clear-pending";
+    const pendingEpoch = "epoch-clear-pending";
+    let phase = 0;
+    const stored = [storedOrigin(ORIGIN, "epoch-app", 2)];
+    const storedSessions = {
+      list: vi.fn(async () => ({ ok: true as const, data: structuredClone(stored) })),
+      review: vi.fn(),
+      clear: vi.fn(async (origin: string) => {
+        if (phase === 0) {
+          phase = 1;
+          stored[0] = {
+            ...stored[0],
+            epoch: pendingEpoch,
+            clearPending: true,
+            activeClearOperationId: pendingOperationId,
+          };
+          return {
+            ok: true as const,
+            data: {
+              ...emptyReadback(origin),
+              epoch: pendingEpoch,
+              clearPending: true,
+              activeClearOperationId: pendingOperationId,
+            },
+          };
+        }
+        phase = 2;
+        stored.splice(0);
+        return { ok: true as const, data: emptyReadback(origin) };
+      }),
+      clearAll: vi.fn(async () => ({ ok: true as const, data: { clearedOrigins: [] } })),
+    };
+    const controller = createFakeController({ epoch: "epoch-app", intentDirty: true });
+
+    await initializePanel(createPanelDependencies(controller, {
+      storedSessions,
+      confirm: () => true,
+    }));
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+    expect(stored[0].epoch).toBe(pendingEpoch);
+    await vi.waitFor(() => expect(
+      query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).disabled,
+    ).toBe(false));
+
+    query<HTMLButtonElement>(`[data-clear-saved-origin="${ORIGIN}"]`).click();
+    await flushMicrotasks();
+
+    expect(phase).toBe(2);
+    expect(storedSessions.clear).toHaveBeenNthCalledWith(
+      2,
+      ORIGIN,
+      pendingEpoch,
+      pendingOperationId,
+    );
+    expect(controller.discardDirtyIntent).toHaveBeenCalledOnce();
+    expect(controller.discardDirtyIntent.mock.invocationCallOrder[0]).toBeLessThan(
+      controller.refreshActiveOrigin.mock.invocationCallOrder[0],
+    );
+  });
+
   test("retries a pending inactive saved origin with its exact id and no generator call", async () => {
     const pending = {
       ...storedOrigin("https://admin.example.test", "epoch-admin", 0),
@@ -2752,6 +3153,35 @@ describe("extension session panel", () => {
     expect(controller.getSnapshot().legacyRecord?.capturedAt).toBe(
       "2026-07-11T10:02:00.000Z",
     );
+  });
+
+  test.each(["foreign", "current", "invalid", "protocol", "other-origin", "redacted"] as const)("shows safe captured-page navigation for %s targets", async (kind) => {
+    const controller = createFakeController();
+    const snapshot = controller.getSnapshot();
+    const record = snapshot.file!.session.attachments.find((item) => item.id === "att_cancel")!.sourceRecord as OriginCaptureRecord;
+    const invalidUrls = { invalid: "https://user:secret@app.example.test/old", protocol: "javascript:alert(1)",
+      "other-origin": "https://unrelated.example/old", redacted: `${ORIGIN}/[redacted:private]` };
+    const invalid = kind !== "foreign" && kind !== "current";
+    record.pageUrl = invalid ? invalidUrls[kind] : `${ORIGIN}/${kind === "current" ? "settings" : "old"}?private=value#fragment`;
+    controller.__setSnapshot({ file: snapshot.file });
+    const openSavedRoute = vi.fn(async () => undefined);
+    await initializePanel(createPanelDependencies(controller, { openSavedRoute }));
+    const open = query<HTMLButtonElement>("#selected-target-open-page");
+    expect(open.hidden).toBe(kind !== "foreign");
+    expect(query("#selected-target-page").textContent).toBe(invalid ? "Captured page unavailable" : `${ORIGIN}/${kind === "current" ? "settings" : "old"}`);
+    expect(query("#selected-target-page").textContent).not.toContain("private");
+    open.click();
+    await flushMicrotasks();
+    expect(openSavedRoute).toHaveBeenCalledTimes(kind === "foreign" ? 1 : 0);
+    if (kind === "foreign") {
+      expect(openSavedRoute).toHaveBeenCalledWith(`${ORIGIN}/old`);
+      expect(query("#selected-target-page-help").textContent).toContain("another page");
+      const staleClick = open.onclick!;
+      controller.__setSnapshot({ selectedItemId: "att_save" });
+      staleClick.call(open, new MouseEvent("click"));
+      await flushMicrotasks();
+      expect(openSavedRoute).toHaveBeenCalledTimes(1);
+    }
   });
 
   test("opens the extension settings from the header gear", async () => {
@@ -4618,6 +5048,56 @@ describe("extension session panel", () => {
     query<HTMLButtonElement>("#discard-intent").click();
     expect(controller.retryDirtyIntent).toHaveBeenCalledTimes(1);
     expect(controller.discardDirtyIntent).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([true, false])("keeps a removed target's recovery draft separate with current target=%s", async (hasCurrent) => {
+    const draft = "Unsaved removed target\n完整草稿 <keep>";
+    const controller = createFakeController({ recovery: { oldOrigin: ORIGIN, oldEpoch: "epoch-1",
+      itemId: "removed-item", intent: draft, pendingOrigin: ORIGIN }, intentDirty: false });
+    if (!hasCurrent) {
+      const file = controller.getSnapshot().file!;
+      file.session.attachments = [];
+      controller.__setSnapshot({ file, selectedItemId: null, legacyRecord: null, intent: "" });
+    }
+    await initializePanel(createPanelDependencies(controller));
+    const recovery = query<HTMLTextAreaElement>("#intent-recovery-draft");
+    expect(recovery.readOnly).toBe(true);
+    expect(recovery.value).toBe(draft);
+    expect(query("#intent-recovery").hidden).toBe(false);
+    expect(query<HTMLTextAreaElement>("#intent").value).toBe(hasCurrent ? "Update Cancel" : "");
+    expect(controller.setIntent).not.toHaveBeenCalled();
+    controller.__setSnapshot({ recovery: null });
+    expect(query("#intent-recovery").hidden).toBe(true);
+    expect(recovery.value).toBe("");
+  });
+
+  test("preserves session-group disclosure choices until context or selection changes", async () => {
+    const controller = createFakeController();
+    const file = controller.getSnapshot().file!;
+    (file.session.attachments[0]!.sourceRecord as OriginCaptureRecord).pageUrl = `${ORIGIN}/old`;
+    controller.__setSnapshot({ file });
+    await initializePanel(createPanelDependencies(controller));
+    const other = () => query<HTMLDetailsElement>('.session-group:not(.current)');
+    expect(other().open).toBe(false);
+    other().querySelector("summary")!.click();
+    expect(other().open).toBe(true);
+    controller.__setSnapshot({ status: { kind: "ready", message: "Refreshed" } });
+    expect(other().open).toBe(true);
+    other().querySelector("summary")!.click();
+    controller.__setSnapshot({ status: { kind: "ready", message: "Refreshed again" } });
+    expect(other().open).toBe(false);
+    controller.__setSnapshot({ selectedItemId: "att_save" });
+    expect(other().open).toBe(true);
+    other().querySelector("summary")!.click();
+    controller.__setSnapshot({ status: { kind: "ready", message: "Selected refresh" } });
+    expect(other().open).toBe(false);
+    controller.__setSnapshot({ selectedItemId: "att_cancel" });
+    other().open = true;
+    controller.__setSnapshot({ epoch: "replacement-epoch" });
+    expect(other().open).toBe(false);
+    other().open = true;
+    controller.__setSnapshot({ origin: "https://another.example" });
+    expect(other().open).toBe(false);
   });
 
   test("disables local intent editing during recovery clear pending and no selected session item", async () => {
@@ -7078,6 +7558,50 @@ describe("extension session panel", () => {
     expect(localBridge.publish).not.toHaveBeenCalled();
   });
 
+  test("coalesces a slow approval refresh while the one-second timer keeps firing", async () => {
+    const intervals: Array<{ callback: () => void; delay: number }> = [];
+    const pendingStatus = {
+      ...disconnectedBridgeStatus(),
+      pending: true,
+      approvalMode: "ask" as const,
+      requestText: "request",
+      expiresAt: "2026-07-17T04:32:00.000Z",
+    };
+    let release!: (status: typeof pendingStatus) => void;
+    const slowRefresh = new Promise<typeof pendingStatus>((resolve) => {
+      release = resolve;
+    });
+    const localBridge = {
+      readStatus: vi.fn(async () => pendingStatus),
+      createConnectionRequest: vi.fn(),
+      refreshConnection: vi.fn(() => slowRefresh),
+      refreshConnectionAndHeartbeat: vi.fn(async () => disconnectedBridgeStatus()),
+      publish: vi.fn(async () => true),
+      disconnect: vi.fn(async () => undefined),
+    };
+    await initializePanel(createPanelDependencies(createFakeController(), {
+      localBridge,
+      setInterval: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+    }));
+    await flushMicrotasks();
+    const refreshTimer = intervals.filter((interval) => interval.delay === 1_000).at(-1);
+    expect(refreshTimer).toBeDefined();
+
+    refreshTimer?.callback();
+    await vi.waitFor(() => expect(localBridge.refreshConnection).toHaveBeenCalledOnce());
+    for (let index = 0; index < 5; index += 1) refreshTimer?.callback();
+    expect(localBridge.refreshConnection).toHaveBeenCalledOnce();
+
+    release(pendingStatus);
+    await vi.waitFor(() => expect(localBridge.refreshConnection).toHaveBeenCalledTimes(1));
+    await flushMicrotasks();
+    refreshTimer?.callback();
+    await vi.waitFor(() => expect(localBridge.refreshConnection).toHaveBeenCalledTimes(2));
+  });
+
   test("replaces a cleared nonempty selection with focused page context", async () => {
     const localBridge = {
       readStatus: vi.fn(async () => connectedBridgeStatus()),
@@ -7460,6 +7984,8 @@ function createPanelDom(): string {
         </div>
         <button id="clear-session" class="session-reset" type="button">Clear selected elements</button>
         <div id="intent-recovery" hidden>
+          <label for="intent-recovery-draft">Unsaved task note</label>
+          <textarea id="intent-recovery-draft" readonly></textarea>
           <button id="retry-intent" type="button">Retry save</button>
           <button id="discard-intent" type="button">Discard changes</button>
         </div>
@@ -7489,6 +8015,9 @@ function createPanelDom(): string {
             <div><dt>Selected element</dt><dd id="selected-target-full"></dd></div>
             <div><dt>Captured</dt><dd id="selected-target-captured-at"></dd></div>
             <div><dt>Source</dt><dd id="selected-target-source"></dd></div>
+            <div><dt>Captured page</dt><dd id="selected-target-page"></dd></div>
+            <p id="selected-target-page-help" hidden></p>
+            <button id="selected-target-open-page" hidden>Open captured page</button>
             <div id="selected-target-rebind-row" hidden>
               <dt>Current page</dt>
               <dd id="selected-target-rebind-status" class="session-rebind-status"></dd>

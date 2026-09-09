@@ -1697,6 +1697,461 @@ describe("extension local agent bridge client", () => {
     });
   });
 
+  test("coalesces concurrent read-status calls into one acknowledgement read", async () => {
+    const capture = createStructuredCapture();
+    const snapshot: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Agent-safe handoff.",
+      capture,
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: snapshot,
+        panelSnapshot: snapshot,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: snapshot,
+      },
+    });
+    let release!: (response: Response) => void;
+    harness.fetch.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const first = client.readStatus();
+    const second = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    expect(second).toBe(first);
+    release(new Response("null", { status: 200 }));
+
+    await expect(first).resolves.toMatchObject({
+      connected: true,
+      readAcknowledgementState: "waiting",
+    });
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("coalesces concurrent approval refresh calls into one bridge request", async () => {
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        pending: pendingRequest(),
+      },
+    });
+    let release!: (response: Response) => void;
+    harness.fetch.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const first = client.refreshConnection();
+    const second = client.refreshConnection();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    expect(second).toBe(first);
+    release(connectionResponse("pending"));
+
+    await expect(first).resolves.toMatchObject({
+      connected: false,
+      pending: true,
+    });
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("coalesces concurrent heartbeat refresh calls into one heartbeat", async () => {
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+      },
+    });
+    let release!: (response: Response) => void;
+    harness.fetch.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      release = resolve;
+    }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const first = client.refreshConnectionAndHeartbeat();
+    const second = client.refreshConnectionAndHeartbeat();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    expect(second).toBe(first);
+    release(new Response(null, { status: 204 }));
+
+    await expect(first).resolves.toMatchObject({
+      connected: true,
+      instanceId: "instance-0123456789ab",
+    });
+    expect(harness.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("reuses a heartbeat refresh queued before a mutation settles", async () => {
+    const initial = {
+      page: null,
+      attachmentCount: 1,
+      agentCopy: "Initial handoff.",
+    };
+    const next = {
+      page: null,
+      attachmentCount: 0,
+      agentCopy: "Replacement handoff.",
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: initial,
+        panelSnapshot: initial,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: initial,
+      },
+    });
+    let releasePublish!: (response: Response) => void;
+    let releaseHeartbeat!: (response: Response) => void;
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releasePublish = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseHeartbeat = resolve;
+      }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const publishing = client.publish(next);
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    const firstRefresh = client.refreshConnectionAndHeartbeat();
+
+    releasePublish(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(2));
+    const secondRefresh = client.refreshConnectionAndHeartbeat();
+    expect(secondRefresh).toBe(firstRefresh);
+
+    releaseHeartbeat(new Response(null, { status: 204 }));
+    await expect(publishing).resolves.toBe(true);
+    await expect(firstRefresh).resolves.toMatchObject({
+      connected: true,
+      sharedSequence: 2,
+    });
+    await expect(secondRefresh).resolves.toMatchObject({
+      connected: true,
+      sharedSequence: 2,
+    });
+    expect(harness.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not reuse a read-status promise across a queued publish", async () => {
+    const capture = createStructuredCapture();
+    const initial: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Initial handoff.",
+      capture,
+    };
+    const next: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: 0,
+      agentCopy: "Replacement handoff.",
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: initial,
+        panelSnapshot: initial,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: initial,
+      },
+    });
+    let releaseFirstRead!: (response: Response) => void;
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseFirstRead = resolve;
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response("null", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const first = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    const publishing = client.publish(next);
+    await expect(publishing).resolves.toBe(true);
+    const second = client.readStatus();
+    expect(second).not.toBe(first);
+    releaseFirstRead(new Response("null", { status: 200 }));
+
+    await expect(first).resolves.toMatchObject({ readAcknowledgementState: "waiting" });
+    await expect(second).resolves.toMatchObject({
+      connected: true,
+      sharedSequence: 2,
+    });
+    expect(harness.fetch.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:38471/v1/capture-read-acknowledgement",
+      "http://127.0.0.1:38471/v1/snapshot",
+    ]);
+  });
+
+  test("does not reuse a read-status promise across a queued heartbeat", async () => {
+    const capture = createStructuredCapture();
+    const snapshot: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Agent-safe handoff.",
+      capture,
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: snapshot,
+        panelSnapshot: snapshot,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: snapshot,
+      },
+    });
+    let releaseFirstRead!: (response: Response) => void;
+    const waiting = () => new Response("null", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseFirstRead = resolve;
+      }))
+      .mockResolvedValueOnce(waiting())
+      .mockResolvedValueOnce(waiting())
+      .mockResolvedValueOnce(waiting());
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const first = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    const heartbeat = client.refreshConnectionAndHeartbeat();
+    const second = client.readStatus();
+    expect(second).not.toBe(first);
+    releaseFirstRead(waiting());
+
+    await expect(first).resolves.toMatchObject({
+      sharedSequence: 1,
+      readAcknowledgementState: "waiting",
+    });
+    await expect(heartbeat).resolves.toMatchObject({
+      connected: true,
+      sharedSequence: 1,
+      readAcknowledgementState: "waiting",
+    });
+    await expect(second).resolves.toMatchObject({
+      sharedSequence: 1,
+      readAcknowledgementState: "waiting",
+    });
+    expect(harness.fetch).toHaveBeenCalledTimes(4);
+    expect(harness.fetch.mock.calls.filter(([url]) => (
+      url === "http://127.0.0.1:38471/v1/heartbeat"
+    ))).toHaveLength(1);
+    expect(harness.fetch.mock.calls.filter(([url]) => (
+      url === "http://127.0.0.1:38471/v1/capture-read-acknowledgement"
+    ))).toHaveLength(3);
+  });
+
+  test("does not let a slow acknowledgement read block a publish", async () => {
+    const capture = createStructuredCapture();
+    const initial: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Initial handoff.",
+      capture,
+    };
+    const next: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: 0,
+      agentCopy: "Replacement handoff.",
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: initial,
+        panelSnapshot: initial,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: initial,
+      },
+    });
+    let releaseRead!: (response: Response) => void;
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseRead = resolve;
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const reading = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    const publishing = client.publish(next);
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(2));
+    expect(harness.fetch.mock.calls[1]?.[0]).toBe(
+      "http://127.0.0.1:38471/v1/snapshot",
+    );
+    await expect(publishing).resolves.toBe(true);
+    releaseRead(new Response("null", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await expect(reading).resolves.toMatchObject({
+      connected: true,
+      readAcknowledgementState: "waiting",
+    });
+  });
+
+  test("invalidates a pending read-status promise after a publish settles", async () => {
+    const capture = createStructuredCapture();
+    const initial: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Initial handoff.",
+      capture,
+    };
+    const next: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: 0,
+      agentCopy: "Replacement handoff.",
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: initial,
+        panelSnapshot: initial,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: initial,
+      },
+    });
+    let releaseRead!: (response: Response) => void;
+    let releasePublish!: (response: Response) => void;
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releasePublish = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseRead = resolve;
+      }));
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const publishing = client.publish(next);
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+    const reading = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(2));
+
+    releasePublish(new Response(null, { status: 204 }));
+    await expect(publishing).resolves.toBe(true);
+
+    const afterPublish = client.readStatus();
+    expect(afterPublish).not.toBe(reading);
+    await expect(afterPublish).resolves.toMatchObject({
+      connected: true,
+      sharedSequence: 2,
+    });
+
+    releaseRead(new Response("null", { status: 200 }));
+    await expect(reading).resolves.toMatchObject({
+      connected: true,
+      readAcknowledgementState: "waiting",
+    });
+  });
+
+  test("invalidates a pending read-status promise after disconnect settles with an acknowledgement error", async () => {
+    const capture = createStructuredCapture();
+    const published: LocalAgentBridgePublishInput = {
+      page: null,
+      attachmentCount: capture.targets.length,
+      agentCopy: "Agent-safe handoff.",
+      capture,
+    };
+    const harness = createHarness({
+      persistent: { installationId: INSTALLATION_ID },
+      session: {
+        browserSessionId: BROWSER_SESSION_ID,
+        instanceId: "instance-0123456789ab",
+        token: TOKEN,
+        sequence: 1,
+        latestSnapshot: published,
+        panelSnapshot: published,
+        activeSnapshotSource: "panel",
+        publishedSnapshot: published,
+      },
+    });
+    let releaseRead!: (response: Response) => void;
+    let releaseDisconnect!: (response: Response) => void;
+    harness.fetch
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseRead = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        releaseDisconnect = resolve;
+      }));
+    let signalCredentialClear!: () => void;
+    let releaseCredentialClear!: () => void;
+    const credentialClearReached = new Promise<void>((resolve) => {
+      signalCredentialClear = resolve;
+    });
+    const credentialClear = new Promise<void>((resolve) => {
+      releaseCredentialClear = resolve;
+    });
+    const originalSet = harness.dependencies.sessionStorage.set;
+    harness.dependencies.sessionStorage.set = async (items: Record<string, unknown>) => {
+      signalCredentialClear();
+      await credentialClear;
+      await originalSet(items);
+    };
+    const client = createLocalAgentBridgeClient(harness.dependencies);
+
+    const disconnecting = client.disconnect();
+    await credentialClearReached;
+    const reading = client.readStatus();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(1));
+
+    releaseCredentialClear();
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(2));
+    releaseDisconnect(new Response(null, { status: 503 }));
+    await disconnecting;
+
+    const afterDisconnect = client.readStatus();
+    expect(afterDisconnect).not.toBe(reading);
+    await expect(afterDisconnect).resolves.toMatchObject({
+      connected: false,
+      pending: false,
+    });
+
+    releaseRead(new Response(null, { status: 503 }));
+    await expect(reading).resolves.toMatchObject({
+      connected: true,
+      readAcknowledgementState: "unavailable",
+    });
+  });
+
   test("heartbeats an acknowledged live-page snapshot without downgrading or advancing it", async () => {
     const liveSnapshot: LocalAgentBridgePublishInput = {
       page: {

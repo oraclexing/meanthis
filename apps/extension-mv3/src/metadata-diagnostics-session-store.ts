@@ -43,6 +43,15 @@ export interface MetadataDiagnosticsSessionCurrentIdentityV1 {
   fingerprint: MetadataDiagnosticsSessionFingerprintItemV1[];
 }
 
+/**
+ * Reports whether the diagnostics binding schema can express this identity.
+ * False alone does not authorize deletion; callers must first verify canonical
+ * session state before treating an unsupported identity as having no binding.
+ */
+export function canBindMetadataDiagnosticsSessionIdentity(origin: string, value: unknown): boolean {
+  return parseCurrentIdentity(origin, value) !== null;
+}
+
 export interface MetadataDiagnosticsSessionStore {
   /** Return the sidecar only when every supplied identity field matches. */
   read(

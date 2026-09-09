@@ -601,6 +601,7 @@ export function createMeanThisWebWidget(
     const surface = annotationSurface?.getSnapshot();
     return {
       mode: surface?.mode ?? "collapsed",
+      selectionEnabled: selecting,
       readiness: surface?.readiness ?? "hydrating",
       bridgeState: "unavailable",
       disclosureRequired: false,
@@ -818,6 +819,8 @@ function applyHostStyle(
     "border-radius": collapsed || workbar ? "999px" : "18px",
     "box-shadow": workbar
       ? "0 14px 34px rgb(0 0 0 / 38%), 0 2px 8px rgb(0 0 0 / 24%)"
+      : collapsed
+      ? "0 6px 18px rgb(0 0 0 / 24%), 0 1px 4px rgb(0 0 0 / 16%)"
       : "none",
     "pointer-events": "auto",
     "z-index": "2147483647",

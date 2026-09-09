@@ -300,6 +300,8 @@ export function createPanelSessionController(
     activePage: ActivePageContext | null = snapshot.activePage,
     currentItemIds: readonly string[] | null = snapshot.currentItemIds,
     metadataDiagnostics: unknown = null,
+    recovery: PanelSessionSnapshot["recovery"] = null,
+    recoveryMessage = "Resolve the unsaved intent before changing this session.",
   ): boolean {
     if (readback === null) {
       pendingClearOperationId = null;
@@ -352,8 +354,10 @@ export function createPanelSessionController(
       selectedItemId,
       intent: selectedItem?.sourceRecord.intent ?? "",
       intentDirty: false,
-      recovery: null,
-      status: clearStatus.clearPending
+      recovery,
+      status: recovery
+        ? { kind: "error", message: recoveryMessage }
+        : clearStatus.clearPending
         ? { kind: "saving", message: "A session clear is already in progress." }
         : hasSessionItems
           ? { kind: "ready", message: "Capture session ready." }
@@ -367,6 +371,29 @@ export function createPanelSessionController(
     stateRevision += 1;
     emit();
     return true;
+  }
+
+  function applyActiveWithRecovery(
+    data: ActiveSessionCommandData,
+    recovery: NonNullable<PanelSessionSnapshot["recovery"]>,
+    message?: string,
+  ): boolean {
+    const readback = data.readback === null
+      ? null
+      : parseAuthoritativeActiveSessionReadback(data.readback);
+    if (!data.enabled || data.origin !== recovery.oldOrigin ||
+        readback?.origin !== recovery.oldOrigin || readback.epoch !== recovery.oldEpoch) {
+      return false;
+    }
+    return applyActive(
+      readback,
+      snapshot.selectedItemId,
+      data.activePage,
+      data.currentItemIds === undefined ? null : data.currentItemIds,
+      readActiveMetadataDiagnostics(data),
+      recovery,
+      message,
+    );
   }
 
   function getCurrentMutationTarget(): { origin: string; epoch: string; itemId: string } | null {
@@ -395,13 +422,14 @@ export function createPanelSessionController(
 
   async function flushCurrentIntent(request: SnapshotRequest): Promise<boolean> {
     lastFlushBlockMessage = "";
-    if (!snapshot.intentDirty) return true;
     if (snapshot.recovery) {
       lastFlushBlockMessage = "Resolve the unsaved intent before changing this session.";
       setStatus("error", lastFlushBlockMessage);
       emit();
       return false;
     }
+
+    if (!snapshot.intentDirty) return true;
 
     const target = getCurrentMutationTarget();
     if (!target) {
@@ -526,16 +554,24 @@ export function createPanelSessionController(
     },
 
     async refreshActiveOrigin(preferredCaptureItemId) {
-      if (snapshot.recovery) {
-        setStatus("error", "Resolve the unsaved intent before changing this session.");
-        emit();
-        return;
-      }
       const request = beginSnapshotRequest();
       cancelDebounce();
       const requestId = ++refreshRequestSequence;
       const startStateRevision = stateRevision;
       const startActivePage = snapshot.activePage;
+
+      if (snapshot.recovery) {
+        const recovery = snapshot.recovery;
+        const active = await options.client.getActive();
+        if (!isSnapshotRequestCurrent(request) || requestId !== refreshRequestSequence ||
+            stateRevision !== startStateRevision) return;
+        if (active.ok && applyActiveWithRecovery(active.data, recovery)) return;
+        setStatus("error", active.ok
+          ? "Resolve the unsaved intent before changing this session."
+          : active.error);
+        emit();
+        return;
+      }
 
       if (snapshot.intentDirty) {
         const oldTarget = getCurrentMutationTarget();
@@ -552,6 +588,19 @@ export function createPanelSessionController(
         }
         const activeCaptureItemId = getActiveCaptureItemId(active.data, preferredCaptureItemId);
         if (!oldTarget) return;
+        const recovery = {
+          oldOrigin: oldTarget.origin,
+          oldEpoch: oldTarget.epoch,
+          itemId: oldTarget.itemId,
+          intent: capturedIntent,
+          pendingOrigin: active.data.origin,
+        };
+        const readback = active.data.readback === null
+          ? null
+          : parseAuthoritativeActiveSessionReadback(active.data.readback);
+        if (readback?.origin === oldTarget.origin && readback.epoch === oldTarget.epoch &&
+            !findPanelSessionItem(readback.file, oldTarget.itemId) &&
+            applyActiveWithRecovery(active.data, recovery)) return;
         const response = await options.client.updateIntent(
           oldTarget.origin,
           oldTarget.epoch,
@@ -562,15 +611,10 @@ export function createPanelSessionController(
         if (requestId !== refreshRequestSequence) return;
         if (!isStillCurrentIntentTarget(oldTarget, capturedIntent, capturedRevision)) return;
         if (!response.ok) {
+          if (applyActiveWithRecovery(active.data, recovery, response.error)) return;
           snapshot = {
             ...snapshot,
-            recovery: {
-              oldOrigin: oldTarget.origin,
-              oldEpoch: oldTarget.epoch,
-              itemId: oldTarget.itemId,
-              intent: capturedIntent,
-              pendingOrigin: active.data.origin,
-            },
+            recovery,
             status: { kind: "error", message: response.error },
           };
           stateRevision += 1;
@@ -644,6 +688,7 @@ export function createPanelSessionController(
     },
 
     setIntent(intent) {
+      if (intent === snapshot.intent) return;
       if (snapshot.sessionMutationPending) {
         return;
       }
@@ -674,13 +719,13 @@ export function createPanelSessionController(
     },
 
     flushIntent() {
-      if (!snapshot.intentDirty) return Promise.resolve(true);
       if (snapshot.recovery) {
         lastFlushBlockMessage = "Resolve the unsaved intent before changing this session.";
         setStatus("error", lastFlushBlockMessage);
         emit();
         return Promise.resolve(false);
       }
+      if (!snapshot.intentDirty) return Promise.resolve(true);
       return flushCurrentIntent(beginSnapshotRequest());
     },
 
@@ -727,6 +772,21 @@ export function createPanelSessionController(
       const request = beginSnapshotRequest();
       if (snapshot.recovery) {
         const recovery = snapshot.recovery;
+        if (!snapshot.intentDirty && snapshot.origin === recovery.oldOrigin &&
+            snapshot.epoch === recovery.oldEpoch && snapshot.origin === recovery.pendingOrigin) {
+          // This draft is already separate from the authoritative selection.
+          // Discard only local text; another refresh must not cancel that choice.
+          snapshot = {
+            ...snapshot,
+            recovery: null,
+            status: snapshot.file?.session.attachments.length
+              ? { kind: "ready", message: "Capture session ready." }
+              : { kind: "empty", message: "No session for this origin. Capture an element to start one." },
+          };
+          stateRevision += 1;
+          emit();
+          return;
+        }
         const active = await loadActive(request);
         if (!active || !isSnapshotRequestCurrent(request)) return;
         const activeOrigin = active.ok

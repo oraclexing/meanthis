@@ -739,6 +739,39 @@ describe("detached MeanThis MCP HTTP owner", () => {
     expect(listedPackages.filter((value) => value === "resolver:ajv")).toHaveLength(2);
   });
 
+  test("reads a shared dependency manifest once per fingerprint without caching across fingerprints", () => {
+    const sharedEntry = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "shared", "package.json")).href;
+    const addedDependencyPath = join(dirname(fileURLToPath(import.meta.url)), "added", "index.js");
+    let dependencyAdded = false;
+    const loadManifest = vi.fn((_entryUrl: string, packageName: string) => ({
+      identityKey: packageName,
+      dependencies: packageName === "added" ? []
+        : packageName === "shared" ? (dependencyAdded ? ["added"] : []) : ["shared"],
+      optionalDependencies: [],
+      peerDependencies: [],
+      optionalPeerDependencies: new Set<string>(),
+    }));
+    const fingerprint = () => loadLocalBridgeMcpHttpOwnerIdentity({
+      executablePath: OWNER_IDENTITY.executablePath,
+      entryPath: OWNER_IDENTITY.entryPath,
+      readFile: (path) => Buffer.from(`bytes:${path}`),
+      resolveModule: resolveFromWorkspace,
+      resolveDependencyPackage: (name) => name === "added"
+        ? pathToFileURL(addedDependencyPath).href : sharedEntry,
+      loadPackageRuntimeManifest: loadManifest,
+      listPackageRuntimeFiles: (_url, name) => name === "added"
+        ? [{ relativePath: "index.js", path: addedDependencyPath }] : [],
+    });
+
+    const first = fingerprint();
+    expect(loadManifest.mock.calls.filter(([url]) => url === sharedEntry)).toHaveLength(1);
+    expect(fingerprint()).toEqual(first);
+    expect(loadManifest.mock.calls.filter(([url]) => url === sharedEntry)).toHaveLength(2);
+    dependencyAdded = true;
+    expect(fingerprint().buildHash).not.toEqual(first.buildHash);
+    expect(loadManifest.mock.calls.filter(([, name]) => name === "added")).toHaveLength(1);
+  });
+
   test("resolves the installed ESM package closure without an experimental Node flag", () => {
     expect(() => loadLocalBridgeMcpHttpOwnerIdentity({
       executablePath: process.execPath,

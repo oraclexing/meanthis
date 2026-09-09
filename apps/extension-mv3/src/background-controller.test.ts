@@ -7347,6 +7347,45 @@ describe("background active-origin and runtime commands", () => {
     expect(Object.hasOwn(afterUnarmedCapture.data, "metadataDiagnostics")).toBe(false);
   });
 
+  test.each([false, true])("removes a target while a valid long-id capture remains (diagnostics residue=%s)", async (hasResidue) => {
+    const chrome = createChromeHarness();
+    const route = configureTopFrameRuntimeCaptureRoute(chrome, `${ORIGIN}/settings`);
+    let serial = 0;
+    const store = createExtensionSessionStore({
+      storage: chrome.storage.local,
+      now: () => new Date("2026-09-09T04:00:00.000Z"),
+      randomUUID: () => `long-id-cleanup-${++serial}`,
+    });
+    const controller = createBackgroundController({ chrome, store });
+    const records = [createCaptureRecord("short", "Short target"), createCaptureRecord("x".repeat(128), "Long target")];
+    for (const record of records) {
+      record.pageUrl = route.url;
+      record.attachment.source.url = route.url;
+      const begun = await store.beginCapture(ORIGIN);
+      if (!begun.ok) throw new Error("Capture begin failed");
+      expect(await store.commitCapture(begun.value, record)).toMatchObject({ ok: true });
+    }
+    const before = await store.read(ORIGIN);
+    if (!before.ok || !before.value.file || !before.value.epoch) throw new Error("Canonical read failed");
+    const survivor = structuredClone(before.value.file.session.attachments[1]);
+    expect(survivor.id).toHaveLength(132);
+    const diagnosticsKey = getMetadataDiagnosticsSessionStorageKey(ORIGIN);
+    if (hasResidue) await chrome.storage.session.set({ [diagnosticsKey]: { obsolete: true } });
+    await chrome.storage.session.set({ [getMetadataDiagnosticsSessionStorageKey("https://other.example.test")]: { retained: true } });
+    await expect(dispatchRuntime(controller, {
+      type: "ui-attach:session-remove-item",
+      origin: ORIGIN,
+      epoch: before.value.epoch,
+      itemId: before.value.file.session.attachments[0].id,
+    }, createExtensionSender())).resolves.toMatchObject({ ok: true });
+    const after = await store.read(ORIGIN);
+    if (!after.ok || !after.value.file) throw new Error("Final canonical read failed");
+    expect(after.value.file.session.attachments).toEqual([survivor]);
+    expect((await chrome.storage.session.get(diagnosticsKey))[diagnosticsKey]).toBeUndefined();
+    expect((await chrome.storage.session.get(getMetadataDiagnosticsSessionStorageKey("https://other.example.test")))[getMetadataDiagnosticsSessionStorageKey("https://other.example.test")])
+      .toEqual({ retained: true });
+  });
+
   test("fails closed and retries diagnostics cleanup after an item removal already committed", async () => {
     const chrome = createChromeHarness();
     const route = configureTopFrameRuntimeCaptureRoute(chrome, `${ORIGIN}/settings`);
@@ -8343,7 +8382,67 @@ describe("background active-origin and runtime commands", () => {
     expect(chrome.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
-  test("restores a capture-verified content target across same-origin page views", async () => {
+  test.each([false, true])("does not let a foreign-page content anchor poison current-page restore (current=%s)", async (withCurrent) => {
+    const chrome = createChromeHarness();
+    const store = createStoreHarness();
+    const anchoredLocator = {
+      strategy: "css" as const,
+      value: 'article:has(a[href="/items/shared"]) button',
+      confidence: 0.64,
+      notes: "descendant anchored fallback",
+    };
+    const previous = {
+      ...createCaptureRecord("previous", "Shared target"),
+      pageUrl: `${ORIGIN}/feed`,
+      tabId: 7,
+      frameId: 0,
+    };
+    previous.attachment.locatorBundle.candidates.push(anchoredLocator);
+    previous.replayAttempts = [{
+      ...anchoredLocator,
+      replayVerified: true,
+      uniqueness: true,
+      failureReason: null,
+      matchCount: 1,
+      visible: true,
+    }];
+    const current = {
+      ...createCaptureRecord("current", "Current target"),
+      pageUrl: `${ORIGIN}/settings`,
+      tabId: 7,
+      frameId: 0,
+    };
+    current.attachment.locatorBundle.stability = {
+      ...current.attachment.locatorBundle.stability,
+      verifiedValue: current.attachment.locatorBundle.primary!.value,
+    };
+    const readback = createSessionReadbackMany(withCurrent ? [previous, current] : [previous]);
+    const savedBefore = structuredClone(readback);
+    store.read = vi.fn(async () => ({ ok: true, value: readback }));
+    configureSingleClearPage(chrome, "restore-current-document");
+    const sender = createExactClearSender(chrome, "restore-current-document");
+    const controller = createBackgroundController({ chrome, store });
+
+    const response = await dispatchRuntime(controller, {
+      type: "ui-attach:overlays-restore-get",
+    }, sender);
+    expect(isOverlayRestoreResponse(response)).toBe(true);
+    if (!isOverlayRestoreResponse(response)) throw new Error("Expected overlay restore");
+    expect(response.data.items.map(({ itemId, label }) => ({ itemId, label }))).toEqual(
+      withCurrent ? [{ itemId: "att_current", label: "2" }] : [],
+    );
+    await expect(dispatchRuntime(controller, {
+      type: UI_ATTACH_OVERLAY_PROJECTION_ACK,
+      projection: {
+        version: response.data.projection.version,
+        projectionId: response.data.projection.projectionId,
+        revision: response.data.projection.revision,
+      },
+    }, sender)).resolves.toEqual({ ok: true, data: { accepted: true } });
+    expect(readback).toEqual(savedBefore);
+  });
+
+  test("does not restore a foreign-page content anchor as a current-page annotation", async () => {
     const chrome = createChromeHarness();
     const store = createStoreHarness();
     const save = {
@@ -8404,17 +8503,7 @@ describe("background active-origin and runtime commands", () => {
           }),
         }),
         activeItemId: null,
-        items: [{
-          itemId: "att_save",
-          attachmentId: "att_save",
-          label: "1",
-          taskNote: "Update Likes 10",
-          locators: [{
-            strategy: anchoredLocator.strategy,
-            value: anchoredLocator.value,
-            confidence: anchoredLocator.confidence,
-          }],
-        }],
+        items: [],
       },
     });
   });
